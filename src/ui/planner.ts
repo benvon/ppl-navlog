@@ -25,6 +25,7 @@ import { renderRevisionHistory } from "./revision-history";
 import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
 import { renderWorkspaceLayout } from "./workspace-layout";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
+import { createPrintableNavlog } from "./printable-navlog";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -343,6 +344,11 @@ class Planner {
       if (calculated !== undefined) {
         section.append(calculated);
         section.append(this.renderRawWeatherEvidence());
+        if (isCalculatedRevision(this.state.currentRevision)) {
+          const print = button("Print / Save PDF", "button");
+          print.addEventListener("click", () => this.printCurrentRevision());
+          section.append(print);
+        }
         return section;
       }
     }
@@ -356,6 +362,20 @@ class Planner {
     section.append(table);
     if (this.state.draft === undefined) section.append(text("p", "Save a route draft to populate the table."));
     return section;
+  }
+
+  private printCurrentRevision(): void {
+    const revision = this.state.currentRevision;
+    if (revision === undefined) return;
+    const sheet = createPrintableNavlog(revision, this.state.weatherSnapshots);
+    if (sheet === undefined) {
+      this.feedback.textContent = "Only a complete saved calculated revision can be printed as a navlog PDF.";
+      return;
+    }
+    document.querySelector(".print-sheet")?.remove();
+    document.body.append(sheet);
+    window.addEventListener("afterprint", () => sheet.remove(), { once: true });
+    window.print();
   }
 
   private renderRawWeatherEvidence(): HTMLElement {

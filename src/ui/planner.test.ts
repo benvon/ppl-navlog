@@ -6,6 +6,7 @@ import type { PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import { renderPlanner } from "./planner";
+import { createCompleteFlightFixture } from "../test/fixtures/complete-flight";
 
 class MemoryPersistence implements NavlogPersistence {
   private readonly profiles = new Map<string, AircraftProfile>();
@@ -46,6 +47,29 @@ function clickByLabel(root: HTMLElement, label: string): void {
 }
 
 describe("planner shell", () => {
+  it("offers browser-local PDF printing only for a complete saved revision", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
+    renderPlanner(root, {
+      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
+      weatherEvidence: { getWeatherSnapshot: async (id) => fixture.weatherSnapshots.find((snapshot) => snapshot.id === id) },
+    });
+    await settle();
+    expect(root.textContent).not.toContain("Print / Save PDF");
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+    clickByLabel(root, "Print / Save PDF");
+    expect(print).toHaveBeenCalledOnce();
+    expect(document.querySelector(".print-sheet")?.textContent).toContain("Visual Flight Log");
+    window.dispatchEvent(new Event("afterprint"));
+    expect(document.querySelector(".print-sheet")).toBeNull();
+    print.mockRestore();
+  });
+
   it("walks through local airport resolution, profile saving, draft saving, and a guarded per-leg override", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
