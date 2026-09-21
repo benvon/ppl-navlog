@@ -1,7 +1,7 @@
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
-import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanRevision, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
+import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanFamily, PlanRevision, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
 import type { AirportLookup } from "../application/airport-lookup";
 import {
   applyCruiseTasOverride,
@@ -19,7 +19,10 @@ import {
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { WindsForecastAvailability } from "../../worker/api/contracts";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
+import type { BrowserWeatherRefresh } from "../application/browser-weather-refresh";
 import { renderCalculatedNavlog } from "./calculated-navlog";
+import { renderRevisionHistory } from "./revision-history";
+import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -28,7 +31,9 @@ export interface PlannerDependencies {
   readonly clock: UseCaseClock;
   readonly winds?: WindsTransportClient;
   readonly calculatePlan?: BrowserPlanCalculator;
+  readonly refreshWeather?: BrowserWeatherRefresh;
   readonly weatherEvidence?: { getWeatherSnapshot(id: string): Promise<WeatherReferenceSnapshot | undefined> };
+  readonly portability?: PlanPortabilityRepository;
 }
 
 interface PlannerState {
@@ -47,6 +52,8 @@ interface PlannerState {
   readonly selectedForecastValidTimeUtc?: string;
   readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
   readonly calculationPreview?: JsonValue;
+  readonly revisions: readonly PlanRevision[];
+  readonly families: readonly PlanFamily[];
 }
 
 interface RouteFormValues {
@@ -65,7 +72,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], routeForm: emptyRouteForm() };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm() };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -83,7 +90,8 @@ class Planner {
 
   public async initialize(): Promise<void> {
     try {
-      this.state = { ...this.state, profiles: await this.dependencies.persistence.listAircraftProfiles() };
+      const [profiles, families] = await Promise.all([this.dependencies.persistence.listAircraftProfiles(), this.dependencies.persistence.listPlanFamilies()]);
+      this.state = { ...this.state, profiles, families };
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -149,13 +157,57 @@ class Planner {
     const form = this.createRouteForm();
     const saveButton = button("Save new plan revision", "button");
     saveButton.addEventListener("click", () => void this.handleSaveDraft(form));
-    section.append(form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton);
+    section.append(this.renderSavedPlans(), form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton);
     if (this.dependencies.calculatePlan !== undefined) {
       const calculateButton = button("Calculate complete navlog", "button");
       calculateButton.addEventListener("click", () => void this.handleCalculatePlan());
       section.append(calculateButton);
     }
+    if (this.dependencies.refreshWeather !== undefined && isCalculatedRevision(this.state.currentRevision)) {
+      section.append(text("p", "Weather refresh uses the open saved revision's route, aircraft, and departure time; save any input edits first."));
+      const refreshButton = button("Refresh weather into new revision", "button");
+      refreshButton.addEventListener("click", () => void this.handleRefreshWeather());
+      section.append(refreshButton);
+    }
     this.appendReopenControl(section);
+    if (this.state.draft !== undefined) section.append(renderRevisionHistory({
+      revisions: this.state.revisions,
+      selectedRevisionId: this.state.currentRevision?.id,
+      onSelect: (id) => void this.openRevision(id),
+    }));
+    if (this.dependencies.portability !== undefined) section.append(renderPlanPortability(
+      this.dependencies.portability,
+      (message) => { this.feedback.textContent = message; },
+      async () => {
+        const [profiles, families] = await Promise.all([this.dependencies.persistence.listAircraftProfiles(), this.dependencies.persistence.listPlanFamilies()]);
+        this.state = { ...this.state, profiles, families };
+        if (this.state.draft !== undefined) await this.refreshRevisionHistory(this.state.draft.planId);
+        this.render();
+      },
+    ));
+    return section;
+  }
+
+  private renderSavedPlans(): HTMLElement {
+    const section = document.createElement("section");
+    section.className = "saved-plans";
+    section.append(text("h3", "Saved local plans"));
+    if (this.state.families.length === 0) {
+      section.append(text("p", "No saved plans in this browser yet."));
+      return section;
+    }
+    const list = document.createElement("ul");
+    this.state.families.forEach((family) => {
+      const item = document.createElement("li");
+      const open = button(`Open ${family.title}`, "button");
+      open.disabled = family.latestRevisionId === undefined;
+      open.addEventListener("click", () => {
+        if (family.latestRevisionId !== undefined) void this.openRevision(family.latestRevisionId);
+      });
+      item.append(open);
+      list.append(item);
+    });
+    section.append(list);
     return section;
   }
 
@@ -332,9 +384,9 @@ class Planner {
       return section;
     }
     const override = leg.performanceOverrides?.cruiseTasKnots;
-    section.append(text("p", `Cruise TAS default: ${profile.cruiseTasKnots} kt from ${profile.name}.`));
+    section.append(text("p", `Cruise TAS aircraft default: ${profile.cruiseTasKnots} kt from ${profile.name}.`));
     if (override !== undefined) {
-      section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. The original default remains ${override.computedValue} kt.`));
+      section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. Preserved aircraft default: ${override.computedValue} kt.`));
       const restore = button("Restore aircraft default", "button");
       restore.addEventListener("click", () => {
         this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined };
@@ -359,9 +411,11 @@ class Planner {
   private renderOverrideForm(draft: PlanDraft, profile: AircraftProfile, legId: string): HTMLFormElement {
     const form = document.createElement("form");
     form.className = "override-form";
-    form.append(text("p", "Override is limited to this leg. Applying it records both the profile default and your effective value."));
+    form.append(text("p", "This changes only this leg’s effective cruise TAS. Its cruise groundspeed, heading correction, ETE, fuel, and trip totals will be recalculated; the aircraft profile and other legs are unchanged."));
+    form.append(text("p", "Applying the override preserves the aircraft default alongside the effective value in the saved revision."));
     form.append(labeledInput("override-tas", "Effective cruise TAS (kt)", String(profile.cruiseTasKnots), "number"));
     form.append(labeledInput("override-reason", "Reason (optional)", ""));
+    form.append(overrideConfirmation());
     form.append(button("Apply deliberate override", "submit"), button("Cancel", "button"));
     form.querySelector<HTMLButtonElement>("button[type='button']")?.addEventListener("click", () => {
       this.state = { ...this.state, unlockedLegId: undefined };
@@ -369,6 +423,11 @@ class Planner {
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      const confirmation = form.querySelector<HTMLInputElement>("#override-confirmation");
+      if (confirmation?.checked !== true) {
+        this.feedback.textContent = "Confirm that you understand the per-leg TAS impact before applying an override.";
+        return;
+      }
       const value = inputValue(form, "override-tas");
       const reason = inputValue(form, "override-reason");
       try {
@@ -451,7 +510,8 @@ class Planner {
       const departure = this.state.departure;
       const destination = this.state.destination;
       if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
-      const route = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
+      const rebuiltRoute = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
+      const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route);
       const draft = createPlanDraft({
         id: this.state.draft?.id,
         planId: this.state.draft?.planId,
@@ -472,6 +532,8 @@ class Planner {
       );
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
       this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
+      await this.refreshRevisionHistory(saved.revision.planId);
+      await this.refreshSavedPlans();
       this.feedback.textContent = `Saved immutable revision ${saved.revision.id}.`;
       this.render();
     } catch (error) {
@@ -494,7 +556,40 @@ class Planner {
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
       this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined };
+      await this.refreshRevisionHistory(result.revision.planId);
+      await this.refreshSavedPlans();
       this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
+      this.render();
+    } catch (error) {
+      this.reportError(error);
+    }
+  }
+
+  private async handleRefreshWeather(): Promise<void> {
+    try {
+      const refresh = this.dependencies.refreshWeather;
+      const parent = this.state.currentRevision;
+      const selectedTime = this.state.selectedForecastValidTimeUtc;
+      if (refresh === undefined || parent === undefined) throw new Error("Open a calculated revision before refreshing weather.");
+      if (selectedTime === undefined) throw new Error("Load published winds periods and choose a forecast before refreshing weather.");
+      const selectedDraft = selectPlanWeatherForecast(
+        parent.draftSnapshot,
+        this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
+        selectedTime,
+        this.dependencies.clock,
+      );
+      const result = await refresh(parent, selectedDraft.weatherSelection);
+      if (result.status === "blocked") {
+        this.feedback.textContent = `Weather refresh blocked: ${result.message}`;
+        this.state = { ...this.state, calculationPreview: result.calculationSnapshot };
+        this.render();
+        return;
+      }
+      const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined };
+      await this.refreshRevisionHistory(result.revision.planId);
+      await this.refreshSavedPlans();
+      this.feedback.textContent = `Weather refreshed in immutable revision ${result.revision.id}; compare it with its parent in Saved revision history.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -519,13 +614,22 @@ class Planner {
   private async handleReopenRevision(): Promise<void> {
     const revision = this.state.currentRevision;
     if (revision === undefined) return;
+    await this.openRevision(revision.id);
+  }
+
+  private async openRevision(revisionId: string): Promise<void> {
     try {
-      const reopened = await reopenPlanRevision(this.dependencies.persistence, revision.id);
+      if (this.state.currentRevision !== undefined && this.state.currentRevision.id !== revisionId) {
+        if (!window.confirm("Opening another saved revision may discard unsaved form and draft edits. Continue?")) return;
+      }
+      const reopened = await reopenPlanRevision(this.dependencies.persistence, revisionId);
+      const revisions = await this.dependencies.persistence.listPlanRevisions(reopened.planId);
       const weatherSnapshots = await this.loadWeatherEvidence(reopened);
       this.state = {
         ...this.state,
         draft: reopened.draftSnapshot,
         currentRevision: reopened,
+        revisions,
         weatherSnapshots,
         calculationPreview: undefined,
         selectedProfileId: reopened.draftSnapshot.selectedAircraftProfileId,
@@ -542,6 +646,14 @@ class Planner {
     } catch (error) {
       this.reportError(error);
     }
+  }
+
+  private async refreshRevisionHistory(planId: string): Promise<void> {
+    this.state = { ...this.state, revisions: await this.dependencies.persistence.listPlanRevisions(planId) };
+  }
+
+  private async refreshSavedPlans(): Promise<void> {
+    this.state = { ...this.state, families: await this.dependencies.persistence.listPlanFamilies() };
   }
 
   private reportError(error: unknown): void {
@@ -580,6 +692,17 @@ function labeledInput(id: string, label: string, value: string, type = "text"): 
   return wrapper;
 }
 
+function overrideConfirmation(): HTMLLabelElement {
+  const wrapper = document.createElement("label");
+  wrapper.htmlFor = "override-confirmation";
+  const input = document.createElement("input");
+  input.id = "override-confirmation";
+  input.type = "checkbox";
+  input.required = true;
+  wrapper.append(input, document.createTextNode(" I understand that this deliberately replaces the aircraft default for this leg only."));
+  return wrapper;
+}
+
 function button(label: string, type: "button" | "submit"): HTMLButtonElement {
   const control = document.createElement("button");
   control.type = type;
@@ -605,6 +728,33 @@ function routePoints(state: PlannerState): readonly RoutePoint[] {
   return endpoints.length > 0 ? endpoints : (state.draft?.route.points ?? []);
 }
 
+/**
+ * A per-leg override is meaningful only while the route keeps the same ordered
+ * endpoints. Retaining it across an endpoint or checkpoint change could apply
+ * a pilot decision to a different leg, so those route edits intentionally get
+ * newly generated legs instead.
+ */
+function preserveMatchingLegs(route: ReturnType<typeof createRouteDefinition>, existing: PlanDraft["route"] | undefined): ReturnType<typeof createRouteDefinition> {
+  if (existing === undefined || route.legs.length !== existing.legs.length) return route;
+  const hasMatchingEndpoints = route.legs.every((leg, index) => {
+    const previous = existing.legs[index];
+    return previous !== undefined && leg.fromPointId === previous.fromPointId && leg.toPointId === previous.toPointId;
+  });
+  if (!hasMatchingEndpoints) return route;
+  return {
+    ...route,
+    legs: route.legs.map((leg, index) => {
+      const previous = existing.legs[index];
+      if (previous === undefined) return leg;
+      return {
+        ...leg,
+        id: previous.id,
+        ...(previous.performanceOverrides === undefined ? {} : { performanceOverrides: previous.performanceOverrides }),
+      };
+    }),
+  };
+}
+
 function navlogLabels(points: readonly RoutePoint[], profile: AircraftProfile | undefined, leg: UserRouteLeg): Record<"from" | "to" | "altitude" | "tas" | "fuelFlow", string> {
   const from = points.find((point) => point.id === leg.fromPointId);
   const to = points.find((point) => point.id === leg.toPointId);
@@ -614,7 +764,7 @@ function navlogLabels(points: readonly RoutePoint[], profile: AircraftProfile | 
     from: from?.name ?? "Unknown",
     to: to?.name ?? "Unknown",
     altitude: `${leg.cruiseAltitudeFeetMsl} ft`,
-    tas: `${tas ?? "—"} kt${override === undefined ? " (default)" : " (OVERRIDDEN)"}`,
+    tas: `${tas ?? "—"} kt${override === undefined ? " (aircraft default)" : " (OVERRIDDEN)"}`,
     fuelFlow: formatFuelFlow(profile),
   };
 }
@@ -635,6 +785,11 @@ function createNavlogHeader(): HTMLTableSectionElement {
 function firstAirport(points: readonly RoutePoint[]): AirportRoutePoint | undefined {
   const first = points[0];
   return first?.kind === "airport" ? first : undefined;
+}
+
+function isCalculatedRevision(revision: PlanRevision | undefined): boolean {
+  const snapshot = revision?.calculationSnapshot;
+  return typeof snapshot === "object" && snapshot !== null && !Array.isArray(snapshot) && "schema" in snapshot && snapshot.schema === "complete-navlog/v1" && "status" in snapshot && snapshot.status === "calculated";
 }
 
 function lastAirport(points: readonly RoutePoint[]): AirportRoutePoint | undefined {

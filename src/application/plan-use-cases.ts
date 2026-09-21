@@ -29,6 +29,7 @@ export interface NavlogPersistence {
   savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void>;
   getPlanRevision(id: string): Promise<PlanRevision | undefined>;
   listPlanRevisions(planId: string): Promise<readonly PlanRevision[]>;
+  listPlanFamilies(): Promise<readonly PlanFamily[]>;
 }
 
 export interface RouteDraftInput {

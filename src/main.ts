@@ -1,6 +1,7 @@
 import { WorkerAirportLookup } from './services/airport/worker-airport-lookup';
 import { WorkerWindsClient } from './services/weather/winds-client';
 import { createBrowserPlanCalculator } from './application/browser-plan-calculator';
+import { createBrowserWeatherRefresh } from './application/browser-weather-refresh';
 import { createBrowserUseCaseIds, createSystemClock } from './application/plan-use-cases';
 import { IndexedDbNavlogRepository } from './services/storage/indexed-db-repository';
 import { renderApp } from './ui/renderApp';
@@ -25,7 +26,9 @@ renderApp(root, {
   winds,
   persistence,
   weatherEvidence: persistence,
+  portability: persistence,
   ids,
   clock,
-  calculatePlan: createBrowserPlanCalculator(persistence, winds, ids, clock)
+  calculatePlan: createBrowserPlanCalculator(persistence, winds, ids, clock),
+  refreshWeather: createBrowserWeatherRefresh(persistence, winds, ids, clock)
 });

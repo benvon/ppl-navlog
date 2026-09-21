@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
 import type { AircraftProfile } from "../domain/aircraft";
@@ -10,14 +10,16 @@ import { renderPlanner } from "./planner";
 class MemoryPersistence implements NavlogPersistence {
   private readonly profiles = new Map<string, AircraftProfile>();
   private readonly revisions = new Map<string, PlanRevision>();
+  private readonly families = new Map<string, PlanFamily>();
   public readonly savedRevisions: PlanRevision[] = [];
 
   public async saveAircraftProfile(profile: AircraftProfile): Promise<void> { this.profiles.set(profile.id, profile); }
   public async getAircraftProfile(id: string): Promise<AircraftProfile | undefined> { return this.profiles.get(id); }
   public async listAircraftProfiles(): Promise<readonly AircraftProfile[]> { return [...this.profiles.values()]; }
-  public async savePlanRevision(_family: PlanFamily, revision: PlanRevision): Promise<void> { this.revisions.set(revision.id, revision); this.savedRevisions.push(revision); }
+  public async savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void> { this.families.set(family.id, family); this.revisions.set(revision.id, revision); this.savedRevisions.push(revision); }
   public async getPlanRevision(id: string): Promise<PlanRevision | undefined> { return this.revisions.get(id); }
   public async listPlanRevisions(planId: string): Promise<readonly PlanRevision[]> { return [...this.revisions.values()].filter((revision) => revision.planId === planId); }
+  public async listPlanFamilies(): Promise<readonly PlanFamily[]> { return [...this.families.values()]; }
 }
 
 const clock: UseCaseClock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
@@ -28,8 +30,7 @@ function ids(): UseCaseIds {
 }
 
 async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
 function input(root: HTMLElement, id: string): HTMLInputElement {
@@ -47,7 +48,8 @@ function clickByLabel(root: HTMLElement, label: string): void {
 describe("planner shell", () => {
   it("walks through local airport resolution, profile saving, draft saving, and a guarded per-leg override", async () => {
     const root = document.createElement("div");
-    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
     await settle();
 
     expect(root.textContent).toContain("Aircraft profile");
@@ -78,17 +80,53 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Saved immutable revision");
-    expect(root.textContent).toContain("Cruise TAS default: 95 kt from Study aircraft.");
+    expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Study aircraft.");
+    const originalLegId = persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.id;
+    if (originalLegId === undefined) throw new Error("Initial route leg was not saved.");
 
     clickByLabel(root, "Override TAS for this leg");
     input(root, "override-tas").value = "100";
     input(root, "override-reason").value = "Instructor exercise";
     const overrideForm = root.querySelector<HTMLFormElement>(".override-form");
     if (overrideForm === null) throw new Error("Override form was not rendered.");
+    expect(root.textContent).toContain("cruise groundspeed, heading correction, ETE, fuel, and trip totals will be recalculated");
+    overrideForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("Confirm that you understand the per-leg TAS impact");
+    expect(root.textContent).not.toContain("OVERRIDDEN effective TAS");
+
+    input(root, "override-confirmation").checked = true;
     overrideForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
     expect(root.textContent).toContain("OVERRIDDEN");
+    expect(root.textContent).toContain("Preserved aircraft default: 95 kt.");
     expect(root.textContent).toContain("Restore aircraft default");
+
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    const savedOverride = persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0];
+    expect(savedOverride).toMatchObject({
+      id: originalLegId,
+      performanceOverrides: { cruiseTasKnots: { computedValue: 95, effectiveValue: 100, override: { value: 100, reason: "Instructor exercise" } } },
+    });
+    const reopenedRoot = document.createElement("div");
+    renderPlanner(reopenedRoot, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(reopenedRoot, "Open Preserved study route");
+    await settle();
+    expect(reopenedRoot.textContent).toContain("OVERRIDDEN effective TAS: 100 kt");
+    expect(root.textContent).toContain("Saved revision history");
+    const revisionButtons = root.querySelectorAll<HTMLButtonElement>(".revision-history button");
+    expect(revisionButtons).toHaveLength(2);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    revisionButtons[1]?.click();
+    await settle();
+    expect(root.textContent).not.toContain("OVERRIDDEN effective TAS");
+    expect(root.textContent).toContain("Reopened revision");
+    root.querySelectorAll<HTMLButtonElement>(".revision-history button")[0]?.click();
+    await settle();
+    expect(root.textContent).toContain("OVERRIDDEN effective TAS");
+    confirm.mockRestore();
 
     clickByLabel(root, "Restore aircraft default");
     await settle();
@@ -232,7 +270,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
 
-    expect(root.textContent).toContain("Cruise TAS default: 95 kt from Second aircraft.");
+    expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Second aircraft.");
   });
 
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {
@@ -266,6 +304,8 @@ describe("planner shell", () => {
   it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
+    const refreshWeather = vi.fn().mockResolvedValue({ status: "blocked", reason: "weather-unavailable", message: "Fresh winds are unavailable.", warnings: [] });
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }] }) } as unknown as WindsTransportClient;
     let attempt = 0;
     const calculatePlan: BrowserPlanCalculator = async (_draft, _profile, parent) => {
       attempt += 1;
@@ -274,7 +314,7 @@ describe("planner shell", () => {
       const revision: PlanRevision = { ...parent, id: "calculated-1", parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
       return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
     };
-    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds, calculatePlan, refreshWeather, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
     await settle();
     const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
     if (profileForm === null) throw new Error("Profile form was not rendered.");
@@ -296,5 +336,19 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Calculated and saved complete navlog revision calculated-1.");
     expect(root.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal.");
     expect(root.textContent).toContain("RAW FB PRODUCT");
+    clickByLabel(root, "Refresh weather into new revision");
+    await settle();
+    expect(root.textContent).toContain("choose a forecast before refreshing weather");
+    expect(refreshWeather).not.toHaveBeenCalled();
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    const selector = root.querySelector<HTMLSelectElement>("#selected-forecast-period");
+    if (selector === null) throw new Error("Forecast selector was not rendered.");
+    selector.value = "2026-09-22T00:00:00.000Z";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    clickByLabel(root, "Refresh weather into new revision");
+    await settle();
+    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z" }));
+    expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
   });
 });

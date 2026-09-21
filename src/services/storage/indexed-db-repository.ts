@@ -138,6 +138,7 @@ export class IndexedDbNavlogRepository {
     const transaction = database.transaction([NAVLOG_STORES.planFamilies, NAVLOG_STORES.planRevisions, NAVLOG_STORES.weatherSnapshots], "readwrite");
     const familyStore = transaction.objectStore(NAVLOG_STORES.planFamilies);
     const revisionStore = transaction.objectStore(NAVLOG_STORES.planRevisions);
+    const existingFamily = await requestResult<unknown>(familyStore.get(family.id));
     const existingRevision = await requestResult<unknown>(revisionStore.get(revision.id));
     if (existingRevision !== undefined) {
       transaction.abort();
@@ -148,7 +149,8 @@ export class IndexedDbNavlogRepository {
     const newWeatherIds = appendNewWeatherSnapshots(transaction, weatherStore, weatherSnapshots);
     await validateRevisionWeatherReferences(transaction, weatherStore, revision.weatherSnapshotIds, newWeatherIds);
     revisionStore.add(clone(revision));
-    familyStore.put(clone(family));
+    const preservedCreatedAt = existingFamily === undefined ? family.createdAt : ensureValid(existingFamily, (candidate) => validatePlanFamily(candidate, this.now())).createdAt;
+    familyStore.put(clone({ ...family, createdAt: preservedCreatedAt }));
     await transactionDone(transaction);
   }
 
@@ -170,6 +172,10 @@ export class IndexedDbNavlogRepository {
       .map((value) => clone(ensureValid(value, (candidate) => validatePlanRevision(candidate, this.now()))))
       .filter((revision) => revision.planId === planId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  public async listPlanFamilies(): Promise<readonly PlanFamily[]> {
+    return this.readAll(NAVLOG_STORES.planFamilies, (value) => validatePlanFamily(value, this.now()));
   }
 
   public async exportJson(exportedAt = this.now().toISOString()): Promise<string> {

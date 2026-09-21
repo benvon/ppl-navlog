@@ -46,6 +46,7 @@ export const renderCalculatedNavlog = (revision: PlanRevision): HTMLElement | un
   const fuel = document.createElement("p");
   fuel.textContent = `Fuel required including taxi/run-up and reserve: ${number(summary?.requiredFuel)} gal. Enroute: ${number(summary?.enrouteFuel)} gal.`;
   section.append(scroll, fuel, details("Phase boundaries and weather selection", { phaseAllocation: snapshot.phaseAllocation, weather: snapshot.weather }));
+  if (snapshot.weatherRefreshComparison !== undefined) section.append(details("Weather refresh comparison with parent revision", snapshot.weatherRefreshComparison));
   return section;
 };
 

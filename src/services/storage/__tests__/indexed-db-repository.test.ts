@@ -111,6 +111,7 @@ describe("IndexedDbNavlogRepository", () => {
     });
     expect(await store.getAircraftProfile(bundle.aircraftProfiles[0]?.id ?? "missing")).toEqual(bundle.aircraftProfiles[0]);
     expect(await store.getPlanRevision(bundle.planRevisions[0]?.id ?? "missing")).toEqual(bundle.planRevisions[0]);
+    expect(await store.listPlanFamilies()).toEqual(bundle.planFamilies);
   });
 
   it("rolls back all records when a merge import conflicts", async () => {
@@ -168,19 +169,21 @@ describe("IndexedDbNavlogRepository", () => {
     const initialRevision = planRevision();
     await store.saveWeatherSnapshot(initialSnapshot);
     await store.savePlanRevision(planFamily(), initialRevision);
-    const refreshedSnapshot = { ...initialSnapshot, id: "weather-2", retrievedAt: "2027-01-01T00:00:00.000Z" };
+    const refreshedSnapshot = { ...initialSnapshot, id: "weather-2", retrievedAt: "2026-09-21T12:00:00.000Z" };
     const refreshRevision = {
       ...initialRevision,
       id: "revision-2",
       parentRevisionId: initialRevision.id,
       reason: "weather-refresh" as const,
-      createdAt: "2027-01-01T00:00:00.000Z",
+      createdAt: "2026-09-21T12:00:00.000Z",
       weatherSnapshotIds: [refreshedSnapshot.id],
     };
-    const family = { ...planFamily(), latestRevisionId: refreshRevision.id };
+    const family = { ...planFamily(), createdAt: refreshRevision.createdAt, latestRevisionId: refreshRevision.id };
 
     await store.saveWeatherRefreshRevision(family, refreshRevision, [refreshedSnapshot]);
     expect(await store.getPlanRevision(refreshRevision.id)).toEqual(refreshRevision);
+    const exported = parseNavlogExport(await store.exportJson("2026-09-21T12:00:00.000Z"), now());
+    expect(exported.planFamilies[0]?.createdAt).toBe(planFamily().createdAt);
 
     const duplicateRefresh = { ...refreshRevision, id: "revision-3", parentRevisionId: refreshRevision.id };
     await expect(store.saveWeatherRefreshRevision({ ...family, latestRevisionId: duplicateRefresh.id }, duplicateRefresh, [refreshedSnapshot])).rejects.toBeTruthy();

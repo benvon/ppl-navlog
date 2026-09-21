@@ -50,6 +50,7 @@ class MemoryPersistence implements NavlogPersistence {
   public async listPlanRevisions(planId: string): Promise<readonly PlanRevision[]> {
     return [...this.revisions.values()].filter((revision) => revision.planId === planId);
   }
+  public async listPlanFamilies(): Promise<readonly PlanFamily[]> { return [...this.families.values()]; }
 }
 
 describe("plan draft use cases", () => {
