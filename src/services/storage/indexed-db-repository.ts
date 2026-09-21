@@ -88,13 +88,31 @@ export class IndexedDbNavlogRepository {
   }
 
   public async savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void> {
-    validatePlanFamily(family, this.now());
-    validatePlanRevision(revision, this.now());
-    if (family.id !== revision.planId) throw new StorageValidationError([{ path: "$.planId", message: "revision.planId must equal family.id" }]);
-    if (family.latestRevisionId !== revision.id) throw new StorageValidationError([{ path: "$.latestRevisionId", message: "must identify the revision being saved" }]);
-    if (revision.draftSnapshot.selectedAircraftProfileId !== revision.aircraftProfileSnapshot.profile.id) {
-      throw new StorageValidationError([{ path: "$.aircraftProfileSnapshot.profile.id", message: "must match draftSnapshot.selectedAircraftProfileId" }]);
+    await this.saveRevisionWithWeatherSnapshots(family, revision, []);
+  }
+
+  /**
+   * Atomically appends weather evidence and the revision that references it.
+   * This prevents an interruption from leaving a revision without its required
+   * immutable source snapshots, or a set of refresh snapshots with no plan.
+   */
+  public async saveWeatherRefreshRevision(
+    family: PlanFamily,
+    revision: PlanRevision,
+    weatherSnapshots: readonly WeatherReferenceSnapshot[],
+  ): Promise<void> {
+    if (revision.reason !== "weather-refresh") {
+      throw new StorageValidationError([{ path: "$.reason", message: "weather refresh persistence requires reason weather-refresh" }]);
     }
+    await this.saveRevisionWithWeatherSnapshots(family, revision, weatherSnapshots);
+  }
+
+  private async saveRevisionWithWeatherSnapshots(
+    family: PlanFamily,
+    revision: PlanRevision,
+    weatherSnapshots: readonly WeatherReferenceSnapshot[],
+  ): Promise<void> {
+    validateRevisionWriteInput(family, revision, weatherSnapshots, this.now());
 
     const database = await this.database();
     const transaction = database.transaction([NAVLOG_STORES.planFamilies, NAVLOG_STORES.planRevisions, NAVLOG_STORES.weatherSnapshots], "readwrite");
@@ -105,25 +123,10 @@ export class IndexedDbNavlogRepository {
       transaction.abort();
       throw new ImmutableRevisionError(`Plan revision ${revision.id} already exists and cannot be modified.`);
     }
-    if (revision.parentRevisionId !== undefined) {
-      const parent = await requestResult<unknown>(revisionStore.get(revision.parentRevisionId));
-      if (parent === undefined) {
-        transaction.abort();
-        throw new ImmutableRevisionError(`Parent revision ${revision.parentRevisionId} does not exist.`);
-      }
-      const validatedParent = ensureValid(parent, (candidate) => validatePlanRevision(candidate, this.now()));
-      if (validatedParent.planId !== revision.planId) {
-        transaction.abort();
-        throw new ImmutableRevisionError("A revision parent must belong to the same plan family.");
-      }
-    }
+    await validateRevisionParent(transaction, revisionStore, revision, this.now());
     const weatherStore = transaction.objectStore(NAVLOG_STORES.weatherSnapshots);
-    for (const weatherSnapshotId of revision.weatherSnapshotIds) {
-      if ((await requestResult<unknown>(weatherStore.get(weatherSnapshotId))) === undefined) {
-        transaction.abort();
-        throw new ImmutableRevisionError(`Weather snapshot ${weatherSnapshotId} does not exist.`);
-      }
-    }
+    const newWeatherIds = appendNewWeatherSnapshots(transaction, weatherStore, weatherSnapshots);
+    await validateRevisionWeatherReferences(transaction, weatherStore, revision.weatherSnapshotIds, newWeatherIds);
     revisionStore.add(clone(revision));
     familyStore.put(clone(family));
     await transactionDone(transaction);
@@ -215,6 +218,73 @@ export class IndexedDbNavlogRepository {
     if (this.factory === undefined) throw new StorageUnavailableError();
     this.databasePromise ??= openDatabase(this.factory, this.databaseName);
     return this.databasePromise;
+  }
+}
+
+function validateRevisionWriteInput(
+  family: PlanFamily,
+  revision: PlanRevision,
+  weatherSnapshots: readonly WeatherReferenceSnapshot[],
+  now: Date,
+): void {
+  validatePlanFamily(family, now);
+  validatePlanRevision(revision, now);
+  weatherSnapshots.forEach((snapshot) => validateWeatherReferenceSnapshot(snapshot, now));
+  if (family.id !== revision.planId) throw new StorageValidationError([{ path: "$.planId", message: "revision.planId must equal family.id" }]);
+  if (family.latestRevisionId !== revision.id) throw new StorageValidationError([{ path: "$.latestRevisionId", message: "must identify the revision being saved" }]);
+  if (revision.draftSnapshot.selectedAircraftProfileId !== revision.aircraftProfileSnapshot.profile.id) {
+    throw new StorageValidationError([{ path: "$.aircraftProfileSnapshot.profile.id", message: "must match draftSnapshot.selectedAircraftProfileId" }]);
+  }
+}
+
+async function validateRevisionParent(
+  transaction: IDBTransaction,
+  revisionStore: IDBObjectStore,
+  revision: PlanRevision,
+  now: Date,
+): Promise<void> {
+  if (revision.parentRevisionId === undefined) return;
+  const parent = await requestResult<unknown>(revisionStore.get(revision.parentRevisionId));
+  if (parent === undefined) {
+    transaction.abort();
+    throw new ImmutableRevisionError(`Parent revision ${revision.parentRevisionId} does not exist.`);
+  }
+  const validatedParent = ensureValid(parent, (candidate) => validatePlanRevision(candidate, now));
+  if (validatedParent.planId !== revision.planId) {
+    transaction.abort();
+    throw new ImmutableRevisionError("A revision parent must belong to the same plan family.");
+  }
+}
+
+function appendNewWeatherSnapshots(
+  transaction: IDBTransaction,
+  weatherStore: IDBObjectStore,
+  weatherSnapshots: readonly WeatherReferenceSnapshot[],
+): ReadonlySet<string> {
+  const identifiers = new Set<string>();
+  for (const snapshot of weatherSnapshots) {
+    if (identifiers.has(snapshot.id)) {
+      transaction.abort();
+      throw new ImmutableRevisionError(`Weather refresh contains duplicate snapshot ${snapshot.id}.`);
+    }
+    identifiers.add(snapshot.id);
+    weatherStore.add(clone(snapshot));
+  }
+  return identifiers;
+}
+
+async function validateRevisionWeatherReferences(
+  transaction: IDBTransaction,
+  weatherStore: IDBObjectStore,
+  weatherSnapshotIds: readonly string[],
+  newWeatherIds: ReadonlySet<string>,
+): Promise<void> {
+  for (const weatherSnapshotId of weatherSnapshotIds) {
+    if (newWeatherIds.has(weatherSnapshotId)) continue;
+    if ((await requestResult<unknown>(weatherStore.get(weatherSnapshotId))) === undefined) {
+      transaction.abort();
+      throw new ImmutableRevisionError(`Weather snapshot ${weatherSnapshotId} does not exist.`);
+    }
   }
 }
 

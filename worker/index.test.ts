@@ -32,6 +32,15 @@ describe('Worker foundation', () => {
     await expect(response.json()).resolves.toMatchObject({ code: 'method_not_allowed' });
   });
 
+  it('denies a rate-limited API request before invoking an upstream adapter', async () => {
+    const response = await worker.fetch(new Request('https://example.test/api/health', { headers: { 'CF-Connecting-IP': '192.0.2.1' } }), {
+      ...env,
+      API_RATE_LIMITER: { async limit() { return { success: false }; } }
+    });
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ code: 'rate_limited' });
+  });
+
   it('adds security headers to static asset responses', async () => {
     const response = await worker.fetch(new Request('https://example.test/'), env);
 

@@ -6,7 +6,7 @@ export interface ApiErrorPayload {
   requestId: string;
 }
 
-export type ApiErrorCode = 'invalid_request' | 'method_not_allowed' | 'not_found' | 'service_unavailable' | 'upstream_invalid_response' | 'upstream_unavailable';
+export type ApiErrorCode = 'invalid_request' | 'method_not_allowed' | 'not_found' | 'service_unavailable' | 'rate_limited' | 'upstream_invalid_response' | 'upstream_unavailable' | 'upstream_no_data';
 
 export interface CacheProvenance {
   status: 'edge_hit' | 'kv_hit' | 'upstream_refresh' | 'stale_while_refresh' | 'stale_on_error';
@@ -57,6 +57,65 @@ export interface SourceProvenance { adapter: 'runway-picker'; fetchedAt: string;
 export interface AirportSuccessPayload { airport: AirportData; provenance: SourceProvenance; requestId: string; }
 export interface MetarSuccessPayload { metar: MetarData; provenance: SourceProvenance; requestId: string; }
 
-/** Schema-only seams; no winds upstream is selected or called in this tranche. */
-export interface WindsStationSelectionSchema { route: readonly AirportCoordinates[]; requestedAt: string; }
-export interface WindsForecastSchema { station: string; validTime: string; }
+export type WindsRoutePoint = AirportCoordinates;
+export type WindsForecastCycle = '06' | '12' | '24';
+export type WindsRegion = 'us' | 'alaska' | 'hawaii';
+
+export interface WindsStation {
+  id: string;
+  name: string | null;
+  coordinates: AirportCoordinates;
+  elevationFt: number | null;
+  region: WindsRegion;
+  availableForecastCycles: WindsForecastCycle[];
+  source: 'aviationweather';
+}
+
+export interface WindsForecastAvailability {
+  forecastCycle: WindsForecastCycle;
+  issuedAt: string;
+  validAt: string;
+  useFrom: string;
+  useUntil: string;
+}
+
+export interface WindsAloftLevel {
+  altitudeFt: number;
+  windFromDegTrue: number | null;
+  windSpeedKt: number | null;
+  temperatureC: number | null;
+  availability: 'available' | 'unavailable';
+  raw: string;
+}
+
+export interface WindsForecast {
+  station: WindsStation;
+  forecastCycle: WindsForecastCycle;
+  issuedAt: string;
+  validAt: string;
+  useFrom: string;
+  useUntil: string;
+  levels: WindsAloftLevel[];
+  rawProduct: string;
+  source: 'aviationweather';
+  fetchedAt: string;
+}
+
+export interface WindsSourceProvenance {
+  adapter: 'aviationweather';
+  product: 'NCEP FB Winds/Temps (legacy FD)';
+  region: WindsRegion;
+  endpoint: 'https://aviationweather.gov/api/data/windtemp';
+  fetchedAt: string;
+  cache: CacheProvenance;
+}
+
+export interface WindsStationsSuccessPayload {
+  stations: WindsStation[];
+  forecasts: WindsForecastAvailability[];
+  requestedRoute: WindsRoutePoint[];
+  provenance: WindsSourceProvenance[];
+  requestId: string;
+}
+
+export interface WindsForecastSuccessPayload { forecast: WindsForecast; provenance: WindsSourceProvenance; requestId: string; }

@@ -161,4 +161,29 @@ describe("IndexedDbNavlogRepository", () => {
 
     await expect(store.saveWeatherSnapshot(snapshot)).rejects.toBeInstanceOf(ImmutableRevisionError);
   });
+
+  it("atomically appends refresh evidence with its immutable weather-refresh child revision", async () => {
+    const store = repository();
+    const initialSnapshot = weatherSnapshot();
+    const initialRevision = planRevision();
+    await store.saveWeatherSnapshot(initialSnapshot);
+    await store.savePlanRevision(planFamily(), initialRevision);
+    const refreshedSnapshot = { ...initialSnapshot, id: "weather-2", retrievedAt: "2027-01-01T00:00:00.000Z" };
+    const refreshRevision = {
+      ...initialRevision,
+      id: "revision-2",
+      parentRevisionId: initialRevision.id,
+      reason: "weather-refresh" as const,
+      createdAt: "2027-01-01T00:00:00.000Z",
+      weatherSnapshotIds: [refreshedSnapshot.id],
+    };
+    const family = { ...planFamily(), latestRevisionId: refreshRevision.id };
+
+    await store.saveWeatherRefreshRevision(family, refreshRevision, [refreshedSnapshot]);
+    expect(await store.getPlanRevision(refreshRevision.id)).toEqual(refreshRevision);
+
+    const duplicateRefresh = { ...refreshRevision, id: "revision-3", parentRevisionId: refreshRevision.id };
+    await expect(store.saveWeatherRefreshRevision({ ...family, latestRevisionId: duplicateRefresh.id }, duplicateRefresh, [refreshedSnapshot])).rejects.toBeTruthy();
+    expect(await store.getPlanRevision(duplicateRefresh.id)).toBeUndefined();
+  });
 });

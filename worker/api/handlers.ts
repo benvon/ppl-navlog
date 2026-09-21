@@ -1,10 +1,11 @@
 import type { AviationDataAdapter } from './adapters';
-import type { AirportSuccessPayload, MetarSuccessPayload } from './contracts';
+import type { AirportSuccessPayload, MetarSuccessPayload, WindsForecastSuccessPayload, WindsSourceProvenance, WindsStationsSuccessPayload } from './contracts';
 import { ApiError, errorPayload } from './errors';
 import { createRequestId, parseApiRoute, requireGet } from './request';
 import { errorResponse, jsonResponse } from './response';
+import type { WindsDataAdapter } from './winds';
 
-export interface ApiEnvironment { APP_VERSION?: string; APP_COMMIT_SHA?: string; aviationData?: AviationDataAdapter; }
+export interface ApiEnvironment { APP_VERSION?: string; APP_COMMIT_SHA?: string; aviationData?: AviationDataAdapter; windsData?: WindsDataAdapter; }
 
 function normalizeBuildVersion(value: string | undefined): string { const candidate = value?.trim(); return candidate && /^v?[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(candidate) ? candidate : 'v0.0.0-dev'; }
 function normalizeCommitSha(value: string | undefined): string { const candidate = value?.trim().toLowerCase(); return candidate && (/^[a-f0-9]{7,40}$/.test(candidate) || candidate === 'local') ? candidate : 'local'; }
@@ -15,6 +16,20 @@ export async function handleApiRequest(request: Request, env: ApiEnvironment): P
     requireGet(request);
     const route = parseApiRoute(request);
     if (route.kind === 'health') return jsonResponse({ status: 'ok', version: normalizeBuildVersion(env.APP_VERSION), commitSha: normalizeCommitSha(env.APP_COMMIT_SHA), requestId }, 200, requestId);
+    if (route.kind === 'winds-stations') {
+      if (!env.windsData) throw new ApiError('Winds data service is not configured.', 503, 'service_unavailable');
+      const { stations, forecasts, provenance } = await env.windsData.getWindsStations(route.route);
+      const sourceProvenance: WindsSourceProvenance[] = provenance.map((cache) => ({ adapter: 'aviationweather', product: 'NCEP FB Winds/Temps (legacy FD)', region: stations[0]?.region ?? 'us', endpoint: 'https://aviationweather.gov/api/data/windtemp', fetchedAt: cache.fetchedAt, cache }));
+      const payload: WindsStationsSuccessPayload = { stations, forecasts, requestedRoute: route.route, provenance: sourceProvenance, requestId };
+      return jsonResponse(payload, 200, requestId);
+    }
+    if (route.kind === 'winds-forecast') {
+      if (!env.windsData) throw new ApiError('Winds data service is not configured.', 503, 'service_unavailable');
+      const { forecast, provenance } = await env.windsData.getWindsForecast(route.station, route.validTime, route.region);
+      const sourceProvenance: WindsSourceProvenance = { adapter: 'aviationweather', product: 'NCEP FB Winds/Temps (legacy FD)', region: route.region, endpoint: 'https://aviationweather.gov/api/data/windtemp', fetchedAt: provenance.fetchedAt, cache: provenance };
+      const payload: WindsForecastSuccessPayload = { forecast, provenance: sourceProvenance, requestId };
+      return jsonResponse(payload, 200, requestId);
+    }
     if (!env.aviationData) throw new ApiError('Aviation data service is not configured.', 503, 'service_unavailable');
     if (route.kind === 'airport') {
       const { airport, cache } = await env.aviationData.getAirport(route.icao);

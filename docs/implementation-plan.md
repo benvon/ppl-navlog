@@ -36,7 +36,7 @@ V1 supports:
 - departure and destination airports resolved from exact ICAO identifiers;
 - zero or more manually entered checkpoints;
 - route ordering and removal;
-- decimal-degree coordinates;
+- decimal-degree coordinates and SkyVector-style compact DMS waypoint input such as `420604N0884405W` (normalized to canonical decimal degrees);
 - planned departure UTC date/time;
 - independently selected cruise altitude for each user-defined route leg;
 - aircraft-profile selection and a snapshot of the selected profile;
@@ -148,7 +148,7 @@ GET /api/health
 GET /api/airports/:icao
 GET /api/weather/metar/:icao
 GET /api/weather/winds/stations?route=...
-GET /api/weather/winds?station=...&validTime=...
+GET /api/weather/winds?station=...&validTime=...&region=...
 ```
 
 The exact airport and METAR response shapes should be compatible with the fields already exposed by `runway-picker`: canonical ICAO identity, coordinates/elevation for airports, raw METAR and parsed wind for METARs, fetch timestamps, cache provenance, structured error codes, and request IDs. The application must validate all responses at the transport boundary and map them into its own domain models.
@@ -212,6 +212,7 @@ If climb distance plus descent distance exceeds available route distance, return
 ### 5.1 Coordinate, distance, and course
 
 - Validate latitude in `[-90, 90]` and longitude in `[-180, 180]`.
+- Accept SkyVector-style compact waypoint coordinates in exact `DDMMSSNDDDMMSSW` form, after trimming whitespace and normalizing hemisphere case. Reject malformed fields, minutes/seconds outside `00`–`59`, and nonzero minutes/seconds at latitude `90` or longitude `180`; preserve the original input and expected form in structured validation details.
 - Calculate great-circle distance and initial true course using a documented Earth model.
 - Normalize directional output to `[0, 360)` internally and display aviation headings as `001°` through `360°` according to one documented presentation rule.
 - Preserve higher internal precision than the displayed worksheet value.
@@ -233,7 +234,7 @@ If climb distance plus descent distance exceeds available route distance, return
 - Decode all special Winds and Temperatures Aloft encodings before interpolation, including calm/light wind representations, winds of 100 knots or more, and unavailable temperatures.
 - Interpolate between altitude levels by converting each wind-from observation into canonical north/east velocity components, interpolating the components, and converting the result back into wind-from direction and speed.
 - Never average or interpolate direction angles directly. For example, 350° and 010° must average near north, not south.
-- Compute effective climb/descent wind from deterministic altitude samples across the phase. Use a documented sampling interval and include the endpoints. Obtain the wind vector at each sample altitude, weight samples consistently by the phase model, average vector components, and convert the result back to direction and speed.
+- Compute effective climb/descent wind from five deterministic, evenly spaced altitude samples across the phase, including both endpoints. Obtain the wind vector at each sample altitude, apply trapezoidal weights (one-half at each endpoint and one at interior levels), average vector components, and convert the result back to direction and speed. The domain API may allow a bounded explicit sample-count override for verified future models, but it must retain this same inclusive-endpoint trapezoidal method.
 - Preserve every source level and sample used by the effective-wind explanation.
 - Do not infer a missing temperature when the source product does not publish one for that altitude.
 
