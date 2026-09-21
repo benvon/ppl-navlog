@@ -1,5 +1,7 @@
 # Operations
 
+The intended development domain is `navlog.benvon.dev`; production is `navlog.benvon.net`. Neither domain is configured or deployed by this repository yet. See `docs/github-ci-cd-setup.md` for required GitHub and Cloudflare setup, `docs/release-readiness-audit.md` for milestone status, and `docs/security-review.md` for the deployment blockers.
+
 No Cloudflare deployment was performed as part of the local data-layer implementation. The Worker serves a prebuilt static artifact and exposes `GET /api/health`. Its non-sensitive response contains status, build version, commit SHA, and request ID. The UI displays the static build identity. Deployment requires the `RUNWAY_PICKER_API` service binding target `runway-picker-metar-api` in the same account; local mock tests do not validate that production binding.
 
 CI runs type checking, linting, architecture checks, test coverage, build artifact verification, secret scanning, workflow validation, dependency auditing, and CodeQL. Pull-request preview deployment must consume a validated immutable artifact and use a least-privilege preview environment; it must not rebuild untrusted pull-request code with deployment credentials. Production deployment requires a protected environment, a conventional versioned release, a release artifact tied to the deployed SHA, documented rollback, and smoke checks for static assets, health response, headers, and build identity.

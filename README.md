@@ -13,3 +13,5 @@ The [complete navlog engine](docs/full-navlog-engine.md) calculates PHAK-style r
 The [revision and refresh workflow](docs/revisions-and-weather-refresh.md) documents guarded overrides, immutable history, weather refresh, and local backup/import behavior.
 
 The [UI architecture](docs/ui-architecture.md) explains the layout/theme boundary and the worksheet-to-inspector interaction.
+
+The [PDF output guide](docs/pdf-output.md) explains browser-local printing. The [release-readiness audit](docs/release-readiness-audit.md), [security review](docs/security-review.md), and [GitHub CI/CD setup guide](docs/github-ci-cd-setup.md) track the remaining development and production gates.
