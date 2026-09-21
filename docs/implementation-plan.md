@@ -43,7 +43,8 @@ V1 supports:
 - pilot-entered taxi/run-up fuel and reserve fuel;
 - generated TOC and TOD points;
 - immutable saved plan revisions;
-- JSON export and import with schema validation and versioning.
+- JSON export and import with schema validation and versioning;
+- a print-friendly PDF export of a selected, complete saved navlog revision.
 
 ### 3.2 Flight phases and calculations
 
@@ -347,6 +348,8 @@ Selecting any calculated value opens a persistent Calculation Inspector. The ins
 
 Generated TOC and TOD rows must be visually distinct but participate in the same explanations and cumulative totals as other rows.
 
+The PDF is a one-way output artifact, not a persistence or interchange format. Export uses the selected immutable calculated revision without refreshing weather or silently recalculating values. It presents the PHAK-style worksheet in a legible landscape layout with sensible pagination and repeats table headings when a log spans pages. Include route and aircraft identity, planned departure UTC, revision ID and generation time, source/forecast validity, visible assumptions and overrides, fuel summary, and the application's preflight limitation. PDF creation stays browser-local; no plan or aircraft data is uploaded. PDF import or reconstruction of a plan from a PDF is explicitly out of scope.
+
 ## 9. Persistence, Revisions, and Portability
 
 IndexedDB stores:
@@ -361,6 +364,8 @@ Editable work occurs in a draft. Saving produces a revision with a stable plan I
 Refreshing weather creates a new draft from the selected revision, retrieves new weather, recalculates, and saves a new revision only after the user confirms. Prior revisions remain readable.
 
 JSON export includes a documented format version and checksummed or otherwise integrity-checked envelope. Import must validate size, JSON shape, schema version, identifiers, timestamps, numeric ranges, and nested collections before writing anything. Import is atomic: invalid content writes no partial state. Unsupported future schema versions fail closed with a useful message.
+
+JSON remains the only supported round-trip portability format. PDF export is available only for a complete saved calculated revision and must not be offered as an import path.
 
 ## 10. Failure and Freshness Behavior
 
@@ -602,6 +607,7 @@ Deliverables:
 - keyboard and screen-reader support;
 - responsive desktop/narrow-screen behavior;
 - offline and partial-failure handling.
+- print-friendly PDF export from a complete saved revision.
 
 Acceptance criteria:
 
@@ -611,6 +617,8 @@ Acceptance criteria:
 - The core workflow is usable with a keyboard.
 - A failed refresh leaves the last saved revision intact and visibly identifies stale or unavailable data.
 - Automated accessibility and targeted manual checks have no unresolved critical findings.
+- The PDF shows the same saved values as the on-screen revision, retains phase rows and visible assumptions/overrides, paginates without clipping columns, and is visually checked at representative short and long route lengths.
+- A draft, blocked, or infeasible plan cannot be exported as a flyable calculated navlog PDF; no PDF import control exists.
 
 ### Phase 8: Release and production validation
 
@@ -682,8 +690,9 @@ Issue IDs below are planning identifiers, not existing tracker numbers. Each iss
 | UI-05 | Add generated TOC/TOD/transition rows and infeasibility presentation | FLT-05, UI-02, UI-03 | Visible phase planning |
 | UI-06 | Add weather status, selection, raw data, and source views | API-05, WX-02, WX-03, UI-03 | Weather transparency |
 | UI-07 | Add revision history, comparison, export, and import | RTE-02, APP-02, STO-02 | Durable plan management |
-| QUA-01 | Add end-to-end core-planning and failure-path coverage | APP-01, UI-04, UI-05, UI-06, UI-07 | Release-level behavior tests |
-| QUA-02 | Complete accessibility and representative-layout validation | UI-01, UI-02, UI-03, UI-04, UI-05, UI-06, UI-07 | Accessible desktop experience |
+| UI-08 | Generate a browser-local, print-friendly PDF from a complete saved revision; never import PDF | APP-01, UI-02, UI-05, UI-06, UI-07 | One-way printable navlog artifact |
+| QUA-01 | Add end-to-end core-planning and failure-path coverage | APP-01, UI-04, UI-05, UI-06, UI-07, UI-08 | Release-level behavior tests |
+| QUA-02 | Complete accessibility and representative-layout validation | UI-01, UI-02, UI-03, UI-04, UI-05, UI-06, UI-07, UI-08 | Accessible desktop and print experience |
 | OPS-01 | Implement trusted preview deployment from CI artifacts | FND-03, API-06 | Reviewable deployed previews |
 | OPS-02 | Implement release creation and protected production deployment | OPS-01, QUA-01, QUA-02 | Traceable production releases |
 | OPS-03 | Add observability, smoke tests, runbook, and rollback validation | API-07, OPS-02 | Operable production service |
@@ -698,11 +707,11 @@ The issue graph should be delivered in vertical slices rather than completing ev
 3. Wind and heading slice: `DOM-03`, `DOM-05`, `AIR-02`, `OVR-01`, `UI-04`, `TST-01`.
 4. Phase-planning slice: `FLT-01` through `FLT-06`, then `UI-05`.
 5. Live-data slice: `API-01` through `API-07`, `WX-01` through `WX-04`, `MAG-01`, `MAG-02`.
-6. Complete-plan slice: `APP-01`, `APP-02`, `UI-06`, `UI-07`.
+6. Complete-plan slice: `APP-01`, `APP-02`, `UI-06`, `UI-07`, `UI-08`.
 7. Release slice: `QUA-*`, `OPS-*`, `DOC-01`.
 
 ## 16. V1 Definition of Done
 
-V1 is complete only when a pilot can enter exact ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save immutable revisions; refresh weather into a new revision; export and import the plan safely; and use the deployed application through a tested, accessible desktop workflow.
+V1 is complete only when a pilot can enter exact ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save immutable revisions; refresh weather into a new revision; export and import JSON plan data safely; export a print-friendly PDF of a complete saved revision without supporting PDF import; and use the deployed application through a tested, accessible desktop workflow.
 
 All automated quality gates must pass, production deployment and rollback must be documented and smoke-tested, and known limitations must be visible in both the application and user documentation. Human review must confirm that the teaching explanations match the implemented formulas and that the worksheet remains usable at representative laptop sizes.
