@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 
@@ -30,5 +30,18 @@ describe("calculated visual flight log", () => {
   it("marks infeasible route phases instead of showing invented rows", () => {
     const revision = { ...planRevision(), calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { violations: [] } } };
     expect(renderCalculatedNavlog(revision)?.textContent).toContain("No flyable navlog was invented");
+  });
+
+  it("exposes calculated cells as keyboard-operable inspector controls when wired", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, effectiveWind: { wind: { effectiveValue: { directionFrom: 250, speed: 15 } } }, trueHeading: 275, variation: { effectiveValue: -2 }, assumptions: [], traces: {}, cumulative: {}, appliedOverrides: [] }], fuelSummary: { requiredFuel: 8, enrouteFuel: 5 } } },
+    };
+    const onInspect = vi.fn();
+    const rendered = renderCalculatedNavlog(revision, { onInspect, selected: { rowIndex: 0, field: "trueHeading" } });
+    const control = rendered?.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
+    expect(control?.getAttribute("aria-pressed")).toBe("true");
+    control?.click();
+    expect(onInspect).toHaveBeenCalledWith({ rowIndex: 0, field: "trueHeading" });
   });
 });

@@ -1,0 +1,119 @@
+body {
+  color: var(--color-ink);
+  background: var(--color-page);
+}
+
+.planner-feedback { min-height: 1.5rem; color: var(--color-ink); }
+
+.planner-panel {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+
+.profile-form label,
+.route-form label,
+.checkpoint-editor label,
+.leg-altitudes label,
+.override-form label,
+.forecast-selection label {
+  display: grid;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.profile-form + label { display: grid; gap: var(--space-1); margin-block-start: var(--space-4); }
+
+input,
+select,
+button {
+  box-sizing: border-box;
+  min-height: 2.25rem;
+  padding: 0.35rem var(--space-2);
+  font: inherit;
+}
+
+input,
+select { width: 100%; min-width: 0; }
+
+.profile-form label,
+.route-form label,
+.checkpoint-editor label,
+.leg-altitudes label,
+.override-form label { min-width: 0; }
+
+button {
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius-control);
+  background: var(--color-control);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+button:hover,
+button:focus-visible {
+  border-color: var(--color-focus);
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+table { width: 100%; border-collapse: collapse; }
+
+.calculated-navlog caption {
+  padding: var(--space-2);
+  text-align: left;
+  font-weight: 600;
+}
+
+.navlog-value {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-focus);
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.navlog-value[aria-pressed="true"] {
+  font-weight: 700;
+  text-decoration-thickness: 0.16em;
+}
+
+.calculation-inspector {
+  padding-block: var(--space-2);
+  border-block: 1px solid var(--color-table-border);
+}
+
+.calculation-inspector h3 { margin-block-start: 0; }
+.calculation-inspector dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 1fr); gap: var(--space-1) var(--space-2); }
+.calculation-inspector dd { margin: 0; overflow-wrap: anywhere; }
+.calculation-inspector dt { font-weight: 600; }
+
+.calculated-navlog pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.forecast-selection { margin-block: var(--space-4); }
+.forecast-selection label { max-width: 42rem; }
+
+th,
+td {
+  padding: var(--space-2);
+  border: 1px solid var(--color-table-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.build-identity {
+  color: var(--color-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875rem;
+}

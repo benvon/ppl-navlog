@@ -13,7 +13,7 @@ export function renderApp(root: HTMLElement, build: BuildIdentity, plannerDepend
 
   main.className = 'app-shell';
   heading.textContent = 'PPL Navlog';
-  description.textContent = 'A VFR flight-planning log that will make every calculation visible.';
+  description.textContent = 'A VFR flight-planning log with inspectable calculations.';
   status.className = 'build-identity';
   status.textContent = `Build ${build.version} (${build.commitSha})`;
 

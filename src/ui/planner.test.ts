@@ -54,6 +54,8 @@ describe("planner shell", () => {
 
     expect(root.textContent).toContain("Aircraft profile");
     expect(root.textContent).not.toContain("Global unlock");
+    expect(root.querySelectorAll('[data-region="navlog"]')).toHaveLength(1);
+    expect(root.querySelector('[aria-label="Planning workspace"]')).not.toBeNull();
 
     const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
     if (profileForm === null) throw new Error("Profile form was not rendered.");
@@ -311,7 +313,7 @@ describe("planner shell", () => {
       attempt += 1;
       if (attempt === 1) return { status: "blocked", reason: "weather-unavailable", message: "Selected winds are unavailable.", warnings: [] };
       if (parent === undefined) throw new Error("Expected a saved parent revision.");
-      const revision: PlanRevision = { ...parent, id: "calculated-1", parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
+      const revision: PlanRevision = { ...parent, id: "calculated-1", parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [{ subleg: { sourceLegId: parent.draftSnapshot.route.legs[0]!.id, phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, effectiveWind: { wind: { effectiveValue: { directionFrom: 240, speed: 12 } } }, trueHeading: 274.25, variation: { effectiveValue: -2 }, assumptions: [], appliedOverrides: [], traces: { windTriangle: { formulaId: "wind-triangle", formulaVersion: "1.0.0", inputs: [{ name: "TAS", value: 95, unit: "knots" }], intermediateValues: [], result: { name: "True heading", value: 274.25, unit: "degrees-true" }, rounding: { calculation: "unrounded", display: "nearest degree" }, warnings: [] } } }], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
       return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
     };
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds, calculatePlan, refreshWeather, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
@@ -336,6 +338,11 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Calculated and saved complete navlog revision calculated-1.");
     expect(root.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal.");
     expect(root.textContent).toContain("RAW FB PRODUCT");
+    const navlogTable = root.querySelector(".calculated-navlog table");
+    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
+    expect(root.querySelector(".calculated-navlog table")).toBe(navlogTable);
+    expect(root.textContent).toContain("Stored unrounded value: 274.25");
+    expect(root.textContent).toContain("Formula: wind-triangle");
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
     expect(root.textContent).toContain("choose a forecast before refreshing weather");

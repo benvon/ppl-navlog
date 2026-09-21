@@ -1,4 +1,5 @@
 import type { PlanRevision } from "../domain/route";
+import type { NavlogInspectionSelection, NavlogInspectionField } from "./calculation-inspector";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): value is RecordValue => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -13,7 +14,12 @@ const cell = (content: string | HTMLElement): HTMLTableCellElement => {
 };
 
 /** Renders only validated-enough local snapshot structure, never markup from weather data. */
-export const renderCalculatedNavlog = (revision: PlanRevision): HTMLElement | undefined => {
+export interface CalculatedNavlogViewOptions {
+  readonly onInspect?: (selection: NavlogInspectionSelection) => void;
+  readonly selected?: NavlogInspectionSelection;
+}
+
+export const renderCalculatedNavlog = (revision: PlanRevision, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
   const snapshot = revision.calculationSnapshot;
   if (!record(snapshot) || snapshot.schema !== "complete-navlog/v1") return undefined;
   const section = document.createElement("section");
@@ -37,7 +43,7 @@ export const renderCalculatedNavlog = (revision: PlanRevision): HTMLElement | un
   caption.textContent = "Calculated visual flight log — unrounded values are retained in each row's explanation";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
-  navlog.rows.forEach((row) => body.append(navlogRow(row, revision)));
+  navlog.rows.forEach((row, index) => body.append(navlogRow(row, revision, index, options)));
   table.append(body);
   const scroll = document.createElement("div");
   scroll.className = "navlog-table-scroll";
@@ -63,7 +69,7 @@ const navlogHeader = (): HTMLTableSectionElement => {
   return head;
 };
 
-const navlogRow = (row: RecordValue, revision: PlanRevision): HTMLTableRowElement => {
+const navlogRow = (row: RecordValue, revision: PlanRevision, rowIndex: number, options: CalculatedNavlogViewOptions): HTMLTableRowElement => {
   const tr = document.createElement("tr");
   const subleg = nested(row, "subleg");
   const labels = sourceLabels(revision, subleg);
@@ -71,12 +77,25 @@ const navlogRow = (row: RecordValue, revision: PlanRevision): HTMLTableRowElemen
   const cumulative = nested(row, "cumulative");
   const assumptions = stringArray(row.assumptions);
   const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}${assumptions.length > 0 ? " · Assumption explained" : ""}`;
+  const valueCell = (field: NavlogInspectionField, value: string): HTMLTableCellElement => {
+    if (options.onInspect === undefined) return cell(value);
+    const control = document.createElement("button");
+    control.type = "button";
+    control.className = "navlog-value";
+    control.textContent = value;
+    control.dataset.rowIndex = String(rowIndex);
+    control.dataset.inspectField = field;
+    control.setAttribute("aria-label", `Inspect ${field} for ${labels.from} to ${labels.to} ${text(subleg?.phase)} subleg`);
+    control.setAttribute("aria-pressed", String(options.selected?.rowIndex === rowIndex && options.selected.field === field));
+    control.addEventListener("click", () => options.onInspect?.({ rowIndex, field }));
+    return cell(control);
+  };
   tr.append(
-    cell(phaseLabel), cell(`${number(subleg?.startingAltitude)} → ${number(subleg?.endingAltitude)}`), cell(number(subleg?.trueCourse)),
-    cell(`${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`), cell(number(row.windCorrectionAngle)), cell(number(row.trueHeading)),
-    cell(number(nested(row, "variation")?.effectiveValue)), cell(number(row.magneticHeading)), cell(number(row.compassDeviation)),
-    cell(number(row.compassHeading)), cell(number(subleg?.distance)), cell(number(row.groundspeed)), cell(number(row.estimatedTimeEnroute)),
-    cell(number(row.fuel)), cell(details("Show calculation", { assumptions, traces: row.traces, cumulative, appliedOverrides: row.appliedOverrides })),
+    cell(phaseLabel), valueCell("altitude", `${number(subleg?.startingAltitude)} → ${number(subleg?.endingAltitude)}`), valueCell("trueCourse", number(subleg?.trueCourse)),
+    valueCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`), valueCell("windCorrectionAngle", number(row.windCorrectionAngle)), valueCell("trueHeading", number(row.trueHeading)),
+    valueCell("variation", number(nested(row, "variation")?.effectiveValue)), valueCell("magneticHeading", number(row.magneticHeading)), valueCell("compassDeviation", number(row.compassDeviation)),
+    valueCell("compassHeading", number(row.compassHeading)), valueCell("distance", number(subleg?.distance)), valueCell("groundspeed", number(row.groundspeed)), valueCell("estimatedTimeEnroute", number(row.estimatedTimeEnroute)),
+    valueCell("fuel", number(row.fuel)), cell(details("Raw row evidence", { assumptions, traces: row.traces, cumulative, appliedOverrides: row.appliedOverrides })),
   );
   return tr;
 };

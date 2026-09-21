@@ -1,0 +1,60 @@
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+.app-shell {
+  box-sizing: border-box;
+  max-width: 110rem;
+  min-height: 100vh;
+  margin-inline: auto;
+  padding: clamp(1rem, 3vw, 3rem);
+}
+
+.planner-shell { margin-block-start: var(--space-6); }
+
+.planner-content,
+.planner-layout { min-width: 0; }
+
+.planner-layout {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.9fr) minmax(0, 2.1fr) minmax(19rem, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.planner-layout > [data-region="aircraft"] { grid-column: 1; }
+.planner-layout > [data-region="route"] { grid-column: 2 / 4; }
+.planner-layout > [data-region="navlog"] { grid-column: 1 / 3; }
+.planner-layout > [data-region="inspector"] { grid-column: 3; }
+
+.profile-form,
+.route-form,
+.checkpoint-editor form,
+.leg-altitudes,
+.override-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.navlog-table-scroll { max-width: 100%; overflow-x: auto; }
+.calculated-navlog table { min-width: 90rem; }
+
+@media (max-width: 80rem) {
+  .planner-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+  .planner-layout > [data-region="aircraft"] { grid-column: 1; }
+  .planner-layout > [data-region="route"] { grid-column: 2; }
+  .planner-layout > [data-region="navlog"],
+  .planner-layout > [data-region="inspector"] { grid-column: 1 / -1; }
+}
+
+@media (max-width: 54rem) {
+  .planner-layout { grid-template-columns: minmax(0, 1fr); }
+  .planner-layout > [data-region] { grid-column: 1; }
+  .profile-form,
+  .route-form,
+  .checkpoint-editor form,
+  .leg-altitudes,
+  .override-form { grid-template-columns: minmax(0, 1fr); }
+}

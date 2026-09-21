@@ -1,0 +1,21 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #102a43;
+  --color-muted: #52606d;
+  --color-page: #f5f7fa;
+  --color-surface: #fff;
+  --color-border: #bcccdc;
+  --color-table-border: #d9e2ec;
+  --color-control: #f0f4f8;
+  --color-control-border: #486581;
+  --color-focus: #0b69a3;
+  --color-focus-ring: #7cc4fa;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --radius-panel: 0.5rem;
+  --radius-control: 0.25rem;
+}

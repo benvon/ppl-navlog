@@ -23,6 +23,8 @@ import type { BrowserWeatherRefresh } from "../application/browser-weather-refre
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderRevisionHistory } from "./revision-history";
 import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
+import { renderWorkspaceLayout } from "./workspace-layout";
+import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -48,6 +50,7 @@ interface PlannerState {
   readonly currentRevision?: PlanRevision;
   readonly unlockedLegId?: string;
   readonly inspectedLegId?: string;
+  readonly inspectedCalculation?: NavlogInspectionSelection;
   readonly availableForecasts: readonly WindsForecastAvailability[];
   readonly selectedForecastValidTimeUtc?: string;
   readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
@@ -77,8 +80,9 @@ class Planner {
   private readonly content: HTMLDivElement;
 
   public constructor(private readonly root: HTMLElement, private readonly dependencies: PlannerDependencies) {
-    const shell = document.createElement("main");
+    const shell = document.createElement("section");
     shell.className = "planner-shell";
+    shell.setAttribute("aria-label", "Planning workspace");
     this.feedback = document.createElement("p");
     this.feedback.className = "planner-feedback";
     this.feedback.setAttribute("role", "status");
@@ -99,12 +103,12 @@ class Planner {
   }
 
   private render(): void {
-    this.content.replaceChildren(
-      this.renderProfilePanel(),
-      this.renderRoutePanel(),
-      this.renderNavlogPanel(),
-      this.renderInspector(),
-    );
+    this.content.replaceChildren(renderWorkspaceLayout({
+      aircraft: this.renderProfilePanel(),
+      route: this.renderRoutePanel(),
+      navlog: this.renderNavlogPanel(),
+      inspector: this.renderInspector(),
+    }));
   }
 
   private renderProfilePanel(): HTMLElement {
@@ -332,7 +336,10 @@ class Planner {
       }
     }
     if (this.state.currentRevision !== undefined) {
-      const calculated = renderCalculatedNavlog(this.state.currentRevision);
+      const calculated = renderCalculatedNavlog(this.state.currentRevision, {
+        selected: this.state.inspectedCalculation,
+        onInspect: (selection) => this.inspectCalculation(selection),
+      });
       if (calculated !== undefined) {
         section.append(calculated);
         section.append(this.renderRawWeatherEvidence());
@@ -375,7 +382,8 @@ class Planner {
   }
 
   private renderInspector(): HTMLElement {
-    const section = panel("Calculation Inspector", "This panel distinguishes a profile default from a deliberate per-leg effective value.");
+    const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source. Per-leg aircraft defaults and overrides are controlled separately below.");
+    section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
     const draft = this.state.draft;
     const profile = this.selectedProfile();
     const leg = draft?.route.legs.find((candidate) => candidate.id === this.state.inspectedLegId) ?? draft?.route.legs[0];
@@ -406,6 +414,19 @@ class Planner {
     }
     section.append(this.renderOverrideForm(draft, profile, leg.id));
     return section;
+  }
+
+  private inspectCalculation(selection: NavlogInspectionSelection): void {
+    this.state = { ...this.state, inspectedCalculation: selection };
+    this.content.querySelectorAll<HTMLButtonElement>(".navlog-value").forEach((control) => {
+      control.setAttribute("aria-pressed", String(control.dataset.rowIndex === String(selection.rowIndex) && control.dataset.inspectField === selection.field));
+    });
+    const current = this.content.querySelector<HTMLElement>('[data-region="inspector"]');
+    if (current === null) return;
+    const inspector = this.renderInspector();
+    inspector.dataset.region = "inspector";
+    current.replaceWith(inspector);
+    inspector.querySelector<HTMLElement>(".calculation-inspector h3")?.focus();
   }
 
   private renderOverrideForm(draft: PlanDraft, profile: AircraftProfile, legId: string): HTMLFormElement {
@@ -531,7 +552,7 @@ class Planner {
         this.dependencies.clock,
       );
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Saved immutable revision ${saved.revision.id}.`;
@@ -555,7 +576,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
@@ -586,7 +607,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Weather refreshed in immutable revision ${result.revision.id}; compare it with its parent in Saved revision history.`;
@@ -629,6 +650,7 @@ class Planner {
         ...this.state,
         draft: reopened.draftSnapshot,
         currentRevision: reopened,
+        inspectedCalculation: undefined,
         revisions,
         weatherSnapshots,
         calculationPreview: undefined,
