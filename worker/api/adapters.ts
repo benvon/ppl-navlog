@@ -1,5 +1,6 @@
 import type { AirportData, CacheProvenance, MetarData } from './contracts';
 import { ApiError } from './errors';
+import { readBoundedText } from './bounded-text';
 
 const MAX_UPSTREAM_RESPONSE_BYTES = 256 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5_000;
@@ -78,10 +79,9 @@ async function readJsonResponse(fetcher: ServiceFetcher, request: Request): Prom
   try {
     const response = await fetcher.fetch(new Request(request, { signal: controller.signal }));
     if (!response.ok) throw new ApiError('Aviation data service is unavailable.', 503, 'upstream_unavailable');
-    const declaredLength = Number.parseInt(response.headers.get('Content-Length') ?? '0', 10);
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_RESPONSE_BYTES) throw new ApiError('Aviation data service returned an oversized response.', 502, 'upstream_invalid_response');
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_UPSTREAM_RESPONSE_BYTES) throw new ApiError('Aviation data service returned an oversized response.', 502, 'upstream_invalid_response');
+    let text: string;
+    try { text = await readBoundedText(response, MAX_UPSTREAM_RESPONSE_BYTES); }
+    catch { throw new ApiError('Aviation data service returned an oversized or unreadable response.', 502, 'upstream_invalid_response'); }
     try { return JSON.parse(text) as unknown; } catch { throw new ApiError('Aviation data service returned invalid JSON.', 502, 'upstream_invalid_response'); }
   } catch (error) {
     if (error instanceof ApiError) throw error;

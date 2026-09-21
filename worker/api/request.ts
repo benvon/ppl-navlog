@@ -34,6 +34,7 @@ function requiredSingleQuery(url: URL, name: string): string {
 }
 
 function parseRoute(value: string): WindsRoutePoint[] {
+  if (value.length > 4_096) throw new ApiError('route query exceeds the supported length.', 400, 'invalid_request');
   const points = value.split(';');
   if (points.length < 1 || points.length > 100) throw new ApiError('route must contain between one and 100 latitude,longitude points.', 400, 'invalid_request');
   return points.map((point) => {

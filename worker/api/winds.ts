@@ -10,6 +10,7 @@ import type {
   WindsStation
 } from './contracts';
 import { ApiError } from './errors';
+import { readBoundedText } from './bounded-text';
 
 const AVIATION_WEATHER_ORIGIN = 'https://aviationweather.gov';
 const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -115,11 +116,8 @@ async function boundedText(fetcher: ServiceFetcher, request: Request): Promise<s
     const response = await fetcher.fetch(new Request(request, { signal: controller.signal }));
     if (response.status === 204) throw new ApiError('No Winds/Temps forecast is available for this request.', 404, 'upstream_no_data');
     if (!response.ok) throw new ApiError('Aviation Weather Center is unavailable.', 503, 'upstream_unavailable');
-    const contentLength = Number.parseInt(response.headers.get('Content-Length') ?? '0', 10);
-    if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) throw new ApiError('Aviation Weather Center returned an oversized Winds/Temps response.', 502, 'upstream_invalid_response');
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) throw new ApiError('Aviation Weather Center returned an oversized Winds/Temps response.', 502, 'upstream_invalid_response');
-    return text;
+    try { return await readBoundedText(response, MAX_RESPONSE_BYTES); }
+    catch { throw new ApiError('Aviation Weather Center returned an oversized or unreadable Winds/Temps response.', 502, 'upstream_invalid_response'); }
   } catch (error) {
     if (error instanceof ApiError) throw error;
     throw new ApiError('Aviation Weather Center is unavailable.', 503, 'upstream_unavailable');
