@@ -189,6 +189,12 @@ const ensureValidTime = (value: string): void => {
   }
 };
 
+const ensureRegion = (value: WindsRegion): void => {
+  if (!isRegion(value)) {
+    throw new WindsClientError("INVALID_INPUT", "Winds forecast region must be us, alaska, or hawaii.");
+  }
+};
+
 const readBoundedText = async (response: Response): Promise<string> => {
   const contentLength = Number.parseInt(response.headers.get("Content-Length") ?? "0", 10);
   if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
@@ -254,6 +260,7 @@ export class WorkerWindsClient implements WindsTransportClient {
   public async fetchForecast(stationId: string, validTimeUtc: string, region: WindsRegion): Promise<WindsForecastSuccessPayload> {
     const station = ensureStationId(stationId);
     ensureValidTime(validTimeUtc);
+    ensureRegion(region);
     const url = new URL("/api/weather/winds", this.baseUrl);
     url.searchParams.set("station", station);
     url.searchParams.set("validTime", validTimeUtc);

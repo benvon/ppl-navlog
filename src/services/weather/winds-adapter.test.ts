@@ -127,6 +127,7 @@ describe("WorkerWindsClient trust boundary", () => {
     await expect(client.discoverStations([])).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.fetchForecast("XX", "2026-09-22T00:00:00.000Z", "us")).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.fetchForecast("BRL", "2026-02-30T00:00:00.000Z", "us")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(client.fetchForecast("BRL", "2026-09-22T00:00:00.000Z", "outside-v1" as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.discoverStations([{ latitude: Number.NaN, longitude: 0 } as never])).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(requests).toBe(0);
   });
