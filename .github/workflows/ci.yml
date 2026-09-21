@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check architecture boundaries
+        run: npm run lint:boundaries
+
+      - name: Test coverage
+        run: npm run test:coverage
+
+      - name: Build immutable artifact
+        env:
+          VITE_APP_VERSION: pr-${{ github.event.pull_request.number || github.run_number }}
+          VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run build
+
+      - name: Security checks
+        env:
+          CI: true
+        run: npm run security
+
+      - name: Upload validated static artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: static-assets-${{ github.sha }}
+          if-no-files-found: error
+          path: dist/
+          retention-days: 14

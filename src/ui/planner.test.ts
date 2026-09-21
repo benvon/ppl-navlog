@@ -1,0 +1,211 @@
+import { describe, expect, it } from "vitest";
+import { createLocalStudyAirportLookup } from "../application/airport-lookup";
+import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
+import type { AircraftProfile } from "../domain/aircraft";
+import type { PlanFamily, PlanRevision } from "../domain/route";
+import { renderPlanner } from "./planner";
+
+class MemoryPersistence implements NavlogPersistence {
+  private readonly profiles = new Map<string, AircraftProfile>();
+  private readonly revisions = new Map<string, PlanRevision>();
+
+  public async saveAircraftProfile(profile: AircraftProfile): Promise<void> { this.profiles.set(profile.id, profile); }
+  public async getAircraftProfile(id: string): Promise<AircraftProfile | undefined> { return this.profiles.get(id); }
+  public async listAircraftProfiles(): Promise<readonly AircraftProfile[]> { return [...this.profiles.values()]; }
+  public async savePlanRevision(_family: PlanFamily, revision: PlanRevision): Promise<void> { this.revisions.set(revision.id, revision); }
+  public async getPlanRevision(id: string): Promise<PlanRevision | undefined> { return this.revisions.get(id); }
+  public async listPlanRevisions(planId: string): Promise<readonly PlanRevision[]> { return [...this.revisions.values()].filter((revision) => revision.planId === planId); }
+}
+
+const clock: UseCaseClock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
+
+function ids(): UseCaseIds {
+  let count = 0;
+  return { next: () => `id-${count += 1}` };
+}
+
+async function settle(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function input(root: HTMLElement, id: string): HTMLInputElement {
+  const element = root.querySelector<HTMLInputElement>(`#${id}`);
+  if (element === null) throw new Error(`Missing input ${id}`);
+  return element;
+}
+
+function clickByLabel(root: HTMLElement, label: string): void {
+  const control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
+  if (control === undefined) throw new Error(`Missing button ${label}`);
+  control.click();
+}
+
+describe("planner shell", () => {
+  it("walks through local airport resolution, profile saving, draft saving, and a guarded per-leg override", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    expect(root.textContent).toContain("Aircraft profile");
+    expect(root.textContent).not.toContain("Global unlock");
+
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    input(root, "profile-name").value = "Study aircraft";
+    input(root, "usable-fuel").value = "24";
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("Saved aircraft profile Study aircraft.");
+
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "plan-title").value = "Preserved study route";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    input(root, "taxi-fuel").value = "1.2";
+    input(root, "reserve-fuel").value = "3.5";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    expect(root.textContent).toContain("Exact ICAO endpoints resolved from local study data.");
+    expect(input(root, "plan-title").value).toBe("Preserved study route");
+    expect(input(root, "departure-time").value).toBe("2026-10-01T12:00");
+    expect(input(root, "taxi-fuel").value).toBe("1.2");
+    expect(input(root, "reserve-fuel").value).toBe("3.5");
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Saved immutable revision");
+    expect(root.textContent).toContain("Cruise TAS default: 95 kt from Study aircraft.");
+
+    clickByLabel(root, "Override TAS for this leg");
+    input(root, "override-tas").value = "100";
+    input(root, "override-reason").value = "Instructor exercise";
+    const overrideForm = root.querySelector<HTMLFormElement>(".override-form");
+    if (overrideForm === null) throw new Error("Override form was not rendered.");
+    overrideForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("OVERRIDDEN");
+    expect(root.textContent).toContain("Restore aircraft default");
+
+    clickByLabel(root, "Restore aircraft default");
+    await settle();
+    expect(root.textContent).not.toContain("OVERRIDDEN effective TAS");
+    clickByLabel(root, "Reopen saved revision");
+    await settle();
+    expect(root.textContent).toContain("Reopened revision");
+  });
+
+  it("reports malformed airport identifiers without mutating the route", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    input(root, "departure-icao").value = "TOO-LONG";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+
+    expect(root.textContent).toContain("exact four-character ICAO");
+    expect(root.textContent).toContain("Resolve departure and destination before defining leg altitudes.");
+  });
+
+  it("adds and removes a manually entered checkpoint only after coordinate validation", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    input(root, "checkpoint-name").value = "Study point";
+    input(root, "checkpoint-latitude").value = "41.8";
+    input(root, "checkpoint-longitude").value = "-88.2";
+    const checkpointForm = root.querySelector<HTMLFormElement>(".checkpoint-editor form");
+    if (checkpointForm === null) throw new Error("Checkpoint form was not rendered.");
+    checkpointForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("Added checkpoint Study point.");
+    clickByLabel(root, "Remove Study point");
+    expect(root.textContent).not.toContain("Remove Study point");
+  });
+
+  it("prevents saving a plan until its profile and exact airport endpoints are available", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Save and select an aircraft profile");
+  });
+
+  it("reports invalid checkpoint and incomplete-route errors without changing the editable draft", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    input(root, "checkpoint-name").value = "Outside range";
+    input(root, "checkpoint-latitude").value = "91";
+    input(root, "checkpoint-longitude").value = "0";
+    const checkpointForm = root.querySelector<HTMLFormElement>(".checkpoint-editor form");
+    if (checkpointForm === null) throw new Error("Checkpoint form was not rendered.");
+    checkpointForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(root.textContent).toContain("latitude must be between");
+
+    input(root, "checkpoint-name").value = "";
+    input(root, "checkpoint-latitude").value = "41";
+    checkpointForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(root.textContent).toContain("Checkpoint name is required");
+
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first");
+  });
+
+  it("requires a UTC date/time before creating an immutable revision", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Enter a planned departure UTC date and time");
+  });
+
+  it("uses an explicitly selected second profile before the first plan revision", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+    const saveNamedProfile = async (name: string): Promise<void> => {
+      const form = root.querySelector<HTMLFormElement>(".profile-form");
+      if (form === null) throw new Error("Profile form was not rendered.");
+      input(root, "profile-name").value = name;
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await settle();
+    };
+
+    await saveNamedProfile("First aircraft");
+    await saveNamedProfile("Second aircraft");
+    const select = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (select === null || select.options.length < 3) throw new Error("Expected two selectable profiles.");
+    select.value = select.options[2]!.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(root.textContent).toContain("Cruise TAS default: 95 kt from Second aircraft.");
+  });
+});

@@ -1,0 +1,127 @@
+:root {
+  color: #102a43;
+  background: #f5f7fa;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+.app-shell {
+  box-sizing: border-box;
+  max-width: 96rem;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 3rem 2rem;
+}
+
+.planner-shell {
+  margin-top: 2rem;
+}
+
+.planner-feedback {
+  min-height: 1.5rem;
+  color: #243b53;
+}
+
+.planner-content {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.planner-panel {
+  padding: 1rem;
+  border: 1px solid #bcccdc;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.planner-panel:nth-child(3),
+.planner-panel:nth-child(4) {
+  grid-column: 1 / -1;
+}
+
+.profile-form,
+.route-form,
+.checkpoint-editor form,
+.leg-altitudes,
+.override-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.profile-form label,
+.route-form label,
+.checkpoint-editor label,
+.leg-altitudes label,
+.override-form label {
+  display: grid;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+input,
+select,
+button {
+  box-sizing: border-box;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+button {
+  border: 1px solid #486581;
+  border-radius: 0.25rem;
+  background: #f0f4f8;
+  color: #102a43;
+  cursor: pointer;
+}
+
+button:hover,
+button:focus-visible {
+  border-color: #0b69a3;
+  outline: 2px solid #7cc4fa;
+  outline-offset: 2px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.5rem;
+  border: 1px solid #d9e2ec;
+  text-align: left;
+  vertical-align: top;
+}
+
+@media (max-width: 54rem) {
+  .planner-content {
+    grid-template-columns: 1fr;
+  }
+
+  .planner-panel:nth-child(3),
+  .planner-panel:nth-child(4) {
+    grid-column: auto;
+  }
+
+  .profile-form,
+  .route-form,
+  .checkpoint-editor form,
+  .leg-altitudes,
+  .override-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+.build-identity {
+  color: #52606d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875rem;
+}
