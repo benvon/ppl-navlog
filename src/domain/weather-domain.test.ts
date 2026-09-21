@@ -6,6 +6,7 @@ import { feetMsl } from "./units";
 import { windAtAltitude } from "./wind";
 import { resolveWindAtAltitude } from "./weather-altitude";
 import { sampleEffectivePhaseWind } from "./weather-effective-wind";
+import { joinSurfaceWindToAloftLevels } from "./weather-surface-to-aloft";
 import { selectNearestWindsStation } from "./weather-stations";
 import { selectForecastValidTime } from "./weather-valid-time";
 
@@ -154,6 +155,28 @@ describe("altitude interpolation and effective phase wind", () => {
     expect(sampleEffectivePhaseWind(levels, value(feetMsl(3000)), value(feetMsl(9000)), { sampleCount: 1 })).toMatchObject({
       ok: false,
       error: { code: "INVALID_WIND_SAMPLING" },
+    });
+  });
+});
+
+describe("surface-to-aloft wind anchor", () => {
+  it("anchors the surface wind at field elevation and retains only higher FB levels", () => {
+    const surface = value(windAtAltitude(808, 180, 10));
+    const joined = value(joinSurfaceWindToAloftLevels(surface, [
+      value(windAtAltitude(3000, 270, 20)),
+      value(windAtAltitude(6000, 240, 25)),
+    ]));
+    expect(joined.levels.map((level) => level.altitude)).toEqual([808, 3000, 6000]);
+    expect(joined.firstAloftLevel.altitude).toBe(3000);
+    expect(joined.trace.formulaId).toBe("metar-field-elevation-to-first-fb-level-vector-interpolation");
+    expect(joined.trace.warnings[0]).toContain("Planning assumption");
+  });
+
+  it("does not create a surface anchor when no FB level is above the field", () => {
+    const surface = value(windAtAltitude(10000, 180, 10));
+    expect(joinSurfaceWindToAloftLevels(surface, [value(windAtAltitude(9000, 270, 20))])).toMatchObject({
+      ok: false,
+      error: { code: "UNSUPPORTED_WIND_ALTITUDE" },
     });
   });
 });

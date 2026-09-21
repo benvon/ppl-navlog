@@ -55,6 +55,14 @@ describe("storage model validation", () => {
     expect(validatePlanDraft(planDraft(), new Date("2027-01-01T00:00:00.000Z"))).toBe(true);
   });
 
+  it("validates an optional explicitly selected forecast period on persisted drafts", () => {
+    const fixedNow = new Date("2027-01-01T00:00:00.000Z");
+    const weatherSelection = { forecastValidTimeUtc: "2026-10-01T12:00:00.000Z", selectedAtUtc: timestamp };
+    expect(validatePlanDraft({ ...planDraft(), weatherSelection }, fixedNow)).toBe(true);
+    expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { ...weatherSelection, forecastValidTimeUtc: "not-utc" } }, fixedNow)).toThrow(/forecastValidTimeUtc/u);
+    expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { ...weatherSelection, selectedAtUtc: "2030-01-01T00:00:00.000Z" } }, fixedNow)).toThrow(/future/u);
+  });
+
   it("rejects malformed per-leg overrides and invalid checkpoint route structures", () => {
     const definition = route();
     const invalidOverride = {

@@ -3,16 +3,19 @@ import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { PlanFamily, PlanRevision } from "../domain/route";
+import type { WindsTransportClient } from "../services/weather/winds-client";
+import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import { renderPlanner } from "./planner";
 
 class MemoryPersistence implements NavlogPersistence {
   private readonly profiles = new Map<string, AircraftProfile>();
   private readonly revisions = new Map<string, PlanRevision>();
+  public readonly savedRevisions: PlanRevision[] = [];
 
   public async saveAircraftProfile(profile: AircraftProfile): Promise<void> { this.profiles.set(profile.id, profile); }
   public async getAircraftProfile(id: string): Promise<AircraftProfile | undefined> { return this.profiles.get(id); }
   public async listAircraftProfiles(): Promise<readonly AircraftProfile[]> { return [...this.profiles.values()]; }
-  public async savePlanRevision(_family: PlanFamily, revision: PlanRevision): Promise<void> { this.revisions.set(revision.id, revision); }
+  public async savePlanRevision(_family: PlanFamily, revision: PlanRevision): Promise<void> { this.revisions.set(revision.id, revision); this.savedRevisions.push(revision); }
   public async getPlanRevision(id: string): Promise<PlanRevision | undefined> { return this.revisions.get(id); }
   public async listPlanRevisions(planId: string): Promise<readonly PlanRevision[]> { return [...this.revisions.values()].filter((revision) => revision.planId === planId); }
 }
@@ -66,11 +69,12 @@ describe("planner shell", () => {
     input(root, "reserve-fuel").value = "3.5";
     clickByLabel(root, "Resolve exact ICAO endpoints");
     await settle();
-    expect(root.textContent).toContain("Exact ICAO endpoints resolved from local study data.");
+    expect(root.textContent).toContain("Exact ICAO endpoints resolved from the configured aviation-data source.");
     expect(input(root, "plan-title").value).toBe("Preserved study route");
     expect(input(root, "departure-time").value).toBe("2026-10-01T12:00");
     expect(input(root, "taxi-fuel").value).toBe("1.2");
     expect(input(root, "reserve-fuel").value).toBe("3.5");
+    expect(input(root, "descent-target").value).toBe("808");
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Saved immutable revision");
@@ -123,6 +127,28 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Added checkpoint Study point.");
     clickByLabel(root, "Remove Study point");
     expect(root.textContent).not.toContain("Remove Study point");
+  });
+
+  it("accepts SkyVector compact DMS and rejects ambiguous mixed coordinate inputs", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+    const checkpointForm = root.querySelector<HTMLFormElement>(".checkpoint-editor form");
+    if (checkpointForm === null) throw new Error("Checkpoint form was not rendered.");
+    input(root, "checkpoint-name").value = "DMS point";
+    input(root, "checkpoint-compact").value = "420604N0884405W";
+    checkpointForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(root.textContent).toContain("Added checkpoint DMS point.");
+    expect(root.textContent).toContain("Remove DMS point");
+
+    input(root, "checkpoint-name").value = "Ambiguous point";
+    input(root, "checkpoint-compact").value = "421358N0884647W";
+    input(root, "checkpoint-latitude").value = "42";
+    const nextForm = root.querySelector<HTMLFormElement>(".checkpoint-editor form");
+    if (nextForm === null) throw new Error("Checkpoint form was not rendered after adding a point.");
+    nextForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(root.textContent).toContain("not both");
+    expect(root.textContent).not.toContain("Remove Ambiguous point");
   });
 
   it("prevents saving a plan until its profile and exact airport endpoints are available", async () => {
@@ -207,5 +233,68 @@ describe("planner shell", () => {
     await settle();
 
     expect(root.textContent).toContain("Cruise TAS default: 95 kt from Second aircraft.");
+  });
+
+  it("requires a deliberate published forecast choice before storing it on a draft", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    const selector = root.querySelector<HTMLSelectElement>("#selected-forecast-period");
+    if (selector === null) throw new Error("Forecast selector was not rendered.");
+    expect(selector.value).toBe("");
+    selector.value = "2026-09-22T00:00:00.000Z";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2026-09-22T00:00:00.000Z");
+  });
+
+  it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    let attempt = 0;
+    const calculatePlan: BrowserPlanCalculator = async (_draft, _profile, parent) => {
+      attempt += 1;
+      if (attempt === 1) return { status: "blocked", reason: "weather-unavailable", message: "Selected winds are unavailable.", warnings: [] };
+      if (parent === undefined) throw new Error("Expected a saved parent revision.");
+      const revision: PlanRevision = { ...parent, id: "calculated-1", parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
+      return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
+    };
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+    expect(root.textContent).toContain("Navlog blocked: Selected winds are unavailable.");
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+    await settle();
+    expect(root.textContent).toContain("Calculated and saved complete navlog revision calculated-1.");
+    expect(root.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal.");
+    expect(root.textContent).toContain("RAW FB PRODUCT");
   });
 });

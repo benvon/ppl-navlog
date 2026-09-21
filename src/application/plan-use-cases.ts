@@ -6,10 +6,12 @@ import type {
   PlanDraft,
   PlanFamily,
   PlanRevision,
+  PlanWeatherSelection,
   RouteDefinition,
   RoutePoint,
   UserRouteLeg,
 } from "../domain/route";
+import { selectForecastValidTime, type AvailableForecastValidPeriod } from "../domain/weather-valid-time";
 import type { IndexedDbNavlogRepository } from "../services/storage/indexed-db-repository";
 
 export interface UseCaseClock {
@@ -47,6 +49,7 @@ export interface PlanDraftInput {
   readonly taxiRunupFuelGallons: number;
   readonly reserveFuelGallons: number;
   readonly descentTargetAltitudeFeetMsl: number;
+  readonly weatherSelection?: PlanWeatherSelection;
 }
 
 export interface SavedPlan {
@@ -112,9 +115,27 @@ export function createPlanDraft(input: PlanDraftInput, ids: UseCaseIds, clock: U
     route: input.route,
     selectedAircraftProfileId: input.selectedAircraftProfileId,
     fuelInputs: { taxiRunupFuelGallons: input.taxiRunupFuelGallons, reserveFuelGallons: input.reserveFuelGallons },
+    ...(input.weatherSelection === undefined ? {} : { weatherSelection: input.weatherSelection }),
     descentTargetAltitudeFeetMsl: pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
     createdAt,
     updatedAt: createdAt,
+  };
+}
+
+/** Records only a period the pilot chose from the provider's advertised periods. */
+export function selectPlanWeatherForecast(
+  draft: PlanDraft,
+  availablePeriods: readonly AvailableForecastValidPeriod[],
+  selectedForecastValidTimeUtc: string,
+  clock: UseCaseClock,
+): PlanDraft {
+  const selection = selectForecastValidTime(availablePeriods, selectedForecastValidTimeUtc, draft.departureTimeUtc);
+  if (!selection.ok) throw new DraftUseCaseError(selection.error.message);
+  const timestamp = clock.now().toISOString();
+  return {
+    ...draft,
+    weatherSelection: { forecastValidTimeUtc: selection.value.period.id, selectedAtUtc: timestamp },
+    updatedAt: timestamp,
   };
 }
 
@@ -176,8 +197,8 @@ export async function saveDraftRevision(
     draftSnapshot: { ...draft, updatedAt: timestamp },
     aircraftProfileSnapshot: { profile: structuredClone(profile), snapshottedAt: timestamp },
     weatherSnapshotIds: [],
-    calculationSnapshot: { status: "route-math-pending", version: "phase-3-shell" },
-    warnings: ["Live weather and phase calculations are not available in this planning shell."],
+    calculationSnapshot: { status: "calculation-pending", version: "draft/v1" },
+    warnings: ["This is an input-only draft revision; calculate the navlog separately before using its planning results."],
   };
   const family: PlanFamily = {
     schemaVersion: 1,

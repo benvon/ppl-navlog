@@ -340,6 +340,7 @@ export function validatePlanDraft(value: unknown, now = new Date()): value is Pl
     nonNegativeNumber(value.fuelInputs.taxiRunupFuelGallons, "$.fuelInputs.taxiRunupFuelGallons", issues);
     nonNegativeNumber(value.fuelInputs.reserveFuelGallons, "$.fuelInputs.reserveFuelGallons", issues);
   }
+  validateWeatherSelection(value.weatherSelection, issues, now);
   validatePlanningValue(value.descentTargetAltitudeFeetMsl, "$.descentTargetAltitudeFeetMsl", issues);
   if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
   if (utcInstant(value.updatedAt, "$.updatedAt", issues)) {
@@ -348,6 +349,18 @@ export function validatePlanDraft(value: unknown, now = new Date()): value is Pl
   }
   if (issues.length > 0) throw new StorageValidationError(issues);
   return true;
+}
+
+function validateWeatherSelection(value: unknown, issues: ValidationIssue[], now: Date): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    add(issues, "$.weatherSelection", "must be an object");
+    return;
+  }
+  utcInstant(value.forecastValidTimeUtc, "$.weatherSelection.forecastValidTimeUtc", issues);
+  if (utcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues)) {
+    checkNoFutureTimestamp(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
+  }
 }
 
 export function validatePlanFamily(value: unknown, now = new Date()): value is PlanFamily {

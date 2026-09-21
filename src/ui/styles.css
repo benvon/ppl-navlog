@@ -93,6 +93,38 @@ table {
   border-collapse: collapse;
 }
 
+.navlog-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.calculated-navlog table {
+  min-width: 90rem;
+}
+
+.calculated-navlog caption {
+  padding: 0.5rem;
+  text-align: left;
+  font-weight: 600;
+}
+
+.calculated-navlog pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.forecast-selection {
+  margin-block: 1rem;
+}
+
+.forecast-selection label {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 42rem;
+}
+
 th,
 td {
   padding: 0.5rem;

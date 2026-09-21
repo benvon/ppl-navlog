@@ -9,6 +9,7 @@ import {
   restoreCruiseTasDefault,
   saveAircraftProfile,
   saveDraftRevision,
+  selectPlanWeatherForecast,
   type NavlogPersistence,
   type UseCaseClock,
   type UseCaseIds,
@@ -118,5 +119,18 @@ describe("plan draft use cases", () => {
     const profile = await saveAircraftProfile(persistence, profileInput(), ids("aircraft-1"), fixedClock);
 
     expect(await persistence.getAircraftProfile(profile.id)).toEqual(profile);
+  });
+
+  it("persists only an explicitly selected, departure-valid forecast period", async () => {
+    const airports = createLocalStudyAirportLookup();
+    const departure = await airports.lookupExactIcao("KORD");
+    const destination = await airports.lookupExactIcao("KJVL");
+    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
+    const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: "aircraft-1", taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
+    const periods = [{ id: "2026-10-01T12:00:00.000Z", validFromUtc: "2026-10-01T10:00:00.000Z", validToUtc: "2026-10-01T15:00:00.000Z" }];
+
+    const selected = selectPlanWeatherForecast(draft, periods, periods[0]!.id, fixedClock);
+    expect(selected.weatherSelection).toEqual({ forecastValidTimeUtc: periods[0]!.id, selectedAtUtc: "2026-09-21T12:00:00.000Z" });
+    expect(() => selectPlanWeatherForecast(draft, periods, "2026-10-01T18:00:00.000Z", fixedClock)).toThrow(/unavailable/iu);
   });
 });

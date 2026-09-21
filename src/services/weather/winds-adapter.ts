@@ -1,11 +1,13 @@
-import type { WindsAloftLevel, WindsForecastAvailability, WindsForecastSuccessPayload, WindsSourceProvenance, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
+import type { MetarData, MetarSuccessPayload, SourceProvenance, WindsAloftLevel, WindsForecastAvailability, WindsForecastSuccessPayload, WindsSourceProvenance, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
+import type { CalculationTrace } from "../../domain/calculation-trace";
 import { coordinate, sameCoordinate, type Coordinate } from "../../domain/coordinates";
 import { failure, propagateFailure, type DomainResult } from "../../domain/errors";
 import type { EffectiveWindResolver } from "../../domain/phase-planning";
-import { feetMsl } from "../../domain/units";
+import { feetMsl, type FeetMsl } from "../../domain/units";
 import { windAtAltitude, type Wind, type WindAtAltitude } from "../../domain/wind";
 import { resolveWindAtAltitude, type AltitudeResolvedWind } from "../../domain/weather-altitude";
 import { sampleEffectivePhaseWind, type EffectivePhaseWind, type EffectiveWindSamplingOptions } from "../../domain/weather-effective-wind";
+import { joinSurfaceWindToAloftLevels } from "../../domain/weather-surface-to-aloft";
 import { selectNearestWindsStation, type AvailableWindsStation, type NearestWindsStationSelection } from "../../domain/weather-stations";
 import { selectForecastValidTime, type AvailableForecastValidPeriod, type ForecastValidTimeSelection } from "../../domain/weather-valid-time";
 import type { WindsTransportClient } from "./winds-client";
@@ -18,7 +20,65 @@ export interface WorkerWindsSelectionInput {
   /** A published Worker forecast `validAt` timestamp selected by the pilot. */
   readonly selectedForecastValidTimeUtc: string;
   readonly departureTimeUtc: string;
+  /**
+   * Optional immutable METAR evidence supplied by orchestration. When it is
+   * usable, its true wind is anchored at the actual departure field elevation.
+   */
+  readonly departureSurfaceWind?: DepartureSurfaceWindInput;
 }
+
+export interface DepartureSurfaceWindInput {
+  /** Canonical identity and elevation from the departure AirportRoutePoint. */
+  readonly airportIcao: string;
+  /** Airport-data field elevation, not an elevation parsed from the METAR report. */
+  readonly fieldElevationFeetMsl: number;
+  readonly metar: MetarSuccessPayload;
+}
+
+export interface SurfaceMetarEvidence {
+  readonly icao: string;
+  readonly metarRaw: string;
+  readonly observedAt: string | null;
+  readonly fetchedAt: string;
+  readonly source: MetarData["source"];
+  readonly provenance: SourceProvenance;
+  readonly requestId: string;
+  readonly wind: MetarData["wind"];
+}
+
+export interface AppliedSurfaceToAloftInterpolation {
+  readonly status: "applied";
+  readonly assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level";
+  readonly statement: string;
+  readonly airportIcao: string;
+  readonly fieldElevationFeetMsl: number;
+  readonly fieldElevationSource: "departure-airport-data";
+  readonly metar: SurfaceMetarEvidence;
+  readonly directionTreatment: "fixed-true" | "calm-normalized-to-000";
+  readonly firstAloftLevel: WindLevelEvidence;
+  readonly trace: CalculationTrace;
+}
+
+export interface UnavailableSurfaceToAloftInterpolation {
+  readonly status: "unavailable";
+  readonly airportIcao: string;
+  readonly fieldElevationFeetMsl: number;
+  readonly fieldElevationSource: "departure-airport-data";
+  readonly metar: SurfaceMetarEvidence;
+  readonly reason:
+    | "airport-identity-mismatch"
+    | "invalid-field-elevation"
+    | "stale-cache-response"
+    | "observation-time-unavailable"
+    | "observation-outside-departure-window"
+    | "variable-direction"
+    | "unusable-surface-wind"
+    | "no-aloft-level-above-field";
+  readonly statement: string;
+}
+
+/** Explicit evidence for the approved planning interpolation, or why it was not used. */
+export type SurfaceToAloftInterpolation = AppliedSurfaceToAloftInterpolation | UnavailableSurfaceToAloftInterpolation;
 
 export interface WindLevelEvidence {
   readonly transport: WindsAloftLevel;
@@ -33,6 +93,8 @@ export interface LoadedWindsData {
   readonly stationDiscoveryPayload: WindsStationsSuccessPayload;
   readonly availableLevels: readonly WindAtAltitude[];
   readonly levelEvidence: readonly WindLevelEvidence[];
+  /** Visible surface-METAR interpolation evidence; omitted only when no METAR was supplied. */
+  readonly surfaceToAloftInterpolation?: SurfaceToAloftInterpolation;
   /** Raw, typed transport records suitable for an immutable weather snapshot. */
   readonly provenance: {
     readonly discovery: readonly WindsSourceProvenance[];
@@ -41,12 +103,27 @@ export interface LoadedWindsData {
   };
 }
 
+/** A sampled phase result accompanied by the applied surface assumption when that phase used it. */
+export interface LoadedEffectivePhaseWind extends EffectivePhaseWind {
+  readonly surfaceToAloftInterpolation?: AppliedSurfaceToAloftInterpolation;
+}
+
+/** Wind evidence for one allocated navlog subleg. Equal altitudes resolve directly, not by sampling. */
+export interface LoadedSublegWindResolution {
+  readonly wind: Wind;
+  readonly trace: CalculationTrace;
+  readonly method: "direct-altitude-resolution" | "sampled-phase-wind";
+  readonly surfaceToAloftInterpolation?: AppliedSurfaceToAloftInterpolation;
+}
+
 export class WindsAdapterError extends Error {
   public constructor(readonly code: "TRANSPORT" | "SELECTION" | "INVALID_FORECAST" | "NO_USABLE_LEVELS", message: string) {
     super(message);
     this.name = "WindsAdapterError";
   }
 }
+
+const METAR_MAX_OBSERVATION_AGE_MS = 2 * 60 * 60 * 1_000;
 
 const toAvailableStation = (source: { readonly id: string; readonly coordinates: { readonly latitudeDeg: number; readonly longitudeDeg: number }; readonly name: string | null }): DomainResult<AvailableWindsStation> => {
   const location = coordinate(source.coordinates.latitudeDeg, source.coordinates.longitudeDeg);
@@ -151,6 +228,138 @@ const normalizeLevels = (levels: readonly WindsAloftLevel[]): readonly WindLevel
   return normalized;
 };
 
+const metarEvidence = (metar: MetarSuccessPayload): SurfaceMetarEvidence => ({
+  icao: metar.metar.icao,
+  metarRaw: metar.metar.metarRaw,
+  observedAt: metar.metar.observedAt,
+  fetchedAt: metar.metar.fetchedAt,
+  source: metar.metar.source,
+  provenance: metar.provenance,
+  requestId: metar.requestId,
+  wind: metar.metar.wind,
+});
+
+const unavailableSurfaceInterpolation = (
+  input: DepartureSurfaceWindInput,
+  reason: UnavailableSurfaceToAloftInterpolation["reason"],
+  statement: string,
+): UnavailableSurfaceToAloftInterpolation => ({
+  status: "unavailable",
+  airportIcao: input.airportIcao,
+  fieldElevationFeetMsl: input.fieldElevationFeetMsl,
+  fieldElevationSource: "departure-airport-data",
+  metar: metarEvidence(input.metar),
+  reason,
+  statement,
+});
+
+interface UsableSurfaceWind {
+  readonly fieldElevation: FeetMsl;
+  readonly direction: number;
+  readonly speedKt: number;
+  readonly directionTreatment: AppliedSurfaceToAloftInterpolation["directionTreatment"];
+}
+
+const validatedFieldElevation = (input: DepartureSurfaceWindInput): FeetMsl | UnavailableSurfaceToAloftInterpolation => {
+  if (input.metar.metar.icao !== input.airportIcao) {
+    return unavailableSurfaceInterpolation(input, "airport-identity-mismatch", "Surface-METAR interpolation was not used because the METAR airport identity does not match the departure airport.");
+  }
+  const fieldElevation = feetMsl(input.fieldElevationFeetMsl);
+  return fieldElevation.ok
+    ? fieldElevation.value
+    : unavailableSurfaceInterpolation(input, "invalid-field-elevation", "Surface-METAR interpolation was not used because the departure field elevation is invalid.");
+};
+
+const metarObservationIsUsable = (
+  input: DepartureSurfaceWindInput,
+  departureTimeUtc: string,
+): UnavailableSurfaceToAloftInterpolation | undefined => {
+  const source = input.metar;
+  if (source.provenance.cache.status === "stale_on_error" || source.provenance.cache.freshnessRemainingSeconds <= 0) {
+    return unavailableSurfaceInterpolation(input, "stale-cache-response", "Surface-METAR interpolation was not used because the METAR response is stale.");
+  }
+  const observedMs = source.metar.observedAt === null ? Number.NaN : Date.parse(source.metar.observedAt);
+  if (!Number.isFinite(observedMs)) {
+    return unavailableSurfaceInterpolation(input, "observation-time-unavailable", "Surface-METAR interpolation was not used because the METAR observation time is unavailable.");
+  }
+  const departureMs = Date.parse(departureTimeUtc);
+  if (!Number.isFinite(departureMs) || observedMs > departureMs || departureMs - observedMs > METAR_MAX_OBSERVATION_AGE_MS) {
+    return unavailableSurfaceInterpolation(input, "observation-outside-departure-window", "Surface-METAR interpolation was not used because the observation is outside the documented two-hour window at or before departure.");
+  }
+  return undefined;
+};
+
+const usableSurfaceWind = (input: DepartureSurfaceWindInput, fieldElevation: FeetMsl): UsableSurfaceWind | UnavailableSurfaceToAloftInterpolation => {
+  const surfaceWind = input.metar.metar.wind;
+  if (surfaceWind.directionType === "variable") {
+    return unavailableSurfaceInterpolation(input, "variable-direction", "Surface-METAR interpolation was not used because a variable wind has no single true-direction vector.");
+  }
+  const directionTreatment = surfaceWind.directionType === "calm" ? "calm-normalized-to-000" : "fixed-true";
+  const direction = surfaceWind.directionType === "calm" ? 0 : surfaceWind.directionDegTrue;
+  if (direction === null || !Number.isFinite(direction) || !Number.isFinite(surfaceWind.speedKt) || surfaceWind.speedKt < 0) {
+    return unavailableSurfaceInterpolation(input, "unusable-surface-wind", "Surface-METAR interpolation was not used because the METAR does not contain a usable fixed or calm wind.");
+  }
+  return { fieldElevation, direction, speedKt: surfaceWind.speedKt, directionTreatment };
+};
+
+const surfacePrerequisites = (
+  input: DepartureSurfaceWindInput,
+  departureTimeUtc: string,
+): UsableSurfaceWind | UnavailableSurfaceToAloftInterpolation => {
+  const fieldElevation = validatedFieldElevation(input);
+  if (typeof fieldElevation !== "number") return fieldElevation;
+  const observationIssue = metarObservationIsUsable(input, departureTimeUtc);
+  if (observationIssue !== undefined) return observationIssue;
+  return usableSurfaceWind(input, fieldElevation);
+};
+
+const resolveSurfaceToAloftInterpolation = (
+  input: DepartureSurfaceWindInput,
+  departureTimeUtc: string,
+  availableLevels: readonly WindAtAltitude[],
+  levelEvidence: readonly WindLevelEvidence[],
+): { readonly levels: readonly WindAtAltitude[]; readonly evidence: SurfaceToAloftInterpolation } => {
+  const prerequisites = surfacePrerequisites(input, departureTimeUtc);
+  if ("status" in prerequisites) return { levels: availableLevels, evidence: prerequisites };
+  const anchor = windAtAltitude(prerequisites.fieldElevation, prerequisites.direction, prerequisites.speedKt);
+  if (!anchor.ok) {
+    return {
+      levels: availableLevels,
+      evidence: unavailableSurfaceInterpolation(input, "unusable-surface-wind", "Surface-METAR interpolation was not used because the parsed surface wind is invalid."),
+    };
+  }
+  const joined = joinSurfaceWindToAloftLevels(anchor.value, availableLevels);
+  if (!joined.ok) {
+    return {
+      levels: availableLevels,
+      evidence: unavailableSurfaceInterpolation(input, "no-aloft-level-above-field", "Surface-METAR interpolation was not used because no published FB level is available above the departure field."),
+    };
+  }
+  const firstAloftLevel = levelEvidence.find((level) => level.domainLevel?.altitude === joined.value.firstAloftLevel.altitude);
+  if (firstAloftLevel === undefined) {
+    // This would require a mismatch between normalized evidence and its levels.
+    return {
+      levels: availableLevels,
+      evidence: unavailableSurfaceInterpolation(input, "no-aloft-level-above-field", "Surface-METAR interpolation was not used because the selected FB level evidence is unavailable."),
+    };
+  }
+  return {
+    levels: joined.value.levels,
+    evidence: {
+      status: "applied",
+      assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
+      statement: "Planning assumption: the departure METAR true wind is anchored at the field elevation supplied by departure-airport data (not by the METAR report) and vector-interpolated only to the first available FB winds-aloft level.",
+      airportIcao: input.airportIcao,
+      fieldElevationFeetMsl: input.fieldElevationFeetMsl,
+      fieldElevationSource: "departure-airport-data",
+      metar: metarEvidence(input.metar),
+      directionTreatment: prerequisites.directionTreatment,
+      firstAloftLevel,
+      trace: joined.value.trace,
+    },
+  };
+};
+
 /**
  * Browser-side composition over the Worker contract. It does not invent a
  * forecast period, station, wind direction, or unavailable altitude level.
@@ -209,13 +418,17 @@ export class WorkerWindsAdapter {
     if (availableLevels.length === 0) {
       throw new WindsAdapterError("NO_USABLE_LEVELS", "The selected forecast contains no usable winds-aloft levels.");
     }
+    const surfaceResolution = input.departureSurfaceWind === undefined
+      ? undefined
+      : resolveSurfaceToAloftInterpolation(input.departureSurfaceWind, input.departureTimeUtc, availableLevels, levelEvidence);
     return {
       stationSelection: selectedStation,
       forecastSelection: actualForecastSelection,
       forecastPayload,
       stationDiscoveryPayload: discovery,
-      availableLevels,
+      availableLevels: surfaceResolution?.levels ?? availableLevels,
       levelEvidence,
+      surfaceToAloftInterpolation: surfaceResolution?.evidence,
       provenance: {
         discovery: discovery.provenance,
         forecast: forecastPayload.provenance,
@@ -245,12 +458,74 @@ export const sampleLoadedEffectivePhaseWind = (
   startingAltitudeFeetMsl: number,
   targetAltitudeFeetMsl: number,
   options: EffectiveWindSamplingOptions = {},
-): DomainResult<EffectivePhaseWind> => {
+): DomainResult<LoadedEffectivePhaseWind> => {
   const start = feetMsl(startingAltitudeFeetMsl);
   if (!start.ok) return propagateFailure(start);
   const target = feetMsl(targetAltitudeFeetMsl);
   if (!target.ok) return propagateFailure(target);
-  return sampleEffectivePhaseWind(data.availableLevels, start.value, target.value, options);
+  const effective = sampleEffectivePhaseWind(data.availableLevels, start.value, target.value, options);
+  if (!effective.ok) return propagateFailure(effective);
+  const usesSurfaceInterpolation = appliedSurfaceInterpolationForAltitudeRange(data, start.value, target.value);
+  return {
+    ok: true,
+    value: {
+      ...effective.value,
+      ...(usesSurfaceInterpolation === undefined ? {} : { surfaceToAloftInterpolation: usesSurfaceInterpolation }),
+    },
+  };
+};
+
+const appliedSurfaceInterpolationForAltitudeRange = (
+  data: LoadedWindsData,
+  firstAltitudeFeetMsl: number,
+  secondAltitudeFeetMsl: number,
+): AppliedSurfaceToAloftInterpolation | undefined => {
+  const interpolation = data.surfaceToAloftInterpolation;
+  if (interpolation?.status !== "applied") return undefined;
+  const firstAloftAltitude = interpolation.firstAloftLevel.domainLevel?.altitude;
+  if (firstAloftAltitude === undefined) return undefined;
+  return Math.min(firstAltitudeFeetMsl, secondAltitudeFeetMsl) < firstAloftAltitude &&
+    Math.max(firstAltitudeFeetMsl, secondAltitudeFeetMsl) >= interpolation.fieldElevationFeetMsl
+    ? interpolation
+    : undefined;
+};
+
+/**
+ * Resolves weather for one navlog subleg using the selected immutable data.
+ * Level sublegs use a direct altitude resolution so they never invoke the
+ * phase sampler with identical endpoints.
+ */
+export const resolveLoadedEffectiveWindForSubleg = (
+  data: LoadedWindsData,
+  startingAltitudeFeetMsl: number,
+  targetAltitudeFeetMsl: number,
+  options: EffectiveWindSamplingOptions = {},
+): DomainResult<LoadedSublegWindResolution> => {
+  if (startingAltitudeFeetMsl === targetAltitudeFeetMsl) {
+    const direct = resolveLoadedWindAtAltitude(data, startingAltitudeFeetMsl);
+    if (!direct.ok) return propagateFailure(direct);
+    const surfaceToAloftInterpolation = appliedSurfaceInterpolationForAltitudeRange(data, startingAltitudeFeetMsl, targetAltitudeFeetMsl);
+    return {
+      ok: true,
+      value: {
+        wind: direct.value.wind,
+        trace: direct.value.trace,
+        method: "direct-altitude-resolution",
+        ...(surfaceToAloftInterpolation === undefined ? {} : { surfaceToAloftInterpolation }),
+      },
+    };
+  }
+  const sampled = sampleLoadedEffectivePhaseWind(data, startingAltitudeFeetMsl, targetAltitudeFeetMsl, options);
+  if (!sampled.ok) return propagateFailure(sampled);
+  return {
+    ok: true,
+    value: {
+      wind: sampled.value.wind,
+      trace: sampled.value.trace,
+      method: "sampled-phase-wind",
+      ...(sampled.value.surfaceToAloftInterpolation === undefined ? {} : { surfaceToAloftInterpolation: sampled.value.surfaceToAloftInterpolation }),
+    },
+  };
 };
 
 /** Bridges selected immutable forecast data into bounded phase convergence. */

@@ -2,6 +2,9 @@ import type {
   ApiErrorCode,
   ApiErrorPayload,
   CacheProvenance,
+  MetarData,
+  MetarSuccessPayload,
+  SourceProvenance,
   WindsAloftLevel,
   WindsForecast,
   WindsForecastAvailability,
@@ -24,6 +27,11 @@ export interface BrowserFetch {
 export interface WindsTransportClient {
   discoverStations(route: readonly Coordinate[]): Promise<WindsStationsSuccessPayload>;
   fetchForecast(stationId: string, validTimeUtc: string, region: WindsRegion): Promise<WindsForecastSuccessPayload>;
+}
+
+/** Compatible Worker METAR boundary, kept separate so aloft-only adapters remain testable. */
+export interface MetarTransportClient {
+  fetchMetar(icao: string): Promise<MetarSuccessPayload>;
 }
 
 export class WindsClientError extends Error {
@@ -125,7 +133,32 @@ const isSourceProvenance = (value: unknown): value is WindsSourceProvenance =>
   isRegion(value.region) &&
   value.endpoint === "https://aviationweather.gov/api/data/windtemp" &&
   isUtcMilliseconds(value.fetchedAt) &&
-  isCacheProvenance(value.cache);
+    isCacheProvenance(value.cache);
+
+const isMetarSourceProvenance = (value: unknown): value is SourceProvenance =>
+  isRecord(value) && value.adapter === "runway-picker" && isUtcMilliseconds(value.fetchedAt) && isCacheProvenance(value.cache);
+
+const isFixedMetarWind = (value: Record<string, unknown>): boolean =>
+  value.directionType === "fixed" && isBoundedNumber(value.directionDegTrue, 0, 360) && value.directionVariation === null;
+
+const isVariableMetarWind = (value: Record<string, unknown>): boolean =>
+  value.directionType === "variable" && value.directionDegTrue === null && isRecord(value.directionVariation) &&
+  isBoundedNumber(value.directionVariation.fromDegTrue, 0, 360) && isBoundedNumber(value.directionVariation.toDegTrue, 0, 360);
+
+const isCalmMetarWind = (value: Record<string, unknown>): boolean =>
+  value.directionType === "calm" && value.directionDegTrue === null && value.directionVariation === null && value.speedKt === 0 && value.gustKt === null;
+
+const isMetarWind = (value: unknown): value is MetarData["wind"] =>
+  isRecord(value) && isString(value.raw, 64) && isBoundedNumber(value.speedKt, 0, 199) &&
+  nullable(value.gustKt, (candidate) => isBoundedNumber(candidate, 0, 199)) &&
+  (isFixedMetarWind(value) || isVariableMetarWind(value) || isCalmMetarWind(value));
+
+const isMetar = (value: unknown): value is MetarData =>
+  isRecord(value) && all(
+    isString(value.icao, 4), typeof value.icao === "string" && /^[A-Z0-9]{4}$/.test(value.icao),
+    isString(value.metarRaw, 4096), isMetarWind(value.wind), value.source === "aviationweather",
+    isUtcMilliseconds(value.fetchedAt), nullable(value.observedAt, isUtcMilliseconds),
+  );
 
 const isRequestId = (value: unknown): value is string => isString(value, 128) && /^[0-9a-f-]{8,128}$/i.test(value);
 
@@ -140,6 +173,9 @@ const isStationsPayload = (value: unknown): value is WindsStationsSuccessPayload
 
 const isForecastPayload = (value: unknown): value is WindsForecastSuccessPayload =>
   isRecord(value) && isForecast(value.forecast) && isSourceProvenance(value.provenance) && isRequestId(value.requestId);
+
+const isMetarPayload = (value: unknown): value is MetarSuccessPayload =>
+  isRecord(value) && isMetar(value.metar) && isMetarSourceProvenance(value.provenance) && isRequestId(value.requestId);
 
 const isErrorPayload = (value: unknown): value is ApiErrorPayload =>
   isRecord(value) && isString(value.error, 512) && isApiErrorCode(value.code) && isRequestId(value.requestId);
@@ -179,6 +215,14 @@ const ensureStationId = (stationId: string): string => {
   const normalized = stationId.trim().toUpperCase();
   if (!/^[A-Z0-9]{3}$/.test(normalized)) {
     throw new WindsClientError("INVALID_INPUT", "Winds forecast station must be exactly three alphanumeric characters.");
+  }
+  return normalized;
+};
+
+const ensureIcao = (icao: string): string => {
+  const normalized = icao.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(normalized)) {
+    throw new WindsClientError("INVALID_INPUT", "METAR airport must be exactly four alphanumeric characters.");
   }
   return normalized;
 };
@@ -236,7 +280,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
   }
 };
 
-export class WorkerWindsClient implements WindsTransportClient {
+export class WorkerWindsClient implements WindsTransportClient, MetarTransportClient {
   private readonly baseUrl: URL;
 
   public constructor(
@@ -268,6 +312,16 @@ export class WorkerWindsClient implements WindsTransportClient {
     const payload = await this.requestJson(url);
     if (!isForecastPayload(payload)) {
       throw new WindsClientError("INVALID_RESPONSE", "Winds forecast response did not match the documented contract.");
+    }
+    return payload;
+  }
+
+  public async fetchMetar(icao: string): Promise<MetarSuccessPayload> {
+    const normalizedIcao = ensureIcao(icao);
+    const url = new URL(`/api/weather/metar/${normalizedIcao}`, this.baseUrl);
+    const payload = await this.requestJson(url);
+    if (!isMetarPayload(payload) || payload.metar.icao !== normalizedIcao) {
+      throw new WindsClientError("INVALID_RESPONSE", "METAR response did not match the documented contract.");
     }
     return payload;
   }

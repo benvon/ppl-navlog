@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { WindsForecastSuccessPayload, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
+import type { MetarSuccessPayload, WindsForecastSuccessPayload, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
 import { coordinate } from "../../domain/coordinates";
 import { feetMsl, nauticalMiles } from "../../domain/units";
-import { WorkerWindsAdapter, createSampledPhaseWindResolver, resolveLoadedWindAtAltitude, sampleLoadedEffectivePhaseWind } from "./winds-adapter";
+import { WorkerWindsAdapter, createSampledPhaseWindResolver, resolveLoadedEffectiveWindForSubleg, resolveLoadedWindAtAltitude, sampleLoadedEffectivePhaseWind } from "./winds-adapter";
 import { WorkerWindsClient, WindsClientError, type BrowserFetch, type WindsTransportClient } from "./winds-client";
 
 const value = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T => {
@@ -70,6 +70,23 @@ const forecastPayload = (): WindsForecastSuccessPayload => ({
   requestId: "22222222-2222-4222-8222-222222222222",
 });
 
+const metarPayload = (): MetarSuccessPayload => ({
+  metar: {
+    icao: "KJVL",
+    metarRaw: "KJVL 212130Z 18010KT 10SM FEW050 25/12 A3002 RMK AO2",
+    wind: { raw: "18010KT", directionType: "fixed", directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
+    source: "aviationweather",
+    fetchedAt: "2026-09-21T21:31:00.000Z",
+    observedAt: "2026-09-21T21:30:00.000Z",
+  },
+  provenance: {
+    adapter: "runway-picker",
+    fetchedAt: "2026-09-21T21:31:00.000Z",
+    cache: { ...cache, key: "metar:KJVL", resource: "metar", fetchedAt: "2026-09-21T21:31:00.000Z", servedAt: "2026-09-21T21:31:00.000Z", expiresAt: "2026-09-21T21:46:00.000Z" },
+  },
+  requestId: "33333333-3333-4333-8333-333333333333",
+});
+
 class FakeWindsClient implements WindsTransportClient {
   public constructor(
     private readonly discovery: WindsStationsSuccessPayload = discoveryPayload(),
@@ -121,6 +138,19 @@ describe("WorkerWindsClient trust boundary", () => {
     expect(requests[0]?.searchParams.get("validTime")).toBe("2026-09-22T00:00:00.000Z");
   });
 
+  it("loads a validated METAR from the existing Worker contract", async () => {
+    const requests: URL[] = [];
+    const fetcher: BrowserFetch = {
+      async fetch(input): Promise<Response> {
+        requests.push(new URL(input.toString()));
+        return Response.json(metarPayload());
+      },
+    };
+    const client = new WorkerWindsClient(fetcher, "https://navlog.example");
+    await expect(client.fetchMetar(" kjvl ")).resolves.toMatchObject({ metar: { icao: "KJVL", wind: { directionDegTrue: 180 } } });
+    expect(requests[0]?.pathname).toBe("/api/weather/metar/KJVL");
+  });
+
   it("rejects invalid local inputs before a request is made", async () => {
     let requests = 0;
     const client = new WorkerWindsClient({ fetch: async () => { requests += 1; return Response.json(discoveryPayload()); } }, "https://navlog.example");
@@ -128,6 +158,7 @@ describe("WorkerWindsClient trust boundary", () => {
     await expect(client.fetchForecast("XX", "2026-09-22T00:00:00.000Z", "us")).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.fetchForecast("BRL", "2026-02-30T00:00:00.000Z", "us")).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.fetchForecast("BRL", "2026-09-22T00:00:00.000Z", "outside-v1" as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(client.fetchMetar("JVL")).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(client.discoverStations([{ latitude: Number.NaN, longitude: 0 } as never])).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(requests).toBe(0);
   });
@@ -213,6 +244,66 @@ describe("WorkerWindsAdapter", () => {
       ok: false,
       error: { code: "UNSUPPORTED_WIND_ALTITUDE" },
     });
+  });
+
+  it("uses a fresh fixed-direction METAR at departure field elevation and exposes the planning assumption", async () => {
+    const loaded = await new WorkerWindsAdapter(new FakeWindsClient()).load({
+      ...input,
+      departureSurfaceWind: { airportIcao: "KJVL", fieldElevationFeetMsl: 808, metar: metarPayload() },
+    });
+    expect(loaded.availableLevels.map((level) => level.altitude)).toEqual([808, 3000, 6000, 9000]);
+    expect(loaded.surfaceToAloftInterpolation).toMatchObject({
+      status: "applied",
+      assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
+      fieldElevationFeetMsl: 808,
+      directionTreatment: "fixed-true",
+      firstAloftLevel: { transport: { altitudeFt: 3000 } },
+      metar: { metarRaw: expect.stringContaining("18010KT"), requestId: "33333333-3333-4333-8333-333333333333" },
+    });
+    const surface = value(resolveLoadedWindAtAltitude(loaded, 808));
+    expect(surface.wind).toMatchObject({ directionFrom: 180, speed: 10 });
+    const effective = value(sampleLoadedEffectivePhaseWind(loaded, 808, 6000));
+    expect(effective.surfaceToAloftInterpolation).toMatchObject({ status: "applied" });
+    const directCruise = value(resolveLoadedEffectiveWindForSubleg(loaded, 6000, 6000));
+    expect(directCruise).toMatchObject({ method: "direct-altitude-resolution", wind: { directionFrom: 270, speed: 20 } });
+    expect(directCruise.surfaceToAloftInterpolation).toBeUndefined();
+    const climbingSubleg = value(resolveLoadedEffectiveWindForSubleg(loaded, 808, 6000));
+    expect(climbingSubleg).toMatchObject({ method: "sampled-phase-wind", surfaceToAloftInterpolation: { status: "applied" } });
+  });
+
+  it("does not turn calm, variable, stale, or unavailable METAR evidence into a surface vector", async () => {
+    const base = metarPayload();
+    const cases = [
+      {
+        metar: { ...base, metar: { ...base.metar, wind: { raw: "00000KT", directionType: "calm" as const, directionDegTrue: null, directionVariation: null, speedKt: 0, gustKt: null } } },
+        expected: "calm-normalized-to-000",
+      },
+      {
+        metar: { ...base, metar: { ...base.metar, wind: { raw: "VRB05KT", directionType: "variable" as const, directionDegTrue: null, directionVariation: { fromDegTrue: 120, toDegTrue: 220 }, speedKt: 5, gustKt: null } } },
+        expected: "variable-direction",
+      },
+      {
+        metar: { ...base, provenance: { ...base.provenance, cache: { ...base.provenance.cache, status: "stale_on_error" as const, source: "stale" as const, freshnessRemainingSeconds: 0 } } },
+        expected: "stale-cache-response",
+      },
+      {
+        metar: { ...base, metar: { ...base.metar, observedAt: null } },
+        expected: "observation-time-unavailable",
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const loaded = await new WorkerWindsAdapter(new FakeWindsClient()).load({
+        ...input,
+        departureSurfaceWind: { airportIcao: "KJVL", fieldElevationFeetMsl: 808, metar: testCase.metar },
+      });
+      if (testCase.expected === "calm-normalized-to-000") {
+        expect(loaded.surfaceToAloftInterpolation).toMatchObject({ status: "applied", directionTreatment: testCase.expected });
+        expect(loaded.availableLevels[0]).toMatchObject({ altitude: 808, wind: { speed: 0 } });
+      } else {
+        expect(loaded.surfaceToAloftInterpolation).toMatchObject({ status: "unavailable", reason: testCase.expected });
+        expect(loaded.availableLevels[0]).toMatchObject({ altitude: 3000 });
+      }
+    }
   });
 
   it("rejects an ambiguous selected discovery period and changed forecast use window", async () => {

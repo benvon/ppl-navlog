@@ -8,4 +8,4 @@ See the [consolidated implementation plan](docs/implementation-plan.md) for the 
 
 See the [magnetic-model record](docs/magnetic-model.md) for the WMM2025 source, license, validation vectors, and calculation assumptions.
 
-The current [vertical-profile slice](docs/vertical-profile-slice.md) documents the calculated phase work that is available and the remaining APP-01 navigation-log requirements.
+The [complete navlog engine](docs/full-navlog-engine.md) calculates PHAK-style rows, phase transitions, cumulative time and fuel, and inspectable calculation traces. The [phase-allocation model](docs/phase-allocation.md) and [weather model](docs/weather-model.md) explain the generated sublegs and wind assumptions. The earlier [vertical-profile slice](docs/vertical-profile-slice.md) remains documented as a separate precursor.

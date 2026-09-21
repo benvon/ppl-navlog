@@ -186,4 +186,16 @@ describe("IndexedDbNavlogRepository", () => {
     await expect(store.saveWeatherRefreshRevision({ ...family, latestRevisionId: duplicateRefresh.id }, duplicateRefresh, [refreshedSnapshot])).rejects.toBeTruthy();
     expect(await store.getPlanRevision(duplicateRefresh.id)).toBeUndefined();
   });
+
+  it("atomically saves a calculated initial revision with new weather evidence", async () => {
+    const store = repository();
+    const revision = planRevision();
+    const snapshot = weatherSnapshot();
+    await store.saveCalculatedPlanRevision(planFamily(), revision, [snapshot]);
+    expect(await store.getPlanRevision(revision.id)).toEqual(revision);
+    expect(await store.getWeatherSnapshot(snapshot.id)).toEqual(snapshot);
+    expect(JSON.parse(await store.exportJson()).weatherSnapshots).toContainEqual(snapshot);
+    await expect(store.saveCalculatedPlanRevision(planFamily(), { ...revision, id: "revision-2", weatherSnapshotIds: ["missing-weather"] }, [])).rejects.toBeTruthy();
+    expect(await store.getPlanRevision("revision-2")).toBeUndefined();
+  });
 });

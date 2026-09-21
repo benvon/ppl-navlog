@@ -1,6 +1,7 @@
 import { coordinate } from "../domain/coordinates";
+import { parseCompactCoordinate } from "../domain/coordinate-input";
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
-import type { AirportRoutePoint, CheckpointRoutePoint, PlanDraft, PlanRevision, RoutePoint, UserRouteLeg } from "../domain/route";
+import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanRevision, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
 import type { AirportLookup } from "../application/airport-lookup";
 import {
   applyCruiseTasOverride,
@@ -10,16 +11,24 @@ import {
   restoreCruiseTasDefault,
   saveAircraftProfile,
   saveDraftRevision,
+  selectPlanWeatherForecast,
   type NavlogPersistence,
   type UseCaseClock,
   type UseCaseIds,
 } from "../application/plan-use-cases";
+import type { WindsTransportClient } from "../services/weather/winds-client";
+import type { WindsForecastAvailability } from "../../worker/api/contracts";
+import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
+import { renderCalculatedNavlog } from "./calculated-navlog";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
   readonly persistence: NavlogPersistence;
   readonly ids: UseCaseIds;
   readonly clock: UseCaseClock;
+  readonly winds?: WindsTransportClient;
+  readonly calculatePlan?: BrowserPlanCalculator;
+  readonly weatherEvidence?: { getWeatherSnapshot(id: string): Promise<WeatherReferenceSnapshot | undefined> };
 }
 
 interface PlannerState {
@@ -34,6 +43,10 @@ interface PlannerState {
   readonly currentRevision?: PlanRevision;
   readonly unlockedLegId?: string;
   readonly inspectedLegId?: string;
+  readonly availableForecasts: readonly WindsForecastAvailability[];
+  readonly selectedForecastValidTimeUtc?: string;
+  readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
+  readonly calculationPreview?: JsonValue;
 }
 
 interface RouteFormValues {
@@ -41,6 +54,7 @@ interface RouteFormValues {
   readonly departureTime: string;
   readonly taxiFuel: string;
   readonly reserveFuel: string;
+  readonly descentTarget: string;
   readonly departureIcao: string;
   readonly destinationIcao: string;
 }
@@ -51,7 +65,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], routeForm: emptyRouteForm() };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], routeForm: emptyRouteForm() };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -131,11 +145,16 @@ class Planner {
   }
 
   private renderRoutePanel(): HTMLElement {
-    const section = panel("Route draft", "Enter exact ICAO endpoints. The local study lookup is a temporary shell, not current operational data.");
+    const section = panel("Route draft", "Enter exact ICAO endpoints. Airport coordinates and field elevations come from the configured aviation-data Worker.");
     const form = this.createRouteForm();
     const saveButton = button("Save new plan revision", "button");
     saveButton.addEventListener("click", () => void this.handleSaveDraft(form));
-    section.append(form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), saveButton);
+    section.append(form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton);
+    if (this.dependencies.calculatePlan !== undefined) {
+      const calculateButton = button("Calculate complete navlog", "button");
+      calculateButton.addEventListener("click", () => void this.handleCalculatePlan());
+      section.append(calculateButton);
+    }
     this.appendReopenControl(section);
     return section;
   }
@@ -166,6 +185,7 @@ class Planner {
     const form = document.createElement("form");
     form.append(
       labeledInput("checkpoint-name", "Name", ""),
+      labeledInput("checkpoint-compact", "SkyVector coordinate (e.g. 420604N0884405W)", ""),
       labeledInput("checkpoint-latitude", "Latitude (decimal degrees)", "", "number"),
       labeledInput("checkpoint-longitude", "Longitude (decimal degrees)", "", "number"),
       button("Add checkpoint", "submit"),
@@ -205,8 +225,68 @@ class Planner {
     return wrapper;
   }
 
+  private renderForecastPanel(): HTMLElement {
+    const section = document.createElement("section");
+    section.className = "forecast-selection";
+    section.append(text("h3", "Winds forecast period"), text("p", "Load published periods, then choose one explicitly. The nearest reporting station is measured from the route's distance midpoint; V1 does not spatially blend stations."));
+    if (this.dependencies.winds === undefined) {
+      section.append(text("p", "Live winds selection is unavailable in this environment."));
+      return section;
+    }
+    const load = button("Load available winds periods", "button");
+    load.addEventListener("click", () => void this.handleLoadForecastPeriods());
+    section.append(load);
+    if (this.state.availableForecasts.length === 0) return section;
+    const label = document.createElement("label");
+    label.htmlFor = "selected-forecast-period";
+    label.append("Selected forecast valid time (UTC)");
+    const select = document.createElement("select");
+    select.id = "selected-forecast-period";
+    select.append(new Option("Choose a published period", ""));
+    this.state.availableForecasts.forEach((period) => {
+      const labelText = `${period.validAt} (usable ${period.useFrom}–${period.useUntil})`;
+      select.append(new Option(labelText, period.validAt, false, period.validAt === this.state.selectedForecastValidTimeUtc));
+    });
+    select.addEventListener("change", () => {
+      this.state = { ...this.state, selectedForecastValidTimeUtc: select.value || undefined };
+    });
+    label.append(select);
+    section.append(label);
+    return section;
+  }
+
+  private async handleLoadForecastPeriods(): Promise<void> {
+    try {
+      const winds = this.dependencies.winds;
+      if (winds === undefined) throw new Error("Live winds selection is unavailable.");
+      const points = routePoints(this.state);
+      if (points.length < 2) throw new Error("Resolve the route endpoints before loading winds periods.");
+      const discovery = await winds.discoverStations(points.map((point) => point.coordinate));
+      this.state = { ...this.state, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined };
+      this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
+      this.render();
+    } catch (error) {
+      this.reportError(error);
+    }
+  }
+
   private renderNavlogPanel(): HTMLElement {
-    const section = panel("Initial visual flight log", "Route geometry, wind, headings, time, and fuel calculations will be added in later phases.");
+    const section = panel("Visual flight log", "Calculated sublegs retain unrounded values and per-row explanations. This teaching plan is not a complete preflight briefing.");
+    if (this.state.calculationPreview !== undefined && this.state.currentRevision !== undefined) {
+      const preview = renderCalculatedNavlog({ ...this.state.currentRevision, calculationSnapshot: this.state.calculationPreview });
+      if (preview !== undefined) {
+        section.append(preview);
+        return section;
+      }
+    }
+    if (this.state.currentRevision !== undefined) {
+      const calculated = renderCalculatedNavlog(this.state.currentRevision);
+      if (calculated !== undefined) {
+        section.append(calculated);
+        section.append(this.renderRawWeatherEvidence());
+        return section;
+      }
+    }
     const profile = this.selectedProfile();
     const table = document.createElement("table");
     table.append(createNavlogHeader());
@@ -217,6 +297,16 @@ class Planner {
     section.append(table);
     if (this.state.draft === undefined) section.append(text("p", "Save a route draft to populate the table."));
     return section;
+  }
+
+  private renderRawWeatherEvidence(): HTMLElement {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Raw weather source data and provenance";
+    const pre = document.createElement("pre");
+    pre.textContent = this.state.weatherSnapshots.length > 0 ? JSON.stringify(this.state.weatherSnapshots, null, 2) : "Raw source snapshots are unavailable in this view.";
+    details.append(summary, pre);
+    return details;
   }
 
   private appendNavlogRow(body: HTMLTableSectionElement, points: readonly RoutePoint[], profile: AircraftProfile | undefined, leg: UserRouteLeg): void {
@@ -310,8 +400,8 @@ class Planner {
         this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "departure-icao")),
         this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "destination-icao")),
       ]);
-      this.state = { ...this.state, departure, destination, routeForm, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1) };
-      this.feedback.textContent = "Exact ICAO endpoints resolved from local study data.";
+      this.state = { ...this.state, departure, destination, routeForm: { ...routeForm, descentTarget: routeForm.descentTarget || String(destination.elevationFeetMsl) }, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
+      this.feedback.textContent = "Exact ICAO endpoints resolved from the configured aviation-data source.";
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -320,12 +410,17 @@ class Planner {
 
   private handleAddCheckpoint(form: HTMLFormElement): void {
     try {
-      const checked = coordinate(Number(inputValue(form, "checkpoint-latitude")), Number(inputValue(form, "checkpoint-longitude")));
+      const compact = inputValue(form, "checkpoint-compact").trim();
+      const latitude = inputValue(form, "checkpoint-latitude").trim();
+      const longitude = inputValue(form, "checkpoint-longitude").trim();
+      if (compact !== "" && (latitude !== "" || longitude !== "")) throw new Error("Enter either one SkyVector coordinate or decimal latitude/longitude, not both.");
+      if (compact === "" && (latitude === "" || longitude === "")) throw new Error("Enter a SkyVector coordinate or both decimal latitude and longitude.");
+      const checked = compact === "" ? coordinate(Number(latitude), Number(longitude)) : parseCompactCoordinate(compact);
       if (!checked.ok) throw new Error(checked.error.message);
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2) };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -335,7 +430,7 @@ class Planner {
 
   private removeCheckpoint(id: string): void {
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, Math.max(0, checkpoints.length + 1)) };
+    this.state = { ...this.state, checkpoints, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, Math.max(0, checkpoints.length + 1)), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
     this.render();
   }
 
@@ -366,15 +461,50 @@ class Planner {
         selectedAircraftProfileId: profile.id,
         taxiRunupFuelGallons: Number(inputValue(form, "taxi-fuel")),
         reserveFuelGallons: Number(inputValue(form, "reserve-fuel")),
-        descentTargetAltitudeFeetMsl: destination.elevationFeetMsl + 1_000,
+        descentTargetAltitudeFeetMsl: Number(inputValue(form, "descent-target")),
       }, this.dependencies.ids, this.dependencies.clock);
-      const saved = await saveDraftRevision(this.dependencies.persistence, draft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
+      const selectedTime = this.state.selectedForecastValidTimeUtc;
+      const selectedDraft = selectedTime === undefined ? draft : selectPlanWeatherForecast(
+        draft,
+        this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
+        selectedTime,
+        this.dependencies.clock,
+      );
+      const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
       this.feedback.textContent = `Saved immutable revision ${saved.revision.id}.`;
       this.render();
     } catch (error) {
       this.reportError(error);
     }
+  }
+
+  private async handleCalculatePlan(): Promise<void> {
+    try {
+      const calculatePlan = this.dependencies.calculatePlan;
+      const draft = this.state.draft;
+      const profile = this.selectedProfile();
+      if (calculatePlan === undefined || draft === undefined || profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
+      const result = await calculatePlan(draft, profile, this.state.currentRevision);
+      if (result.status === "blocked") {
+        this.feedback.textContent = `Navlog blocked: ${result.message}`;
+        this.state = { ...this.state, calculationPreview: result.calculationSnapshot };
+        this.render();
+        return;
+      }
+      const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined };
+      this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
+      this.render();
+    } catch (error) {
+      this.reportError(error);
+    }
+  }
+
+  private async loadWeatherEvidence(revision: PlanRevision): Promise<readonly WeatherReferenceSnapshot[]> {
+    if (this.dependencies.weatherEvidence === undefined) return [];
+    const snapshots = await Promise.all(revision.weatherSnapshotIds.map((id) => this.dependencies.weatherEvidence!.getWeatherSnapshot(id)));
+    return snapshots.filter((snapshot): snapshot is WeatherReferenceSnapshot => snapshot !== undefined);
   }
 
   private selectedProfile(): AircraftProfile | undefined {
@@ -391,15 +521,20 @@ class Planner {
     if (revision === undefined) return;
     try {
       const reopened = await reopenPlanRevision(this.dependencies.persistence, revision.id);
+      const weatherSnapshots = await this.loadWeatherEvidence(reopened);
       this.state = {
         ...this.state,
         draft: reopened.draftSnapshot,
         currentRevision: reopened,
+        weatherSnapshots,
+        calculationPreview: undefined,
         selectedProfileId: reopened.draftSnapshot.selectedAircraftProfileId,
         departure: firstAirport(reopened.draftSnapshot.route.points),
         destination: lastAirport(reopened.draftSnapshot.route.points),
         checkpoints: reopened.draftSnapshot.route.points.filter((point): point is CheckpointRoutePoint => point.kind === "checkpoint"),
         cruiseAltitudes: reopened.draftSnapshot.route.legs.map((leg) => leg.cruiseAltitudeFeetMsl),
+        availableForecasts: [],
+        selectedForecastValidTimeUtc: undefined,
         routeForm: routeFormFromDraft(reopened.draftSnapshot, firstAirport(reopened.draftSnapshot.route.points)?.icao ?? "", lastAirport(reopened.draftSnapshot.route.points)?.icao ?? ""),
       };
       this.feedback.textContent = `Reopened revision ${reopened.id}; any save will create a child revision.`;
@@ -418,7 +553,9 @@ class Planner {
     if (!(input instanceof HTMLInputElement)) return;
     const field = routeFormField(input.name);
     if (field === undefined) return;
-    this.state = { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
+    this.state = field === "departureTime"
+      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
+      : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
   }
 }
 
@@ -465,7 +602,7 @@ function text(tag: "h2" | "h3" | "p", content: string): HTMLElement {
 
 function routePoints(state: PlannerState): readonly RoutePoint[] {
   const endpoints = state.departure === undefined || state.destination === undefined ? [] : [state.departure, ...state.checkpoints, state.destination];
-  return state.draft?.route.points ?? endpoints;
+  return endpoints.length > 0 ? endpoints : (state.draft?.route.points ?? []);
 }
 
 function navlogLabels(points: readonly RoutePoint[], profile: AircraftProfile | undefined, leg: UserRouteLeg): Record<"from" | "to" | "altitude" | "tas" | "fuelFlow", string> {
@@ -519,6 +656,7 @@ function routeBasicFields(values: RouteFormValues): readonly HTMLLabelElement[] 
     labeledInput("departure-time", "Planned departure UTC", values.departureTime, "datetime-local"),
     labeledInput("taxi-fuel", "Taxi/run-up fuel (gal)", values.taxiFuel, "number"),
     labeledInput("reserve-fuel", "Reserve fuel (gal)", values.reserveFuel, "number"),
+    labeledInput("descent-target", "Arrival descent target (ft MSL; defaults to destination field elevation)", values.descentTarget, "number"),
   ];
 }
 
@@ -530,7 +668,7 @@ function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[
 }
 
 function emptyRouteForm(): RouteFormValues {
-  return { title: "New study route", departureTime: "", taxiFuel: "0", reserveFuel: "0", departureIcao: "", destinationIcao: "" };
+  return { title: "New study route", departureTime: "", taxiFuel: "0", reserveFuel: "0", descentTarget: "", departureIcao: "", destinationIcao: "" };
 }
 
 function routeFormFromDraft(draft: PlanDraft, departureIcao: string, destinationIcao: string): RouteFormValues {
@@ -539,6 +677,7 @@ function routeFormFromDraft(draft: PlanDraft, departureIcao: string, destination
     departureTime: draft.departureTimeUtc.slice(0, 16),
     taxiFuel: String(draft.fuelInputs.taxiRunupFuelGallons),
     reserveFuel: String(draft.fuelInputs.reserveFuelGallons),
+    descentTarget: String(draft.descentTargetAltitudeFeetMsl.effectiveValue),
     departureIcao,
     destinationIcao,
   };
@@ -550,6 +689,7 @@ function routeFormField(name: string): keyof RouteFormValues | undefined {
     "departure-time": "departureTime",
     "taxi-fuel": "taxiFuel",
     "reserve-fuel": "reserveFuel",
+    "descent-target": "descentTarget",
     "departure-icao": "departureIcao",
     "destination-icao": "destinationIcao",
   };
@@ -562,6 +702,7 @@ function routeFormFromElement(form: HTMLFormElement): RouteFormValues {
     departureTime: inputValue(form, "departure-time"),
     taxiFuel: inputValue(form, "taxi-fuel"),
     reserveFuel: inputValue(form, "reserve-fuel"),
+    descentTarget: inputValue(form, "descent-target"),
     departureIcao: inputValue(form, "departure-icao"),
     destinationIcao: inputValue(form, "destination-icao"),
   };

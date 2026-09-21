@@ -47,6 +47,12 @@ export interface PlanFuelInputs {
   readonly reserveFuelGallons: number;
 }
 
+/** A pilot's explicit choice from the Worker-published forecast periods. */
+export interface PlanWeatherSelection {
+  readonly forecastValidTimeUtc: string;
+  readonly selectedAtUtc: string;
+}
+
 /** The editable state. Saving it always creates a distinct immutable revision. */
 export interface PlanDraft {
   readonly schemaVersion: typeof PLAN_SCHEMA_VERSION;
@@ -57,6 +63,8 @@ export interface PlanDraft {
   readonly route: RouteDefinition;
   readonly selectedAircraftProfileId: string;
   readonly fuelInputs: PlanFuelInputs;
+  /** Absent on drafts created before weather was selected. Never inferred from departure time. */
+  readonly weatherSelection?: PlanWeatherSelection;
   readonly descentTargetAltitudeFeetMsl: PlanningValue<number>;
   readonly createdAt: string;
   readonly updatedAt: string;

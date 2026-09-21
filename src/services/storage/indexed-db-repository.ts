@@ -87,6 +87,14 @@ export class IndexedDbNavlogRepository {
     }
   }
 
+  public async getWeatherSnapshot(id: string): Promise<WeatherReferenceSnapshot | undefined> {
+    const database = await this.database();
+    const transaction = database.transaction(NAVLOG_STORES.weatherSnapshots, "readonly");
+    const value = await requestResult<unknown>(transaction.objectStore(NAVLOG_STORES.weatherSnapshots).get(id));
+    await transactionDone(transaction);
+    return value === undefined ? undefined : clone(ensureValid(value, (candidate) => validateWeatherReferenceSnapshot(candidate, this.now())));
+  }
+
   public async savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void> {
     await this.saveRevisionWithWeatherSnapshots(family, revision, []);
   }
@@ -103,6 +111,18 @@ export class IndexedDbNavlogRepository {
   ): Promise<void> {
     if (revision.reason !== "weather-refresh") {
       throw new StorageValidationError([{ path: "$.reason", message: "weather refresh persistence requires reason weather-refresh" }]);
+    }
+    await this.saveRevisionWithWeatherSnapshots(family, revision, weatherSnapshots);
+  }
+
+  /** Atomically stores a fully calculated revision with the source evidence it references. */
+  public async saveCalculatedPlanRevision(
+    family: PlanFamily,
+    revision: PlanRevision,
+    weatherSnapshots: readonly WeatherReferenceSnapshot[],
+  ): Promise<void> {
+    if (revision.reason === "weather-refresh" || revision.calculationSnapshot === undefined) {
+      throw new StorageValidationError([{ path: "$.reason", message: "calculated plan persistence requires a non-refresh calculated revision" }]);
     }
     await this.saveRevisionWithWeatherSnapshots(family, revision, weatherSnapshots);
   }

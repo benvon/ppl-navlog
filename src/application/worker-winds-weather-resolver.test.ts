@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { WindsForecastSuccessPayload, WindsRegion, WindsStation, WindsStationsSuccessPayload } from "../../worker/api/contracts";
+import type { MetarSuccessPayload, WindsForecastSuccessPayload, WindsRegion, WindsStation, WindsStationsSuccessPayload } from "../../worker/api/contracts";
 import { coordinate, type Coordinate } from "../domain/coordinates";
 import { aircraftProfile, planDraft } from "../services/storage/__tests__/fixtures";
 import { WorkerWindsAdapter } from "../services/weather/winds-adapter";
@@ -44,10 +44,9 @@ describe("Worker winds complete-plan resolver", () => {
     const client = new Client();
     const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(client), {
       stationSelectionCoordinate: value(coordinate(40.8, -91.1)),
-      selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z",
       weatherSnapshotId: "winds-snapshot-1",
     });
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z" };
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
     const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
 
     expect(client.route).toHaveLength(draft.route.points.length);
@@ -56,5 +55,21 @@ describe("Worker winds complete-plan resolver", () => {
       selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z",
       referenceSnapshots: [{ source: "aviationweather:NCEP-FB-Winds-Temps", payload: { selectedStation: { id: "BRL" } } }],
     });
+    await expect(resolver.resolve({ draft: { ...draft, weatherSelection: undefined }, aircraftProfile: aircraftProfile(), routeLegs: [] })).rejects.toThrow(/Choose an available winds forecast period/u);
+  });
+
+  it("anchors the departure METAR at airport-data field elevation and stores the assumption evidence", async () => {
+    const metar: MetarSuccessPayload = {
+      metar: { icao: "KORD", metarRaw: "KORD 212130Z 27010KT", wind: { raw: "27010KT", directionType: "fixed", directionDegTrue: 270, directionVariation: null, speedKt: 10, gustKt: null }, source: "aviationweather", fetchedAt: "2026-09-21T21:31:00.000Z", observedAt: "2026-09-21T21:30:00.000Z" },
+      provenance: { adapter: "runway-picker", fetchedAt: "2026-09-21T21:31:00.000Z", cache: { ...cache, key: "metar:KORD", resource: "metar", fetchedAt: "2026-09-21T21:31:00.000Z", servedAt: "2026-09-21T21:31:00.000Z", expiresAt: "2026-09-21T21:46:00.000Z" } },
+      requestId: "33333333-3333-4333-8333-333333333333",
+    };
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-2",
+    }, { fetchMetar: async () => metar });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "applied", fieldElevationFeetMsl: 680, fieldElevationSource: "departure-airport-data" });
+    expect(result.referenceSnapshots?.[0]?.payload).toMatchObject({ surfaceToAloftInterpolation: { status: "applied", metar: { metarRaw: "KORD 212130Z 27010KT" } } });
   });
 });

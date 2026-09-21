@@ -7,6 +7,9 @@
     "directory": "./dist",
     "not_found_handling": "single-page-application"
   },
+  "services": [
+    { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" }
+  ],
   "vars": {
     "APP_VERSION": "v0.0.0-dev",
     "APP_COMMIT_SHA": "local"

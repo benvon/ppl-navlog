@@ -3,6 +3,7 @@ import type { EffectiveWindResolver } from "../domain/phase-planning";
 import type { PlanDraft, RoutePoint, UserRouteLeg, JsonValue, WeatherReferenceSnapshot } from "../domain/route";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { Coordinate } from "../domain/coordinates";
+import type { LoadedWindsData } from "../services/weather/winds-adapter";
 import type { NauticalMiles, TrueCourse } from "../domain/units";
 import { nauticalMiles } from "../domain/units";
 import {
@@ -29,6 +30,8 @@ export interface CompletePlanWeather {
   readonly referenceSnapshots?: readonly WeatherReferenceSnapshot[];
   readonly selectedForecastValidTimeUtc: string;
   readonly phaseWindResolver: EffectiveWindResolver;
+  /** Immutable selected source data for per-subleg winds and teaching traces. */
+  readonly loadedWindsData?: LoadedWindsData;
   readonly warnings: readonly string[];
   readonly provenance: JsonValue;
 }
