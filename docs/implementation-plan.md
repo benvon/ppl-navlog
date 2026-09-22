@@ -363,7 +363,7 @@ Editable work occurs in a draft. Saving appends a revision with a stable plan ID
 
 Refreshing weather creates a new draft from the current revision, retrieves new weather, recalculates, and appends a new revision only after the user confirms. Prior revisions remain readable.
 
-JSON portability is deliberately bounded: an open plan exports as one self-contained archive containing its retained entries, required editable aircraft profiles, and weather evidence; aircraft profiles can export separately. Import must validate size, JSON shape, schema version, identifiers, timestamps, numeric ranges, and nested collections before writing anything. Import is atomic: invalid content writes no partial state. Unsupported future schema versions fail closed with a useful message. Whole-library single-file backup is out of scope.
+JSON portability is a minor disaster-recovery feature, not a backup or synchronization system: an open plan exports only its current route draft and selected aircraft profile. It deliberately excludes journal history, weather evidence, calculations, and other browser data. Import validates the size, JSON shape, schema version, timestamps, numeric ranges, and nested route data before one atomic local write. It gives the recovered profile and plan fresh IDs, creates a new plan without merging or replacing existing records, and requires current weather selection and recalculation. Unsupported future schema versions fail closed with a useful message.
 
 JSON remains the only supported round-trip portability format. PDF export is available only for a complete saved calculated revision and must not be offered as an import path.
 

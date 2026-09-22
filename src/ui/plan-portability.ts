@@ -1,20 +1,19 @@
 import type { ImportResult } from "../services/storage/contracts";
-import { MAX_ARCHIVE_BYTES } from "../services/storage/json-transfer";
+import { MAX_RECOVERY_ARCHIVE_BYTES } from "../services/storage/json-transfer";
 
 export interface PlanPortabilityRepository {
-  exportPlanArchive(planId: string): Promise<string>;
-  exportProfileArchive(): Promise<string>;
-  importArchive(serialized: string, mode: "merge"): Promise<ImportResult>;
+  exportPlanRecoveryArchive(planId: string): Promise<string>;
+  importPlanRecoveryArchive(serialized: string): Promise<ImportResult>;
 }
 
-/** Browser-local bounded archives; no plan data leaves the device. */
+/** Browser-local recovery snapshots; no plan data leaves the device. */
 export function renderPlanPortability(repository: PlanPortabilityRepository, activePlanId: string | undefined, report: (message: string) => void, onImported: () => Promise<void>): HTMLElement {
   const section = document.createElement("section");
   section.className = "plan-portability";
   const heading = document.createElement("h3");
-  heading.textContent = "Local plan archives";
+  heading.textContent = "Plan recovery snapshot";
   const explanation = document.createElement("p");
-  explanation.textContent = "Download the open plan's retained journal, aircraft data, and weather evidence as one restorable JSON archive. Profiles can be archived separately. Import merges one archive at a time; conflicts write nothing. This does not upload data.";
+  explanation.textContent = "Download the current route and aircraft profile as a small local JSON recovery snapshot. It excludes revision history, calculated results, and weather evidence. Import creates a new local plan with fresh IDs; choose current weather and recalculate before use. This does not upload data.";
   const download = (label: string, filename: string, exportArchive: () => Promise<string>): HTMLButtonElement => {
     const exportButton = document.createElement("button");
     exportButton.type = "button";
@@ -39,26 +38,25 @@ export function renderPlanPortability(repository: PlanPortabilityRepository, act
     return exportButton;
   };
   const archiveButtons: HTMLElement[] = [];
-  if (activePlanId !== undefined) archiveButtons.push(download("Download open plan archive", "ppl-navlog-plan", () => repository.exportPlanArchive(activePlanId)));
-  else archiveButtons.push(Object.assign(document.createElement("p"), { textContent: "Open a saved plan to download its archive." }));
-  archiveButtons.push(download("Download aircraft profiles archive", "ppl-navlog-profiles", () => repository.exportProfileArchive()));
+  if (activePlanId !== undefined) archiveButtons.push(download("Download current plan recovery snapshot", "ppl-navlog-recovery", () => repository.exportPlanRecoveryArchive(activePlanId)));
+  else archiveButtons.push(Object.assign(document.createElement("p"), { textContent: "Open a saved plan to download its recovery snapshot." }));
   const label = document.createElement("label");
-  label.textContent = "Import a navlog plan or profiles archive";
+  label.textContent = "Recover a plan from JSON";
   const input = document.createElement("input");
   input.type = "file";
   input.accept = ".json,application/json";
   input.addEventListener("change", async () => {
     const file = input.files?.[0];
     if (file === undefined) return;
-    if (file.size > MAX_ARCHIVE_BYTES) {
-      report(`Import exceeds the ${MAX_ARCHIVE_BYTES} byte archive limit; nothing was written.`);
+    if (file.size > MAX_RECOVERY_ARCHIVE_BYTES) {
+      report(`Import exceeds the ${MAX_RECOVERY_ARCHIVE_BYTES} byte recovery archive limit; nothing was written.`);
       input.value = "";
       return;
     }
     try {
-      const result = await repository.importArchive(await file.text(), "merge");
+      await repository.importPlanRecoveryArchive(await file.text());
       await onImported();
-      report(`Imported ${result.planFamilies} plans, ${result.planRevisions} revisions, ${result.aircraftProfiles} aircraft profiles, and ${result.weatherSnapshots} weather snapshots.`);
+      report(`Recovered a new plan with one aircraft profile. Choose current weather and recalculate before use.`);
     } catch (error) {
       report(error instanceof Error ? error.message : "Import failed; no records were written.");
     } finally {

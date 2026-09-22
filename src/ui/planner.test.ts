@@ -233,6 +233,28 @@ describe("planner shell", () => {
     expect(input(root, "descent-target").value).toBe("1808");
   });
 
+  it("derives a cleared automatic descent target from the resolved destination when saving", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KJVL";
+    input(root, "destination-icao").value = "KORD";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    input(root, "descent-target").value = "";
+    input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.descentTargetAltitudeFeetMsl.effectiveValue).toBe(1_680);
+  });
+
   it("requires a usable compass-deviation card and saves each supplied point", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();

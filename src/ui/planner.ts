@@ -598,6 +598,9 @@ class Planner {
     const departure = this.state.departure;
     const destination = this.state.destination;
     if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
+    const descentTargetAltitudeFeetMsl = this.state.descentTargetIsManual
+      ? Number(inputValue(form, "descent-target"))
+      : destination.elevationFeetMsl + 1_000;
     const rebuiltRoute = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
     const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route, this.state.draft?.selectedAircraftProfileId === profile.id);
     return {
@@ -612,7 +615,7 @@ class Planner {
         selectedAircraftProfileId: profile.id,
         taxiRunupFuelGallons: Number(inputValue(form, "taxi-fuel")),
         reserveFuelGallons: Number(inputValue(form, "reserve-fuel")),
-        descentTargetAltitudeFeetMsl: Number(inputValue(form, "descent-target")),
+        descentTargetAltitudeFeetMsl,
         descentTargetIsManual: this.state.descentTargetIsManual,
       }, this.dependencies.ids, this.dependencies.clock),
     };

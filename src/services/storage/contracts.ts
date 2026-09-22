@@ -1,5 +1,5 @@
 import type { AircraftProfile } from "../../domain/aircraft";
-import type { PlanFamily, PlanRevision, WeatherReferenceSnapshot } from "../../domain/route";
+import type { PlanDraft } from "../../domain/route";
 
 /** Pre-1.0 journal store; intentionally separate from discarded graph-era data. */
 export const NAVLOG_DATABASE_NAME = "ppl-navlog-journal-v1";
@@ -16,34 +16,24 @@ export const NAVLOG_STORES = {
 
 export type NavlogStoreName = (typeof NAVLOG_STORES)[keyof typeof NAVLOG_STORES];
 
-/** A portable, self-contained archive for exactly one bounded plan journal. */
-export interface PlanArchive {
-  readonly format: "ppl-navlog/plan-archive";
+/**
+ * A deliberately small, single-plan recovery snapshot. It is not a backup of
+ * revision history, calculated results, weather evidence, or the local library.
+ */
+export interface PlanRecoveryArchive {
+  readonly format: "ppl-navlog/plan-recovery";
   readonly formatVersion: 1;
   readonly exportedAt: string;
-  readonly planFamily: PlanFamily;
-  readonly planRevisions: readonly PlanRevision[];
-  readonly aircraftProfiles: readonly AircraftProfile[];
-  readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
+  readonly draft: PlanDraft;
+  readonly aircraftProfile: AircraftProfile;
 }
-
-/** A separate small archive for reusable editable aircraft profiles. */
-export interface ProfileArchive {
-  readonly format: "ppl-navlog/profile-archive";
-  readonly formatVersion: 1;
-  readonly exportedAt: string;
-  readonly aircraftProfiles: readonly AircraftProfile[];
-}
-
-export type NavlogArchive = PlanArchive | ProfileArchive;
-
-export type ImportMode = "merge" | "replace";
 
 export interface ImportResult {
   readonly aircraftProfiles: number;
   readonly planFamilies: number;
   readonly planRevisions: number;
   readonly weatherSnapshots: number;
+  readonly recoveredPlanId: string;
 }
 
 export class StorageUnavailableError extends Error {
@@ -57,12 +47,5 @@ export class ImmutableRevisionError extends Error {
   public constructor(message: string) {
     super(message);
     this.name = "ImmutableRevisionError";
-  }
-}
-
-export class ImportConflictError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = "ImportConflictError";
   }
 }
