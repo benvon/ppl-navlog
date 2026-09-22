@@ -160,14 +160,17 @@ class Planner {
     select.append(new Option("Choose a saved profile", ""));
     this.state.profiles.forEach((profile) => select.append(new Option(profile.name, profile.id, false, profile.id === this.selectedProfileId())));
     select.addEventListener("change", () => {
-      if (select.value === "") return;
       this.state = {
         ...this.state,
-        selectedProfileId: select.value,
+        selectedProfileId: select.value === "" ? undefined : select.value,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
-      this.feedback.textContent = this.state.draft === undefined ? "Selected aircraft profile." : "Aircraft profile changed. Save a new revision before calculating; prior per-leg overrides will be cleared.";
+      this.feedback.textContent = select.value === ""
+        ? "No aircraft profile selected. Select one before saving or calculating."
+        : this.state.draft === undefined
+          ? "Selected aircraft profile."
+          : "Aircraft profile changed. Save a new revision before calculating; prior per-leg overrides will be cleared.";
       this.render();
     });
     wrapper.append(select);
@@ -747,6 +750,7 @@ class Planner {
       if (this.state.currentRevision !== undefined && this.state.currentRevision.id !== revisionId) {
         if (!window.confirm("Opening another saved revision may discard unsaved form and draft edits. Continue?")) return;
       }
+      if (!this.beginInputTransaction("Opening saved revision…")) return;
       const reopened = await reopenPlanRevision(this.dependencies.persistence, revisionId);
       const revisions = await this.dependencies.persistence.listPlanRevisions(reopened.planId);
       const weatherSnapshots = await this.loadWeatherEvidence(reopened);
@@ -770,6 +774,7 @@ class Planner {
         hasUnsavedForecastSelection: false,
         routeForm: routeFormFromDraft(reopened.draftSnapshot, firstAirport(reopened.draftSnapshot.route.points)?.icao ?? "", lastAirport(reopened.draftSnapshot.route.points)?.icao ?? ""),
       };
+      this.state = { ...this.state, pendingOperation: undefined };
       this.feedback.textContent = this.currentJournalHead(reopened.planId)?.id === reopened.id
         ? `Opened current journal revision ${reopened.revisionNumber}.`
         : `Opened historical revision ${reopened.revisionNumber}; saving restores it as a new current journal entry.`;

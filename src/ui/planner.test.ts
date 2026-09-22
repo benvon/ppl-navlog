@@ -566,6 +566,33 @@ describe("planner shell", () => {
     expect(saved?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeUndefined();
   });
 
+  it("clears the selected aircraft profile when the placeholder is chosen", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const selector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (selector === null) throw new Error("Profile selector was not rendered.");
+    selector.value = "";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(root.textContent).toContain("No aircraft profile selected.");
+
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Save and select an aircraft profile before saving a plan.");
+  });
+
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
@@ -709,5 +736,38 @@ describe("planner shell", () => {
 
     expect(input(root, "plan-title").disabled).toBe(false);
     expect(root.textContent).toContain("History temporarily unavailable.");
+  });
+
+  it("freezes controls while opening a saved revision", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    const getRevision = persistence.getPlanRevision.bind(persistence);
+    let finishOpen: (() => void) | undefined;
+    persistence.getPlanRevision = async (id) => new Promise((resolve) => {
+      finishOpen = () => { void getRevision(id).then(resolve); };
+    });
+    clickByLabel(root, "Reopen saved revision");
+    await settle();
+    expect(input(root, "plan-title").disabled).toBe(true);
+    if (finishOpen === undefined) throw new Error("Revision opening did not start.");
+    finishOpen();
+    await settle();
+
+    expect(input(root, "plan-title").disabled).toBe(false);
+    expect(root.textContent).toContain("Opened current journal revision");
   });
 });
