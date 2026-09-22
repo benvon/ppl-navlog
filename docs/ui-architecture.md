@@ -1,0 +1,9 @@
+# UI Composition and Theming Boundary
+
+The planner's actions and state stay in `src/ui/planner.ts`. `workspace-layout.ts` places four semantic regions—aircraft, route, navlog, and inspector—without assigning grid positions or inline styles. The region names are stable `data-region` attributes, so a different layout can reorder and resize regions entirely in CSS without changing calculations, storage, event handlers, or rendering logic.
+
+`src/ui/styles.css` imports three independent layers. `styles/tokens.css` holds palette, spacing, and radius custom properties; a visual theme can override these tokens. `styles/layout.css` owns page and region geometry plus responsive breakpoints; an alternate arrangement can override the named `data-region` selectors. `styles/components.css` styles controls, tables, and the inspector. Do not use child-position selectors such as `:nth-child` to place planner regions, and do not set visual grid coordinates in TypeScript.
+
+The calculated worksheet remains a separate view in `calculated-navlog.ts`. It accepts an optional inspection callback and emits a row/field selection, not a CSS or DOM layout instruction. `calculation-inspector.ts` renders saved trace data using text nodes. Selecting a value updates the inspector region and active-cell state without replacing the worksheet table, preserving horizontal scroll and avoiding an accidental input-form reset. Raw row evidence remains available as a secondary disclosure.
+
+This structure does not yet claim a finished design or completed accessibility audit. The next UI slice should use a deterministic complete flight fixture to refine column grouping, numeric presentation, weather status, PDF/print layout, focus order, and representative laptop-width behavior before a visual theme is finalized.

@@ -1,0 +1,24 @@
+name: Conventional PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Conventional Commit PR title
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        with:
+          script: |
+            const title = (process.env.PR_TITLE ?? '').trim();
+            const conventionalPattern = /^(revert:\s)?(feat|fix|perf|refactor|docs|test|build|ci|chore|style)(\([^)]+\))?(!)?:\s.+$/i;
+            if (!conventionalPattern.test(title)) {
+              core.setFailed(`PR title must follow Conventional Commits. Received: "${title}"`);
+            }

@@ -1,0 +1,28 @@
+# Development CI/CD setup
+
+The intended flow is PR to `main` → full CI and CodeQL → manual merge decision → development deployment to `navlog.benvon.dev` → deployment smoke check → SemVer RC tag and GitHub prerelease. Production at `navlog.benvon.net` is deliberately not configured yet. The workflow exists in `.github/workflows/ci.yml`; it has not been proven against GitHub and Cloudflare until the first merged run succeeds.
+
+## GitHub configuration required
+
+1. Keep `main` protected by the existing PR-only, linear-history, signed-commit, squash-merge ruleset. Keep zero required reviewer approvals while the repository has one maintainer; merging is the human release decision. After the first PR checks appear, add `validate`, `Analyze JavaScript and TypeScript`, and `conventional-pr-title` as required status checks using their exact displayed GitHub names. Do not require `Deploy development` for PRs; that job runs only after merge. Check that ruleset bypass actors cannot merge an unvalidated PR.
+2. Create an Actions environment named `development` in repository Settings → Environments. Restrict deployment branches to `main`. Do not add a required environment reviewer unless a separate reviewer is available; otherwise automatic post-merge deployment will stop at an approval gate. Environment protection availability can depend on repository visibility and plan, so verify the restriction in GitHub after saving it.
+3. Add environment variable `CLOUDFLARE_ACCOUNT_ID` and environment secret `CLOUDFLARE_API_TOKEN` to `development`. The account ID is non-secret; the token is secret. The token should be scoped to the Cloudflare account and permissions needed to deploy the Worker and attach its custom domain. Never put it in repository files, PR comments, or a repository-wide variable. The `deploy_development` job alone receives these values.
+4. Ensure GitHub Actions may create tags and releases with the workflow `GITHUB_TOKEN`. The deploy job requests `contents: write`; PR validation has only `contents: read`. The release is a prerelease and is not marked latest.
+
+The current repository ruleset has zero required approvals and no required status checks; item 1 still needs the status-check change in GitHub settings. The connected GitHub integration cannot administer environment secrets or rulesets, so those settings require an administrator in the GitHub UI.
+
+## Cloudflare configuration to verify
+
+The development Wrangler environment deploys a separate Worker named `ppl-navlog-development` (Wrangler's named-environment suffix) on the custom domain `navlog.benvon.dev`. The `benvon.dev` zone and `runway-picker-metar-api` service must be in the same Cloudflare account. Confirm there is no conflicting DNS record on the custom domain and that the deploy token can manage the Worker and its route. Wrangler configuration includes the static asset binding, `RUNWAY_PICKER_API` service binding, and `API_RATE_LIMITER` with a 30-request/minute per-source policy. The Worker fails closed for API calls if the limiter binding is unavailable in development. Cloudflare rate-limit counters are per location and eventually consistent; this is not a global Aviation Weather Center quota. Add appropriate Cloudflare WAF/bot controls before calling the public API production-ready.
+
+The first merge should be monitored in GitHub Actions and Cloudflare. Confirm the `validate` job, artifact identity check, deploy, static/API identity smoke, RC tag, and GitHub prerelease all succeeded. Inspect the actual Worker bindings and domain in Cloudflare. A failure before the tag/release step leaves an unpromoted development deployment for investigation, not an approved RC.
+
+## Versioning and promotion policy
+
+`package.json` carries the next stable SemVer train. Every merged `main` CI run produces `v<package-version>-rc.<GitHub run number>`; run-number gaps from PR runs are harmless. Rerunning the same workflow reuses its RC tag only if it points to the same commit. Once the stable `v<package-version>` tag exists, CI refuses another RC on that train until `package.json` is bumped. Do not move tags.
+
+Later, after testing and approval, the production workflow should select one existing RC, verify its tag and immutable artifact, create the stable `vX.Y.Z` tag on **the same commit**, deploy that artifact behind a protected `production` environment to `navlog.benvon.net`, smoke-test it, and create the non-prerelease GitHub Release. It must not rebuild from a newer `main` commit. That production workflow and any production Cloudflare secret are out of scope for this development-only setup.
+
+## References
+
+Cloudflare documents [Workers environments](https://developers.cloudflare.com/workers/wrangler/environments/), [custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/), [rate-limit bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/), and [external GitHub CI/CD](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/). GitHub documents [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository), [deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments), and [release creation](https://cli.github.com/manual/gh_release_create).
