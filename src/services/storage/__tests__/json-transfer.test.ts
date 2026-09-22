@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseNavlogExport, serializeNavlogExport } from "../json-transfer";
+import { MAX_IMPORT_BYTES, MAX_RECORDS_PER_COLLECTION, parseNavlogExport, serializeNavlogExport } from "../json-transfer";
 import { exportBundle } from "./fixtures";
 
 describe("JSON import and export", () => {
@@ -53,7 +53,25 @@ describe("JSON import and export", () => {
     const bundle = exportBundle();
     const duplicate = { ...bundle, aircraftProfiles: [bundle.aircraftProfiles[0], bundle.aircraftProfiles[0]] };
     expect(() => parseNavlogExport(JSON.stringify(duplicate), now)).toThrow(/unique/);
-    expect(() => parseNavlogExport(" ".repeat(1_000_001), now)).toThrow(/byte limit/);
+    expect(() => parseNavlogExport(" ".repeat(MAX_IMPORT_BYTES + 1), now)).toThrow(/byte limit/);
+  });
+
+  it("uses the same bounded collection limit for export and import", () => {
+    const bundle = exportBundle();
+    const tooManyProfiles = { ...bundle, aircraftProfiles: Array.from({ length: MAX_RECORDS_PER_COLLECTION + 1 }, () => bundle.aircraftProfiles[0]!) };
+
+    expect(() => serializeNavlogExport(tooManyProfiles)).toThrow(/at most 5,000 records/);
+    expect(() => parseNavlogExport(JSON.stringify(tooManyProfiles), new Date("2027-01-01T00:00:00.000Z"))).toThrow(/at most 5,000 records/);
+  });
+
+  it("does not create an export that exceeds the restore byte limit", () => {
+    const bundle = exportBundle();
+    const tooLargeToRestore = {
+      ...bundle,
+      weatherSnapshots: [{ ...bundle.weatherSnapshots[0]!, payload: { rawProduct: "x".repeat(MAX_IMPORT_BYTES) } }],
+    };
+
+    expect(() => serializeNavlogExport(tooLargeToRestore)).toThrow(/restore limit/);
   });
 
   it("rejects duplicate route leg ids at the import boundary", () => {
@@ -71,7 +89,7 @@ describe("JSON import and export", () => {
     expect(() => parseNavlogExport(JSON.stringify(malformed), new Date("2027-01-01T00:00:00.000Z"))).toThrow(/legs\[1\]\.id.*unique/u);
   });
 
-  it("exports valid immutable local history larger than the bounded import size", () => {
+  it("round-trips a bounded self-generated backup that exceeds the former one-megabyte limit", () => {
     const bundle = exportBundle();
     const oversizedButValid = {
       ...bundle,
@@ -80,6 +98,6 @@ describe("JSON import and export", () => {
 
     const serialized = serializeNavlogExport(oversizedButValid);
     expect(new TextEncoder().encode(serialized).byteLength).toBeGreaterThan(1_000_000);
-    expect(() => parseNavlogExport(serialized, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/byte limit/u);
+    expect(parseNavlogExport(serialized, new Date("2027-01-01T00:00:00.000Z"))).toEqual(oversizedButValid);
   });
 });

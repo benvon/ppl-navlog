@@ -28,6 +28,7 @@ describe("revision history", () => {
     const buttons = history.querySelectorAll("button");
     expect(buttons[0]?.textContent).toContain("second");
     expect(buttons[0]?.getAttribute("aria-current")).toBe("true");
+    expect(history.textContent).toContain("latest 20 immutable revisions");
     expect(history.textContent).toContain("Weather evidence IDs: none → weather-2");
     buttons[1]?.click();
     expect(select).toHaveBeenCalledWith("first");

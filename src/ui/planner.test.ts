@@ -208,6 +208,31 @@ describe("planner shell", () => {
     expect(input(root, "descent-target").value).toBe("2500");
   });
 
+  it("keeps a reopened automatically calculated descent target automatic", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KJVL";
+    input(root, "destination-icao").value = "KORD";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    clickByLabel(root, "Reopen saved revision");
+    await settle();
+
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    expect(input(root, "descent-target").value).toBe("1808");
+  });
+
   it("requires a usable compass-deviation card and saves each supplied point", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
@@ -323,6 +348,23 @@ describe("planner shell", () => {
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
     await settle();
 
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Save and select an aircraft profile");
+  });
+
+  it("does not silently select the first locally stored aircraft profile", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Save and select an aircraft profile");

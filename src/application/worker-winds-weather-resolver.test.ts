@@ -72,4 +72,15 @@ describe("Worker winds complete-plan resolver", () => {
     expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "applied", fieldElevationFeetMsl: 680, fieldElevationSource: "departure-airport-data" });
     expect(result.referenceSnapshots?.[0]?.payload).toMatchObject({ surfaceToAloftInterpolation: { status: "applied", metar: { metarRaw: "KORD 212130Z 27010KT" } } });
   });
+
+  it("continues without a METAR anchor when the optional METAR dependency is unavailable", async () => {
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-3",
+    }, { fetchMetar: async () => { throw new Error("temporary METAR outage"); } });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toBeUndefined();
+  });
 });

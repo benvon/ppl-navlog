@@ -13,6 +13,9 @@ export function renderRevisionHistory(options: RevisionHistoryOptions): HTMLElem
   const heading = document.createElement("h3");
   heading.textContent = "Saved revision history";
   section.append(heading);
+  const retention = document.createElement("p");
+  retention.textContent = "The latest 20 immutable revisions are retained for each plan; saving a newer revision removes the oldest.";
+  section.append(retention);
   if (options.revisions.length === 0) {
     const empty = document.createElement("p");
     empty.textContent = "No saved revisions for this plan yet.";

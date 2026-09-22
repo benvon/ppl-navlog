@@ -328,8 +328,15 @@ function validatePerformanceOverrides(value: unknown, path: string, issues: Vali
     add(issues, path, "must be an object");
     return;
   }
-  if (value.cruiseTasKnots !== undefined) validatePlanningValue(value.cruiseTasKnots, `${path}.cruiseTasKnots`, issues);
-  if (value.cruiseFuelFlowGallonsPerHour !== undefined) validatePlanningValue(value.cruiseFuelFlowGallonsPerHour, `${path}.cruiseFuelFlowGallonsPerHour`, issues);
+  if (value.cruiseTasKnots !== undefined) validatePositivePlanningValue(value.cruiseTasKnots, `${path}.cruiseTasKnots`, issues);
+  if (value.cruiseFuelFlowGallonsPerHour !== undefined) validatePositivePlanningValue(value.cruiseFuelFlowGallonsPerHour, `${path}.cruiseFuelFlowGallonsPerHour`, issues);
+}
+
+function validatePositivePlanningValue(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!validatePlanningValue(value, path, issues) || !isRecord(value)) return;
+  if (value.computedValue !== null) positiveNumber(value.computedValue, `${path}.computedValue`, issues);
+  positiveNumber(value.effectiveValue, `${path}.effectiveValue`, issues);
+  if (isRecord(value.override)) positiveNumber(value.override.value, `${path}.override.value`, issues);
 }
 
 export function validatePlanDraft(value: unknown, now = new Date()): value is PlanDraft {

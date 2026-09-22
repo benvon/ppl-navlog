@@ -50,6 +50,8 @@ export interface PlanDraftInput {
   readonly taxiRunupFuelGallons: number;
   readonly reserveFuelGallons: number;
   readonly descentTargetAltitudeFeetMsl: number;
+  /** False only for the explicit destination-elevation plus 1,000-ft default. */
+  readonly descentTargetIsManual?: boolean;
   readonly weatherSelection?: PlanWeatherSelection;
 }
 
@@ -132,7 +134,9 @@ export function createPlanDraft(input: PlanDraftInput, ids: UseCaseIds, clock: U
     selectedAircraftProfileId: input.selectedAircraftProfileId,
     fuelInputs: { taxiRunupFuelGallons: input.taxiRunupFuelGallons, reserveFuelGallons: input.reserveFuelGallons },
     ...(input.weatherSelection === undefined ? {} : { weatherSelection: input.weatherSelection }),
-    descentTargetAltitudeFeetMsl: pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
+    descentTargetAltitudeFeetMsl: input.descentTargetIsManual === false
+      ? automaticDescentTargetValue(input.descentTargetAltitudeFeetMsl, createdAt)
+      : pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
     createdAt,
     updatedAt: createdAt,
   };
@@ -235,6 +239,19 @@ export async function reopenPlanRevision(persistence: NavlogPersistence, revisio
 
 function pilotInputValue(value: number, sourceId: string, sourceLabel: string, recordedAt: string): PlanningValue<number> {
   return { computedValue: null, effectiveValue: value, origin: "pilot-input", provenance: { sourceId, sourceLabel, recordedAt } };
+}
+
+function automaticDescentTargetValue(value: number, recordedAt: string): PlanningValue<number> {
+  return {
+    computedValue: value,
+    effectiveValue: value,
+    origin: "calculated",
+    provenance: {
+      sourceId: "destination-field-elevation-plus-1000",
+      sourceLabel: "Destination field elevation plus 1,000 ft",
+      recordedAt,
+    },
+  };
 }
 
 function defaultFromProfile(value: number, profile: AircraftProfile, sourceId: string, sourceLabel: string): PlanningValue<number> {

@@ -6,6 +6,7 @@ import {
   type NavlogExportBundle,
   NAVLOG_DATABASE_NAME,
   NAVLOG_DATABASE_VERSION,
+  MAX_REVISIONS_PER_PLAN,
   NAVLOG_STORES,
   type NavlogStoreName,
   ImmutableRevisionError,
@@ -145,10 +146,13 @@ export class IndexedDbNavlogRepository {
       throw new ImmutableRevisionError(`Plan revision ${revision.id} already exists and cannot be modified.`);
     }
     await validateRevisionParent(transaction, revisionStore, revision, this.now());
+    const existingRevisions = (await requestResult<unknown[]>(revisionStore.getAll()))
+      .map((candidate) => ensureValid(candidate, (value) => validatePlanRevision(value, this.now())));
     const weatherStore = transaction.objectStore(NAVLOG_STORES.weatherSnapshots);
     const newWeatherIds = appendNewWeatherSnapshots(transaction, weatherStore, weatherSnapshots);
     await validateRevisionWeatherReferences(transaction, weatherStore, revision.weatherSnapshotIds, newWeatherIds);
     revisionStore.add(clone(revision));
+    prunePlanRevisionHistory(revisionStore, weatherStore, existingRevisions, revision);
     const preservedCreatedAt = existingFamily === undefined ? family.createdAt : ensureValid(existingFamily, (candidate) => validatePlanFamily(candidate, this.now())).createdAt;
     familyStore.put(clone({ ...family, createdAt: preservedCreatedAt }));
     await transactionDone(transaction);
@@ -244,6 +248,37 @@ export class IndexedDbNavlogRepository {
     if (this.factory === undefined) throw new StorageUnavailableError();
     this.databasePromise ??= openDatabase(this.factory, this.databaseName);
     return this.databasePromise;
+  }
+}
+
+/**
+ * Prunes only the oldest revisions of this plan after the new immutable child
+ * is queued. Weather evidence is removed only when no retained revision from
+ * any plan references it. A retained oldest revision may point to pruned
+ * history; that parent ID remains useful provenance for a truncated lineage.
+ */
+function prunePlanRevisionHistory(
+  revisionStore: IDBObjectStore,
+  weatherStore: IDBObjectStore,
+  existingRevisions: readonly PlanRevision[],
+  appendedRevision: PlanRevision,
+): void {
+  const allRetained = [...existingRevisions, appendedRevision];
+  const planHistory = allRetained
+    .filter((candidate) => candidate.planId === appendedRevision.planId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const pruned = planHistory.slice(0, Math.max(0, planHistory.length - MAX_REVISIONS_PER_PLAN));
+  if (pruned.length === 0) return;
+  const prunedIds = new Set(pruned.map((revision) => revision.id));
+  const retainedWeatherIds = new Set(
+    allRetained
+      .filter((candidate) => !prunedIds.has(candidate.id))
+      .flatMap((candidate) => candidate.weatherSnapshotIds),
+  );
+  const obsoleteWeatherIds = new Set(pruned.flatMap((revision) => revision.weatherSnapshotIds));
+  for (const revision of pruned) revisionStore.delete(revision.id);
+  for (const weatherSnapshotId of obsoleteWeatherIds) {
+    if (!retainedWeatherIds.has(weatherSnapshotId)) weatherStore.delete(weatherSnapshotId);
   }
 }
 

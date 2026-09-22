@@ -3,6 +3,8 @@ import type { PlanFamily, PlanRevision, WeatherReferenceSnapshot } from "../../d
 
 export const NAVLOG_DATABASE_NAME = "ppl-navlog";
 export const NAVLOG_DATABASE_VERSION = 1;
+/** Each plan retains the latest 20 immutable revisions, including weather refreshes. */
+export const MAX_REVISIONS_PER_PLAN = 20;
 
 export const NAVLOG_STORES = {
   aircraftProfiles: "aircraftProfiles",

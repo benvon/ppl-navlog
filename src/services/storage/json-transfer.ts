@@ -1,4 +1,4 @@
-import type { NavlogExportBundle } from "./contracts";
+import { MAX_REVISIONS_PER_PLAN, type NavlogExportBundle } from "./contracts";
 import {
   StorageValidationError,
   validateAircraftProfile,
@@ -7,7 +7,10 @@ import {
   validateWeatherReferenceSnapshot,
 } from "./validation";
 
-export const MAX_IMPORT_BYTES = 1_000_000;
+/** Bounded to cover one complete retained plan history: 20 upstream products, each capped at 512 KiB. */
+export const MAX_IMPORT_BYTES = 12 * 1024 * 1024;
+/** Bounds validation work while permitting a backup of many 20-revision plan histories. */
+export const MAX_RECORDS_PER_COLLECTION = 5_000;
 const exportFormat = "ppl-navlog/export";
 const exportVersion = 1;
 
@@ -38,11 +41,9 @@ export function parseNavlogExport(serialized: string, now = new Date()): NavlogE
 }
 
 /**
- * Validates the export envelope independently of the import byte limit. A
- * browser-local backup may legitimately grow beyond the intentionally bounded
- * import size as immutable weather evidence and revision history accumulate.
+ * Validates the export envelope before either export or import persistence.
  */
-function validateNavlogExportBundle(value: unknown, now: Date): NavlogExportBundle {
+function validateNavlogExportBundle(value: unknown, now: Date, maximumRecordsPerCollection = MAX_RECORDS_PER_COLLECTION): NavlogExportBundle {
   if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
 
   const issues: Array<{ path: string; message: string }> = [];
@@ -52,8 +53,8 @@ function validateNavlogExportBundle(value: unknown, now: Date): NavlogExportBund
 
   const collections = ["aircraftProfiles", "planFamilies", "planRevisions", "weatherSnapshots"] as const;
   for (const key of collections) {
-    if (!Array.isArray(value[key]) || value[key].length > 1_000) {
-      issues.push({ path: `$.${key}`, message: "must be an array of at most 1,000 records" });
+    if (!Array.isArray(value[key]) || value[key].length > maximumRecordsPerCollection) {
+      issues.push({ path: `$.${key}`, message: `must be an array of at most ${maximumRecordsPerCollection.toLocaleString()} records` });
     }
   }
   if (issues.length > 0) throw new StorageValidationError(issues);
@@ -95,8 +96,8 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
   ensureUnique(bundle.aircraftProfiles, "$.aircraftProfiles");
   bundle.planRevisions.forEach((revision, index) => {
     if (!familyIds.has(revision.planId)) issues.push({ path: `$.planRevisions[${index}].planId`, message: "must reference an exported plan family" });
-    if (revision.parentRevisionId !== undefined && !revisionIds.has(revision.parentRevisionId)) {
-      issues.push({ path: `$.planRevisions[${index}].parentRevisionId`, message: "must reference an exported revision" });
+    if (revision.parentRevisionId !== undefined && !revisionIds.has(revision.parentRevisionId) && !isTruncatedHistoryRoot(revision, bundle.planRevisions)) {
+      issues.push({ path: `$.planRevisions[${index}].parentRevisionId`, message: "must reference an exported revision unless this is the oldest retained revision" });
     }
     const parentRevision = revision.parentRevisionId === undefined ? undefined : revisionsById.get(revision.parentRevisionId);
     if (parentRevision !== undefined && parentRevision.planId !== revision.planId) {
@@ -106,6 +107,11 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
       if (!weatherIds.has(id)) issues.push({ path: `$.planRevisions[${index}].weatherSnapshotIds[${weatherIndex}]`, message: "must reference an exported weather snapshot" });
     });
   });
+  for (const [planId, revisions] of revisionsByPlan(bundle.planRevisions)) {
+    if (revisions.length > MAX_REVISIONS_PER_PLAN) {
+      issues.push({ path: "$.planRevisions", message: `must retain at most ${MAX_REVISIONS_PER_PLAN} revisions for plan ${planId}` });
+    }
+  }
   bundle.planFamilies.forEach((family, index) => {
     if (family.latestRevisionId !== undefined && !revisionIds.has(family.latestRevisionId)) issues.push({ path: `$.planFamilies[${index}].latestRevisionId`, message: "must reference an exported revision" });
     const latestRevision = family.latestRevisionId === undefined ? undefined : revisionsById.get(family.latestRevisionId);
@@ -116,11 +122,26 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
   if (issues.length > 0) throw new StorageValidationError(issues);
 }
 
+function revisionsByPlan(revisions: readonly NavlogExportBundle["planRevisions"][number][]): Map<string, readonly NavlogExportBundle["planRevisions"][number][]> {
+  const grouped = new Map<string, NavlogExportBundle["planRevisions"][number][]>();
+  for (const revision of revisions) grouped.set(revision.planId, [...(grouped.get(revision.planId) ?? []), revision]);
+  return grouped;
+}
+
+function isTruncatedHistoryRoot(revision: NavlogExportBundle["planRevisions"][number], allRevisions: readonly NavlogExportBundle["planRevisions"][number][]): boolean {
+  const history = allRevisions.filter((candidate) => candidate.planId === revision.planId);
+  return history.length === MAX_REVISIONS_PER_PLAN && history
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0]?.id === revision.id;
+}
+
 export function serializeNavlogExport(bundle: NavlogExportBundle): string {
   // Validate the exact JSON representation before export too; corrupted
-  // IndexedDB data must not propagate. Do not apply the inbound import limit:
-  // exports contain the user's complete, immutable local history.
+  // IndexedDB data must not propagate. The same bounded collection policy is
+  // used for export and import so every generated backup remains restorable.
   const serialized = JSON.stringify(bundle);
+  if (new TextEncoder().encode(serialized).byteLength > MAX_IMPORT_BYTES) {
+    throw new StorageValidationError([{ path: "$", message: `export exceeds the ${MAX_IMPORT_BYTES} byte restore limit` }]);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(serialized) as unknown;

@@ -69,6 +69,37 @@ describe("IndexedDbNavlogRepository", () => {
     await expect(store.savePlanRevision(nextFamily, nextRevision)).rejects.toBeInstanceOf(ImmutableRevisionError);
   });
 
+  it("retains only the latest twenty revisions for a plan and prunes unreferenced weather evidence", async () => {
+    const store = repository();
+    const family = planFamily();
+    const first = planRevision();
+    await store.saveWeatherSnapshot(weatherSnapshot());
+    await store.savePlanRevision(family, first);
+    let parent = first;
+    for (let index = 2; index <= 21; index += 1) {
+      const createdAt = new Date(Date.UTC(2026, 8, 21, 12, index, 0)).toISOString();
+      const revision = {
+        ...first,
+        id: `revision-${String(index).padStart(2, "0")}`,
+        parentRevisionId: parent.id,
+        reason: "input-change" as const,
+        createdAt,
+        weatherSnapshotIds: [],
+      };
+      await store.savePlanRevision({ ...family, latestRevisionId: revision.id }, revision);
+      parent = revision;
+    }
+
+    const retained = await store.listPlanRevisions(family.id);
+    expect(retained).toHaveLength(20);
+    expect(retained[0]?.id).toBe("revision-02");
+    expect(retained.at(-1)?.id).toBe("revision-21");
+    expect(await store.getPlanRevision(first.id)).toBeUndefined();
+    expect(await store.getWeatherSnapshot("weather-1")).toBeUndefined();
+    const exported = await store.exportJson("2026-09-21T12:00:00.000Z");
+    expect(() => parseNavlogExport(exported, now())).not.toThrow();
+  });
+
   it("rejects a revision whose parent is not stored in the same plan family", async () => {
     const store = repository();
     const family = planFamily();

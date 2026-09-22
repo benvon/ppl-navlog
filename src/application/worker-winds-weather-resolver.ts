@@ -34,7 +34,10 @@ export const createWorkerWindsPlanWeatherResolver = (
     if (draft.weatherSelection === undefined) throw new Error("Choose an available winds forecast period explicitly before calculating the plan.");
     const departure = draft.route.points[0];
     if (departure?.kind !== "airport") throw new Error("A departure airport with field elevation is required for weather planning.");
-    const metar = await metarClient?.fetchMetar(departure.icao);
+    // A METAR anchor improves low-altitude interpolation, but it is optional:
+    // winds entirely within the published FB envelope remain calculable when
+    // the runway-picker METAR dependency is temporarily unavailable.
+    const metar = metarClient === undefined ? undefined : await metarClient.fetchMetar(departure.icao).catch(() => undefined);
     const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, draft.weatherSelection.forecastValidTimeUtc, input, departure, metar));
     const snapshot = weatherSnapshot(input.weatherSnapshotId, loaded);
     return {

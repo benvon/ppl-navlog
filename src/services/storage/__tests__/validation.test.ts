@@ -73,9 +73,14 @@ describe("storage model validation", () => {
       ...definition,
       legs: [{ ...definition.legs[0], performanceOverrides: { cruiseTasKnots: { ...aircraftDefaultValue(100), effectiveValue: 101 } } }, definition.legs[1]],
     };
+    const nonPositiveOverride = {
+      ...definition,
+      legs: [{ ...definition.legs[0], performanceOverrides: { cruiseTasKnots: { ...aircraftDefaultValue(100), effectiveValue: 0, override: { value: 0, reason: "Invalid", createdAt: timestamp } } } }, definition.legs[1]],
+    };
     const nonAirportEndpoints = { ...definition, points: [{ ...definition.points[0], kind: "checkpoint" }, ...definition.points.slice(1)] };
 
     expect(() => validateRouteDefinition(invalidOverride)).toThrow(/effectiveValue/);
+    expect(() => validateRouteDefinition(nonPositiveOverride)).toThrow(/at least/);
     expect(() => validateRouteDefinition(nonAirportEndpoints)).toThrow(/departure airport/);
   });
 

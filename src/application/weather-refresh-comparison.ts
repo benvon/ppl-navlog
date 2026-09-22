@@ -41,7 +41,7 @@ export const compareWeatherRefresh = (
     priorSnapshots.map(comparableWeatherSnapshot),
     refreshedSnapshots.map(comparableWeatherSnapshot),
   );
-  const calculationChanges = jsonChanges(previousCalculation, refreshedCalculation);
+  const calculationChanges = jsonChanges(comparableCalculation(previousCalculation), comparableCalculation(refreshedCalculation));
   return {
     schema: "weather-refresh-comparison/v1",
     parentRevisionId,
@@ -67,8 +67,28 @@ export const attachWeatherRefreshComparison = (
 
 const comparableWeatherSnapshot = (snapshot: WeatherReferenceSnapshot): JsonValue => ({
   source: snapshot.source,
-  payload: snapshot.payload,
+  payload: withoutTransportMetadata(snapshot.payload),
 });
+
+/** Request IDs, cache state, and retrieval transport are evidence provenance,
+ * not a change in meteorological content. */
+const withoutTransportMetadata = (value: JsonValue): JsonValue => {
+  if (Array.isArray(value)) return value.map(withoutTransportMetadata);
+  if (!isJsonRecord(value)) return value;
+  const result: Record<string, JsonValue> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (["requestId", "requestIds", "provenance", "cache", "fetchedAt", "retrievedAt"].includes(key)) continue;
+    result[key] = withoutTransportMetadata(nested);
+  }
+  return result;
+};
+
+const comparableCalculation = (value: JsonValue | undefined): JsonValue | undefined => {
+  if (!isJsonRecord(value)) return value;
+  const calculation = { ...value };
+  delete calculation.weatherRefreshComparison;
+  return calculation;
+};
 
 const comparisonAsJson = (comparison: WeatherRefreshComparison): JsonValue => ({
   schema: comparison.schema,
