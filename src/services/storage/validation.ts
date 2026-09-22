@@ -87,6 +87,15 @@ function positiveNumber(value: unknown, path: string, issues: ValidationIssue[])
   return finiteNumber(value, path, issues, Number.MIN_VALUE);
 }
 
+function positiveInteger(value: unknown, path: string, issues: ValidationIssue[]): value is number {
+  if (!positiveNumber(value, path, issues)) return false;
+  if (!Number.isInteger(value)) {
+    add(issues, path, "must be an integer");
+    return false;
+  }
+  return true;
+}
+
 function nonNegativeNumber(value: unknown, path: string, issues: ValidationIssue[]): value is number {
   return finiteNumber(value, path, issues, 0);
 }
@@ -384,6 +393,10 @@ export function validatePlanFamily(value: unknown, now = new Date()): value is P
   identifier(value.id, "$.id", issues);
   requiredString(value.title, "$.title", issues);
   if (value.latestRevisionId !== undefined) identifier(value.latestRevisionId, "$.latestRevisionId", issues);
+  if (value.latestRevisionNumber !== undefined) positiveInteger(value.latestRevisionNumber, "$.latestRevisionNumber", issues);
+  if ((value.latestRevisionId === undefined) !== (value.latestRevisionNumber === undefined)) {
+    add(issues, "$.latestRevisionNumber", "must be present exactly when latestRevisionId is present");
+  }
   if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
   if (issues.length > 0) throw new StorageValidationError(issues);
   return true;
@@ -416,7 +429,9 @@ export function validatePlanRevision(value: unknown, now = new Date()): value is
   schemaVersion(value.schemaVersion, PLAN_SCHEMA_VERSION, "$.schemaVersion", issues);
   identifier(value.id, "$.id", issues);
   identifier(value.planId, "$.planId", issues);
+  positiveInteger(value.revisionNumber, "$.revisionNumber", issues);
   if (value.parentRevisionId !== undefined) identifier(value.parentRevisionId, "$.parentRevisionId", issues);
+  if (value.restoredFromRevisionId !== undefined) identifier(value.restoredFromRevisionId, "$.restoredFromRevisionId", issues);
   validateRevisionMetadata(value, issues, now);
   validateRevisionSnapshots(value, issues, now);
   validateRevisionReferences(value, issues);

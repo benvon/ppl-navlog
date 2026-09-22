@@ -192,6 +192,7 @@ class Planner {
     }));
     if (this.dependencies.portability !== undefined) section.append(renderPlanPortability(
       this.dependencies.portability,
+      this.state.currentRevision?.planId,
       (message) => { this.feedback.textContent = message; },
       async () => {
         const [profiles, families] = await Promise.all([this.dependencies.persistence.listAircraftProfiles(), this.dependencies.persistence.listPlanFamilies()]);
@@ -502,8 +503,10 @@ class Planner {
   private async handleSaveProfile(form: HTMLFormElement): Promise<void> {
     try {
       const profile = await saveAircraftProfile(this.dependencies.persistence, profileInputFromForm(form), this.dependencies.ids, this.dependencies.clock);
-      this.state = { ...this.state, profiles: [...this.state.profiles, profile], selectedProfileId: profile.id };
-      this.feedback.textContent = `Saved aircraft profile ${profile.name}.`;
+      this.state = { ...this.state, profiles: [...this.state.profiles, profile], selectedProfileId: profile.id, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+      this.feedback.textContent = this.state.draft === undefined
+        ? `Saved aircraft profile ${profile.name}.`
+        : `Saved and selected aircraft profile ${profile.name}. Save a new journal revision before calculating.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -579,31 +582,8 @@ class Planner {
     try {
       const profile = this.selectedProfile();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
-      const departure = this.state.departure;
-      const destination = this.state.destination;
-      if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
-      const rebuiltRoute = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
-      const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route, this.state.draft?.selectedAircraftProfileId === profile.id);
-      const draft = createPlanDraft({
-        id: this.state.draft?.id,
-        planId: this.state.draft?.planId,
-        title: inputValue(form, "plan-title"),
-        departureTimeUtc: dateTimeLocalToUtc(inputValue(form, "departure-time")),
-        route,
-        selectedAircraftProfileId: profile.id,
-        taxiRunupFuelGallons: Number(inputValue(form, "taxi-fuel")),
-        reserveFuelGallons: Number(inputValue(form, "reserve-fuel")),
-        descentTargetAltitudeFeetMsl: Number(inputValue(form, "descent-target")),
-        descentTargetIsManual: this.state.descentTargetIsManual,
-      }, this.dependencies.ids, this.dependencies.clock);
-      const selectedTime = this.state.selectedForecastValidTimeUtc;
-      const selectedDraft = selectedTime === undefined ? draft : selectPlanWeatherForecast(
-        draft,
-        this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
-        selectedTime,
-        this.dependencies.clock,
-      );
-      const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
+      const { draft, departure, destination } = this.draftForSave(form, profile);
+      const saved = await saveDraftRevision(this.dependencies.persistence, this.draftWithSelectedForecast(draft), profile, this.dependencies.ids, this.dependencies.clock, ...this.journalSaveTarget());
       this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
@@ -614,12 +594,56 @@ class Planner {
     }
   }
 
+  private draftForSave(form: HTMLFormElement, profile: AircraftProfile): { readonly draft: PlanDraft; readonly departure: AirportRoutePoint; readonly destination: AirportRoutePoint } {
+    const departure = this.state.departure;
+    const destination = this.state.destination;
+    if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
+    const rebuiltRoute = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
+    const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route, this.state.draft?.selectedAircraftProfileId === profile.id);
+    return {
+      departure,
+      destination,
+      draft: createPlanDraft({
+        id: this.state.draft?.id,
+        planId: this.state.draft?.planId,
+        title: inputValue(form, "plan-title"),
+        departureTimeUtc: dateTimeLocalToUtc(inputValue(form, "departure-time")),
+        route,
+        selectedAircraftProfileId: profile.id,
+        taxiRunupFuelGallons: Number(inputValue(form, "taxi-fuel")),
+        reserveFuelGallons: Number(inputValue(form, "reserve-fuel")),
+        descentTargetAltitudeFeetMsl: Number(inputValue(form, "descent-target")),
+        descentTargetIsManual: this.state.descentTargetIsManual,
+      }, this.dependencies.ids, this.dependencies.clock),
+    };
+  }
+
+  private draftWithSelectedForecast(draft: PlanDraft): PlanDraft {
+    const selectedTime = this.state.selectedForecastValidTimeUtc;
+    if (selectedTime === undefined) return draft;
+    return selectPlanWeatherForecast(
+      draft,
+      this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
+      selectedTime,
+      this.dependencies.clock,
+    );
+  }
+
+  private journalSaveTarget(): [PlanRevision | undefined, string | undefined] {
+    const openedRevision = this.state.currentRevision;
+    const journalHead = openedRevision === undefined ? undefined : this.currentJournalHead(openedRevision.planId);
+    return [journalHead ?? openedRevision, openedRevision !== undefined && journalHead !== undefined && openedRevision.id !== journalHead.id ? openedRevision.id : undefined];
+  }
+
   private async handleCalculatePlan(): Promise<void> {
     try {
       const calculatePlan = this.dependencies.calculatePlan;
       const draft = this.state.draft;
       const profile = this.selectedProfile();
       if (calculatePlan === undefined || draft === undefined || profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
+      if (this.state.currentRevision !== undefined && this.currentJournalHead(this.state.currentRevision.planId)?.id !== this.state.currentRevision.id) {
+        throw new Error("Save this historical revision as a new journal entry before calculating.");
+      }
       if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
@@ -645,6 +669,7 @@ class Planner {
       const parent = this.state.currentRevision;
       const selectedTime = this.state.selectedForecastValidTimeUtc;
       if (refresh === undefined || parent === undefined) throw new Error("Open a calculated revision before refreshing weather.");
+      if (this.currentJournalHead(parent.planId)?.id !== parent.id) throw new Error("Save this historical revision as a new journal entry before refreshing weather.");
       if (this.state.hasUnsavedChanges) throw new Error("Save or discard current route, aircraft, or altitude edits before refreshing weather.");
       if (selectedTime === undefined) throw new Error("Load published winds periods and choose a forecast before refreshing weather.");
       const selectedDraft = selectPlanWeatherForecast(
@@ -720,7 +745,9 @@ class Planner {
         hasUnsavedForecastSelection: false,
         routeForm: routeFormFromDraft(reopened.draftSnapshot, firstAirport(reopened.draftSnapshot.route.points)?.icao ?? "", lastAirport(reopened.draftSnapshot.route.points)?.icao ?? ""),
       };
-      this.feedback.textContent = `Reopened revision ${reopened.id}; any save will create a child revision.`;
+      this.feedback.textContent = this.currentJournalHead(reopened.planId)?.id === reopened.id
+        ? `Opened current journal revision ${reopened.revisionNumber}.`
+        : `Opened historical revision ${reopened.revisionNumber}; saving restores it as a new current journal entry.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -733,6 +760,17 @@ class Planner {
 
   private async refreshSavedPlans(): Promise<void> {
     this.state = { ...this.state, families: await this.dependencies.persistence.listPlanFamilies() };
+  }
+
+  private currentJournalHead(planId: string): PlanRevision | undefined {
+    const latestId = this.state.families.find((family) => family.id === planId)?.latestRevisionId;
+    const persistedHead = latestId === undefined ? undefined : this.state.revisions.find((revision) => revision.id === latestId);
+    if (persistedHead !== undefined && (this.state.currentRevision?.planId !== planId || this.state.currentRevision.revisionNumber <= persistedHead.revisionNumber)) return persistedHead;
+    // A calculator owns its persistence write. Keep hermetic browser adapters
+    // and their immediate result usable until the next storage refresh.
+    return this.state.currentRevision?.planId === planId && !this.state.revisions.some((revision) => revision.id === this.state.currentRevision?.id)
+      ? this.state.currentRevision
+      : undefined;
   }
 
   private reportError(error: unknown): void {

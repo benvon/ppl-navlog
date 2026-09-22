@@ -61,6 +61,7 @@ export const saveWeatherRefreshRevision = async (
     schemaVersion: 1,
     id: ids.next(),
     planId: parentRevision.planId,
+    revisionNumber: parentRevision.revisionNumber + 1,
     parentRevisionId: parentRevision.id,
     reason: "weather-refresh",
     createdAt: timestamp,
@@ -76,6 +77,7 @@ export const saveWeatherRefreshRevision = async (
     title: material.draftSnapshot.title,
     createdAt: parentRevision.createdAt,
     latestRevisionId: revision.id,
+    latestRevisionNumber: revision.revisionNumber,
   };
   await persistence.saveWeatherRefreshRevision(
     family,

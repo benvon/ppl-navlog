@@ -121,7 +121,23 @@ describe("plan draft use cases", () => {
     const second = await saveDraftRevision(persistence, revised, profile, ids("revision-2"), fixedClock, first.revision);
 
     expect(second.revision.parentRevisionId).toBe(first.revision.id);
+    expect([first.revision.revisionNumber, second.revision.revisionNumber]).toEqual([1, 2]);
     await expect(reopenPlanRevision(persistence, second.revision.id)).resolves.toMatchObject({ id: "revision-2", draftSnapshot: { title: "Updated study route" } });
+  });
+
+  it("records an explicit historical restore without creating a journal branch", async () => {
+    const airports = createLocalStudyAirportLookup();
+    const departure = await airports.lookupExactIcao("KORD");
+    const destination = await airports.lookupExactIcao("KJVL");
+    const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
+    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
+    const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
+    const persistence = new MemoryPersistence();
+    const first = await saveDraftRevision(persistence, draft, profile, ids("revision-1"), fixedClock);
+    const second = await saveDraftRevision(persistence, { ...draft, title: "Newer" }, profile, ids("revision-2"), fixedClock, first.revision);
+    const restored = await saveDraftRevision(persistence, first.revision.draftSnapshot, profile, ids("revision-3"), fixedClock, second.revision, first.revision.id);
+
+    expect(restored.revision).toMatchObject({ revisionNumber: 3, parentRevisionId: second.revision.id, restoredFromRevisionId: first.revision.id });
   });
 
   it("rejects malformed route, draft, override, revision, and airport-lookup inputs", async () => {

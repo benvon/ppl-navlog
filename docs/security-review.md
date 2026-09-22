@@ -18,7 +18,7 @@ This is a public, zero-login application. Browser-local plans and aircraft profi
 
 ## Positive controls reviewed
 
-The UI places imported and upstream strings with `textContent`, not HTML interpretation. JSON import has a 1 MB limit, record validation, relationship checks, and atomic merge behavior. API paths and parameters are allowlisted; the Worker uses fixed Aviation Weather Center hosts and bounded request time. API responses are `no-store` with a restrictive CSP; static responses gain restrictive headers through the Worker-first routing change. Provider failures return generic client-visible errors. A current reachable `npm audit --audit-level=high` returned zero known vulnerabilities; this does not prove dependencies are free of unknown defects.
+The UI places imported and upstream strings with `textContent`, not HTML interpretation. JSON plan/profile archives have a 12 MiB per-archive limit, record validation, relationship checks, and atomic merge behavior. API paths and parameters are allowlisted; the Worker uses fixed Aviation Weather Center hosts and bounded request time. API responses are `no-store` with a restrictive CSP; static responses gain restrictive headers through the Worker-first routing change. Provider failures return generic client-visible errors. A current reachable `npm audit --audit-level=high` returned zero known vulnerabilities; this does not prove dependencies are free of unknown defects.
 
 ## Before a production deployment
 

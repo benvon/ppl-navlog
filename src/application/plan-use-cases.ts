@@ -203,6 +203,7 @@ export async function saveDraftRevision(
   ids: UseCaseIds,
   clock: UseCaseClock,
   parentRevision?: PlanRevision,
+  restoredFromRevisionId?: string,
 ): Promise<SavedPlan> {
   if (profile.id !== draft.selectedAircraftProfileId) throw new DraftUseCaseError("The selected aircraft profile does not match this draft.");
   if (parentRevision !== undefined && parentRevision.planId !== draft.planId) throw new DraftUseCaseError("A revised draft must keep its original plan family.");
@@ -211,7 +212,9 @@ export async function saveDraftRevision(
     schemaVersion: 1,
     id: ids.next(),
     planId: draft.planId,
+    revisionNumber: (parentRevision?.revisionNumber ?? 0) + 1,
     ...(parentRevision === undefined ? {} : { parentRevisionId: parentRevision.id }),
+    ...(restoredFromRevisionId === undefined ? {} : { restoredFromRevisionId }),
     reason: parentRevision === undefined ? "initial-save" : "input-change",
     createdAt: timestamp,
     draftSnapshot: { ...draft, updatedAt: timestamp },
@@ -226,6 +229,7 @@ export async function saveDraftRevision(
     title: draft.title,
     createdAt: parentRevision?.createdAt ?? timestamp,
     latestRevisionId: revision.id,
+    latestRevisionNumber: revision.revisionNumber,
   };
   await persistence.savePlanRevision(family, revision);
   return { family, revision };

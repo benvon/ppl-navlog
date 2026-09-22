@@ -76,6 +76,8 @@ export interface PlanFamily {
   readonly title: string;
   readonly createdAt: string;
   readonly latestRevisionId?: string;
+  /** Monotonic per-plan journal position; timestamps are display metadata only. */
+  readonly latestRevisionNumber?: number;
 }
 
 export type RevisionReason = "initial-save" | "input-change" | "weather-refresh" | "recalculation" | "import";
@@ -91,7 +93,15 @@ export interface PlanRevision {
   readonly schemaVersion: typeof PLAN_SCHEMA_VERSION;
   readonly id: string;
   readonly planId: string;
+  /** Monotonic journal position assigned while appending the plan's current head. */
+  readonly revisionNumber: number;
+  /**
+   * Informational prior-head identifier. New writes use it to identify the
+   * current journal entry, but retained history never requires it.
+   */
   readonly parentRevisionId?: string;
+  /** The historical revision whose snapshot was explicitly restored, if any. */
+  readonly restoredFromRevisionId?: string;
   readonly reason: RevisionReason;
   readonly createdAt: string;
   readonly draftSnapshot: PlanDraft;

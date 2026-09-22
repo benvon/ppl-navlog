@@ -359,11 +359,11 @@ IndexedDB stores:
 - weather/reference snapshots used by revisions;
 - application schema and migration state.
 
-Editable work occurs in a draft. Saving produces a revision with a stable plan ID, revision ID, parent revision ID when applicable, creation reason, timestamps, route inputs, aircraft snapshot, weather snapshot references, effective overrides, calculated route, calculation versions, and warnings.
+Editable work occurs in a draft. Saving appends a revision with a stable plan ID, transaction-assigned journal number, revision ID, creation reason, timestamps, route inputs, aircraft snapshot, weather snapshot references, effective overrides, calculated route, calculation versions, and warnings. Each plan retains its latest 20 entries. Historical entries are read-only; restoring one appends its snapshot as a new current entry rather than branching history.
 
-Refreshing weather creates a new draft from the selected revision, retrieves new weather, recalculates, and saves a new revision only after the user confirms. Prior revisions remain readable.
+Refreshing weather creates a new draft from the current revision, retrieves new weather, recalculates, and appends a new revision only after the user confirms. Prior revisions remain readable.
 
-JSON export includes a documented format version and checksummed or otherwise integrity-checked envelope. Import must validate size, JSON shape, schema version, identifiers, timestamps, numeric ranges, and nested collections before writing anything. Import is atomic: invalid content writes no partial state. Unsupported future schema versions fail closed with a useful message.
+JSON portability is deliberately bounded: an open plan exports as one self-contained archive containing its retained entries, required editable aircraft profiles, and weather evidence; aircraft profiles can export separately. Import must validate size, JSON shape, schema version, identifiers, timestamps, numeric ranges, and nested collections before writing anything. Import is atomic: invalid content writes no partial state. Unsupported future schema versions fail closed with a useful message. Whole-library single-file backup is out of scope.
 
 JSON remains the only supported round-trip portability format. PDF export is available only for a complete saved calculated revision and must not be offered as an import path.
 

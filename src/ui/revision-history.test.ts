@@ -6,6 +6,7 @@ const revision = (id: string, parentRevisionId?: string): PlanRevision => ({
   schemaVersion: 1,
   id,
   planId: "plan",
+  revisionNumber: parentRevisionId === undefined ? 1 : 2,
   ...(parentRevisionId === undefined ? {} : { parentRevisionId }),
   reason: parentRevisionId === undefined ? "initial-save" : "weather-refresh",
   createdAt: parentRevisionId === undefined ? "2026-09-21T12:00:00.000Z" : "2026-09-21T13:00:00.000Z",
@@ -26,7 +27,7 @@ describe("revision history", () => {
     const select = vi.fn();
     const history = renderRevisionHistory({ revisions: [revision("first"), revision("second", "first")], selectedRevisionId: "second", onSelect: select });
     const buttons = history.querySelectorAll("button");
-    expect(buttons[0]?.textContent).toContain("second");
+    expect(buttons[0]?.textContent).toContain("Revision 2");
     expect(buttons[0]?.getAttribute("aria-current")).toBe("true");
     expect(history.textContent).toContain("latest 20 immutable revisions");
     expect(history.textContent).toContain("Weather evidence IDs: none → weather-2");

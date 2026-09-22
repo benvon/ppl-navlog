@@ -41,6 +41,7 @@ export const calculateAndSavePlan = async (
     schemaVersion: 1,
     id: ids.next(),
     planId: draft.planId,
+    revisionNumber: (parentRevision?.revisionNumber ?? 0) + 1,
     ...(parentRevision === undefined ? {} : { parentRevisionId: parentRevision.id }),
     reason: parentRevision === undefined ? "initial-save" : "recalculation",
     createdAt: timestamp,
@@ -56,6 +57,7 @@ export const calculateAndSavePlan = async (
     title: draft.title,
     createdAt: draft.createdAt,
     latestRevisionId: revision.id,
+    latestRevisionNumber: revision.revisionNumber,
   };
   await persistence.saveCalculatedPlanRevision(family, revision, snapshots.map((snapshot) => structuredClone(snapshot)));
   return { status: "saved", family, revision, calculation: result };

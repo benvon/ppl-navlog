@@ -3,7 +3,9 @@ import type { PlanFamily, PlanRevision, WeatherReferenceSnapshot } from "../../d
 import {
   type ImportMode,
   type ImportResult,
-  type NavlogExportBundle,
+  type NavlogArchive,
+  type PlanArchive,
+  type ProfileArchive,
   NAVLOG_DATABASE_NAME,
   NAVLOG_DATABASE_VERSION,
   MAX_REVISIONS_PER_PLAN,
@@ -13,7 +15,7 @@ import {
   ImportConflictError,
   StorageUnavailableError,
 } from "./contracts";
-import { parseNavlogExport, serializeNavlogExport } from "./json-transfer";
+import { parseNavlogArchive, serializeNavlogArchive } from "./json-transfer";
 import {
   StorageValidationError,
   validateAircraftProfile,
@@ -140,20 +142,26 @@ export class IndexedDbNavlogRepository {
     const familyStore = transaction.objectStore(NAVLOG_STORES.planFamilies);
     const revisionStore = transaction.objectStore(NAVLOG_STORES.planRevisions);
     const existingFamily = await requestResult<unknown>(familyStore.get(family.id));
+    const storedFamily = existingFamily === undefined
+      ? undefined
+      : ensureValid(existingFamily, (candidate) => validatePlanFamily(candidate, this.now()));
     const existingRevision = await requestResult<unknown>(revisionStore.get(revision.id));
     if (existingRevision !== undefined) {
       transaction.abort();
       throw new ImmutableRevisionError(`Plan revision ${revision.id} already exists and cannot be modified.`);
     }
-    await validateRevisionParent(transaction, revisionStore, revision, this.now());
+    validateRevisionHead(transaction, storedFamily, revision);
     const existingRevisions = (await requestResult<unknown[]>(revisionStore.getAll()))
       .map((candidate) => ensureValid(candidate, (value) => validatePlanRevision(value, this.now())));
     const weatherStore = transaction.objectStore(NAVLOG_STORES.weatherSnapshots);
+    const existingWeather = (await requestResult<unknown[]>(weatherStore.getAll()))
+      .map((candidate) => ensureValid(candidate, (value) => validateWeatherReferenceSnapshot(value, this.now())));
+    assertPlanArchiveFits(family, existingRevisions, revision, existingWeather, weatherSnapshots, this.now());
     const newWeatherIds = appendNewWeatherSnapshots(transaction, weatherStore, weatherSnapshots);
     await validateRevisionWeatherReferences(transaction, weatherStore, revision.weatherSnapshotIds, newWeatherIds);
     revisionStore.add(clone(revision));
     prunePlanRevisionHistory(revisionStore, weatherStore, existingRevisions, revision);
-    const preservedCreatedAt = existingFamily === undefined ? family.createdAt : ensureValid(existingFamily, (candidate) => validatePlanFamily(candidate, this.now())).createdAt;
+    const preservedCreatedAt = storedFamily === undefined ? family.createdAt : storedFamily.createdAt;
     familyStore.put(clone({ ...family, createdAt: preservedCreatedAt }));
     await transactionDone(transaction);
   }
@@ -175,14 +183,15 @@ export class IndexedDbNavlogRepository {
     return values
       .map((value) => clone(ensureValid(value, (candidate) => validatePlanRevision(candidate, this.now()))))
       .filter((revision) => revision.planId === planId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      .sort((left, right) => left.revisionNumber - right.revisionNumber);
   }
 
   public async listPlanFamilies(): Promise<readonly PlanFamily[]> {
     return this.readAll(NAVLOG_STORES.planFamilies, (value) => validatePlanFamily(value, this.now()));
   }
 
-  public async exportJson(exportedAt = this.now().toISOString()): Promise<string> {
+  /** Exports exactly one plan's bounded journal and all evidence it needs. */
+  public async exportPlanArchive(planId: string, exportedAt = this.now().toISOString()): Promise<string> {
     const database = await this.database();
     const transaction = database.transaction(allStoreNames, "readonly");
     const [aircraftProfiles, planFamilies, planRevisions, weatherSnapshots] = await Promise.all([
@@ -192,21 +201,52 @@ export class IndexedDbNavlogRepository {
       requestResult<unknown[]>(transaction.objectStore(NAVLOG_STORES.weatherSnapshots).getAll()),
     ]);
     await transactionDone(transaction);
-    const bundle: NavlogExportBundle = {
-      format: "ppl-navlog/export",
+    const family = planFamilies
+      .map((value) => clone(ensureValid(value, (candidate) => validatePlanFamily(candidate, this.now()))))
+      .find((candidate) => candidate.id === planId);
+    if (family === undefined) throw new StorageValidationError([{ path: "$.planId", message: "does not identify a saved plan" }]);
+    const revisions = planRevisions
+      .map((value) => clone(ensureValid(value, (candidate) => validatePlanRevision(candidate, this.now()))))
+      .filter((revision) => revision.planId === planId)
+      .sort((left, right) => left.revisionNumber - right.revisionNumber);
+    const weatherIds = new Set(revisions.flatMap((revision) => revision.weatherSnapshotIds));
+    const latestProfiles = new Map<string, AircraftProfile>();
+    for (const revision of revisions) latestProfiles.set(revision.draftSnapshot.selectedAircraftProfileId, revision.aircraftProfileSnapshot.profile);
+    for (const candidate of aircraftProfiles.map((value) => clone(ensureValid(value, (value) => validateAircraftProfile(value, this.now()))))) {
+      if (latestProfiles.has(candidate.id)) latestProfiles.set(candidate.id, candidate);
+    }
+    const archive: PlanArchive = {
+      format: "ppl-navlog/plan-archive",
       formatVersion: 1,
       exportedAt,
-      aircraftProfiles: aircraftProfiles.map((value) => clone(ensureValid(value, (candidate) => validateAircraftProfile(candidate, this.now())))),
-      planFamilies: planFamilies.map((value) => clone(ensureValid(value, (candidate) => validatePlanFamily(candidate, this.now())))),
-      planRevisions: planRevisions.map((value) => clone(ensureValid(value, (candidate) => validatePlanRevision(candidate, this.now())))),
-      weatherSnapshots: weatherSnapshots.map((value) => clone(ensureValid(value, (candidate) => validateWeatherReferenceSnapshot(candidate, this.now())))),
+      planFamily: family,
+      planRevisions: revisions,
+      aircraftProfiles: [...latestProfiles.values()],
+      weatherSnapshots: weatherSnapshots
+        .map((value) => clone(ensureValid(value, (candidate) => validateWeatherReferenceSnapshot(candidate, this.now()))))
+        .filter((snapshot) => weatherIds.has(snapshot.id)),
     };
-    return serializeNavlogExport(bundle);
+    return serializeNavlogArchive(archive, this.now());
+  }
+
+  /** Exports reusable profiles without implying an unbounded whole-library backup. */
+  public async exportProfileArchive(exportedAt = this.now().toISOString()): Promise<string> {
+    const archive: ProfileArchive = {
+      format: "ppl-navlog/profile-archive",
+      formatVersion: 1,
+      exportedAt,
+      aircraftProfiles: await this.listAircraftProfiles(),
+    };
+    return serializeNavlogArchive(archive, this.now());
   }
 
   /** Validation occurs before the write transaction. Any conflict or failure aborts all writes. */
-  public async importJson(serialized: string, mode: ImportMode = "merge"): Promise<ImportResult> {
-    const bundle = parseNavlogExport(serialized, this.now());
+  public async importArchive(serialized: string, mode: ImportMode = "merge"): Promise<ImportResult> {
+    const archive = parseNavlogArchive(serialized, this.now());
+    return this.importValidatedArchive(archive, mode);
+  }
+
+  private async importValidatedArchive(archive: NavlogArchive, mode: ImportMode): Promise<ImportResult> {
     const database = await this.database();
     const transaction = database.transaction(allStoreNames, "readwrite");
     let requestFailure: unknown;
@@ -216,10 +256,14 @@ export class IndexedDbNavlogRepository {
     if (mode === "replace") {
       await Promise.all(allStoreNames.map((name) => requestResult(transaction.objectStore(name).clear())));
     }
-    addAll(transaction.objectStore(NAVLOG_STORES.aircraftProfiles), bundle.aircraftProfiles);
-    addAll(transaction.objectStore(NAVLOG_STORES.planFamilies), bundle.planFamilies);
-    addAll(transaction.objectStore(NAVLOG_STORES.weatherSnapshots), bundle.weatherSnapshots);
-    addAll(transaction.objectStore(NAVLOG_STORES.planRevisions), bundle.planRevisions);
+    const profiles = archive.aircraftProfiles;
+    const families = archive.format === "ppl-navlog/plan-archive" ? [archive.planFamily] : [];
+    const revisions = archive.format === "ppl-navlog/plan-archive" ? archive.planRevisions : [];
+    const snapshots = archive.format === "ppl-navlog/plan-archive" ? archive.weatherSnapshots : [];
+    addAll(transaction.objectStore(NAVLOG_STORES.aircraftProfiles), profiles);
+    addAll(transaction.objectStore(NAVLOG_STORES.planFamilies), families);
+    addAll(transaction.objectStore(NAVLOG_STORES.weatherSnapshots), snapshots);
+    addAll(transaction.objectStore(NAVLOG_STORES.planRevisions), revisions);
     try {
       await transactionDone(transaction);
     } catch (error) {
@@ -229,10 +273,10 @@ export class IndexedDbNavlogRepository {
       throw error;
     }
     return {
-      aircraftProfiles: bundle.aircraftProfiles.length,
-      planFamilies: bundle.planFamilies.length,
-      planRevisions: bundle.planRevisions.length,
-      weatherSnapshots: bundle.weatherSnapshots.length,
+      aircraftProfiles: profiles.length,
+      planFamilies: families.length,
+      planRevisions: revisions.length,
+      weatherSnapshots: snapshots.length,
     };
   }
 
@@ -254,8 +298,8 @@ export class IndexedDbNavlogRepository {
 /**
  * Prunes only the oldest revisions of this plan after the new immutable child
  * is queued. Weather evidence is removed only when no retained revision from
- * any plan references it. A retained oldest revision may point to pruned
- * history; that parent ID remains useful provenance for a truncated lineage.
+ * any plan references it. Journal order is assigned by the save transaction;
+ * timestamps remain display metadata and cannot influence retention.
  */
 function prunePlanRevisionHistory(
   revisionStore: IDBObjectStore,
@@ -266,7 +310,7 @@ function prunePlanRevisionHistory(
   const allRetained = [...existingRevisions, appendedRevision];
   const planHistory = allRetained
     .filter((candidate) => candidate.planId === appendedRevision.planId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    .sort((left, right) => left.revisionNumber - right.revisionNumber);
   const pruned = planHistory.slice(0, Math.max(0, planHistory.length - MAX_REVISIONS_PER_PLAN));
   if (pruned.length === 0) return;
   const prunedIds = new Set(pruned.map((revision) => revision.id));
@@ -282,6 +326,45 @@ function prunePlanRevisionHistory(
   }
 }
 
+/** Prevents a local plan from accepting evidence that its own archive cannot restore. */
+function assertPlanArchiveFits(
+  family: PlanFamily,
+  existingRevisions: readonly PlanRevision[],
+  appendedRevision: PlanRevision,
+  existingWeather: readonly WeatherReferenceSnapshot[],
+  appendedWeather: readonly WeatherReferenceSnapshot[],
+  now: Date,
+): void {
+  const revisions = [...existingRevisions, appendedRevision]
+    .filter((revision) => revision.planId === family.id)
+    .sort((left, right) => left.revisionNumber - right.revisionNumber)
+    .slice(-MAX_REVISIONS_PER_PLAN);
+  const weatherIds = new Set(revisions.flatMap((revision) => revision.weatherSnapshotIds));
+  const weatherById = new Map([...existingWeather, ...appendedWeather].map((snapshot) => [snapshot.id, snapshot]));
+  const profiles = new Map<string, AircraftProfile>();
+  for (const revision of revisions) profiles.set(revision.draftSnapshot.selectedAircraftProfileId, revision.aircraftProfileSnapshot.profile);
+  const archive: PlanArchive = {
+    format: "ppl-navlog/plan-archive",
+    formatVersion: 1,
+    exportedAt: now.toISOString(),
+    planFamily: family,
+    planRevisions: revisions,
+    aircraftProfiles: [...profiles.values()],
+    weatherSnapshots: [...weatherIds].flatMap((id) => {
+      const snapshot = weatherById.get(id);
+      return snapshot === undefined ? [] : [snapshot];
+    }),
+  };
+  try {
+    serializeNavlogArchive(archive, now);
+  } catch (error) {
+    if (error instanceof StorageValidationError) {
+      throw new StorageValidationError(error.issues.map((issue) => ({ path: `$.planArchive${issue.path.slice(1)}`, message: issue.message })));
+    }
+    throw error;
+  }
+}
+
 function validateRevisionWriteInput(
   family: PlanFamily,
   revision: PlanRevision,
@@ -293,27 +376,35 @@ function validateRevisionWriteInput(
   weatherSnapshots.forEach((snapshot) => validateWeatherReferenceSnapshot(snapshot, now));
   if (family.id !== revision.planId) throw new StorageValidationError([{ path: "$.planId", message: "revision.planId must equal family.id" }]);
   if (family.latestRevisionId !== revision.id) throw new StorageValidationError([{ path: "$.latestRevisionId", message: "must identify the revision being saved" }]);
+  if (family.latestRevisionNumber !== revision.revisionNumber) throw new StorageValidationError([{ path: "$.latestRevisionNumber", message: "must identify the revision number being saved" }]);
   if (revision.draftSnapshot.selectedAircraftProfileId !== revision.aircraftProfileSnapshot.profile.id) {
     throw new StorageValidationError([{ path: "$.aircraftProfileSnapshot.profile.id", message: "must match draftSnapshot.selectedAircraftProfileId" }]);
   }
 }
 
-async function validateRevisionParent(
+/**
+ * A plan is a linear journal. The caller must append to the current head so a
+ * stale tab or reopened historical entry cannot silently create a branch.
+ */
+function validateRevisionHead(
   transaction: IDBTransaction,
-  revisionStore: IDBObjectStore,
+  storedFamily: PlanFamily | undefined,
   revision: PlanRevision,
-  now: Date,
-): Promise<void> {
-  if (revision.parentRevisionId === undefined) return;
-  const parent = await requestResult<unknown>(revisionStore.get(revision.parentRevisionId));
-  if (parent === undefined) {
-    transaction.abort();
-    throw new ImmutableRevisionError(`Parent revision ${revision.parentRevisionId} does not exist.`);
+): void {
+  if (storedFamily === undefined) {
+    if (revision.parentRevisionId !== undefined || revision.revisionNumber !== 1) {
+      transaction.abort();
+      throw new ImmutableRevisionError("The first journal revision must be number 1 with no current head.");
+    }
+    return;
   }
-  const validatedParent = ensureValid(parent, (candidate) => validatePlanRevision(candidate, now));
-  if (validatedParent.planId !== revision.planId) {
+  if (revision.parentRevisionId !== storedFamily.latestRevisionId) {
     transaction.abort();
-    throw new ImmutableRevisionError("A revision parent must belong to the same plan family.");
+    throw new ImmutableRevisionError("The plan changed in another tab or this historical revision must be restored before it can be saved.");
+  }
+  if (revision.revisionNumber !== (storedFamily.latestRevisionNumber ?? 0) + 1) {
+    transaction.abort();
+    throw new ImmutableRevisionError("The next revision number must immediately follow the current plan head.");
   }
 }
 

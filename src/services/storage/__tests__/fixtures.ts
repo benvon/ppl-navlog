@@ -2,7 +2,7 @@ import type { AircraftProfile } from "../../../domain/aircraft";
 import { coordinate as makeCoordinate } from "../../../domain/coordinates";
 import type { PlanningValue } from "../../../domain/planning-value";
 import type { PlanDraft, PlanFamily, PlanRevision, RouteDefinition, WeatherReferenceSnapshot } from "../../../domain/route";
-import type { NavlogExportBundle } from "../contracts";
+import type { PlanArchive } from "../contracts";
 
 export const timestamp = "2026-09-21T12:00:00.000Z";
 
@@ -93,6 +93,7 @@ export const planFamily = (): PlanFamily => ({
   title: "KORD to KJVL study route",
   createdAt: timestamp,
   latestRevisionId: "revision-1",
+  latestRevisionNumber: 1,
 });
 
 export const weatherSnapshot = (): WeatherReferenceSnapshot => ({
@@ -107,6 +108,7 @@ export const planRevision = (): PlanRevision => ({
   schemaVersion: 1,
   id: "revision-1",
   planId: "plan-1",
+  revisionNumber: 1,
   reason: "initial-save",
   createdAt: timestamp,
   draftSnapshot: planDraft(),
@@ -116,12 +118,12 @@ export const planRevision = (): PlanRevision => ({
   warnings: [],
 });
 
-export const exportBundle = (): NavlogExportBundle => ({
-  format: "ppl-navlog/export",
+export const planArchive = (): PlanArchive => ({
+  format: "ppl-navlog/plan-archive",
   formatVersion: 1,
   exportedAt: timestamp,
+  planFamily: planFamily(),
   aircraftProfiles: [aircraftProfile()],
-  planFamilies: [planFamily()],
   planRevisions: [planRevision()],
   weatherSnapshots: [weatherSnapshot()],
 });

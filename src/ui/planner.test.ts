@@ -163,7 +163,7 @@ describe("planner shell", () => {
     revisionButtons[1]?.click();
     await settle();
     expect(root.textContent).not.toContain("OVERRIDDEN effective TAS");
-    expect(root.textContent).toContain("Reopened revision");
+    expect(root.textContent).toContain("Opened historical revision");
     root.querySelectorAll<HTMLButtonElement>(".revision-history button")[0]?.click();
     await settle();
     expect(root.textContent).toContain("OVERRIDDEN effective TAS");
@@ -174,7 +174,7 @@ describe("planner shell", () => {
     expect(root.textContent).not.toContain("OVERRIDDEN effective TAS");
     clickByLabel(root, "Reopen saved revision");
     await settle();
-    expect(root.textContent).toContain("Reopened revision");
+    expect(root.textContent).toContain("Opened current journal revision");
 
     input(root, "destination-icao").value = "KORD";
     clickByLabel(root, "Resolve exact ICAO endpoints");
@@ -471,6 +471,33 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Second aircraft.");
   });
 
+  it("marks a newly saved profile selection as unsaved when a revision is open", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const calculatePlan = vi.fn();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    input(root, "profile-name").value = "Different aircraft";
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+    expect(calculatePlan).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+  });
+
   it("clears a per-leg override when saving the same route with a different aircraft profile", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
@@ -555,8 +582,8 @@ describe("planner shell", () => {
       attempt += 1;
       if (attempt === 1) return { status: "blocked", reason: "weather-unavailable", message: "Selected winds are unavailable.", warnings: [] };
       if (parent === undefined) throw new Error("Expected a saved parent revision.");
-      const revision: PlanRevision = { ...parent, id: "calculated-1", parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [{ subleg: { sourceLegId: parent.draftSnapshot.route.legs[0]!.id, phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, effectiveWind: { wind: { effectiveValue: { directionFrom: 240, speed: 12 } } }, trueHeading: 274.25, variation: { effectiveValue: -2 }, assumptions: [], appliedOverrides: [], traces: { windTriangle: { formulaId: "wind-triangle", formulaVersion: "1.0.0", inputs: [{ name: "TAS", value: 95, unit: "knots" }], intermediateValues: [], result: { name: "True heading", value: 274.25, unit: "degrees-true" }, rounding: { calculation: "unrounded", display: "nearest degree" }, warnings: [] } } }], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
-      return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
+      const revision: PlanRevision = { ...parent, id: "calculated-1", revisionNumber: parent.revisionNumber + 1, parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [{ subleg: { sourceLegId: parent.draftSnapshot.route.legs[0]!.id, phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, effectiveWind: { wind: { effectiveValue: { directionFrom: 240, speed: 12 } } }, trueHeading: 274.25, variation: { effectiveValue: -2 }, assumptions: [], appliedOverrides: [], traces: { windTriangle: { formulaId: "wind-triangle", formulaVersion: "1.0.0", inputs: [{ name: "TAS", value: 95, unit: "knots" }], intermediateValues: [], result: { name: "True heading", value: 274.25, unit: "degrees-true" }, rounding: { calculation: "unrounded", display: "nearest degree" }, warnings: [] } } }], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
+      return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id, latestRevisionNumber: revision.revisionNumber }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
     };
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds, calculatePlan, refreshWeather, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
     await settle();

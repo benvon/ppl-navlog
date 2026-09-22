@@ -23,19 +23,19 @@ export function renderRevisionHistory(options: RevisionHistoryOptions): HTMLElem
     return section;
   }
   const list = document.createElement("ol");
-  const ordered = [...options.revisions].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+  const ordered = [...options.revisions].sort((a, b) => b.revisionNumber - a.revisionNumber);
   for (const revision of ordered) {
     const item = document.createElement("li");
     const selected = revision.id === options.selectedRevisionId;
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = `${revision.createdAt} · ${revision.reason} · ${revision.id}${selected ? " (open)" : ""}`;
+    button.textContent = `Revision ${revision.revisionNumber} · ${revision.createdAt} · ${revision.reason}${selected ? " (open)" : ""}`;
     button.setAttribute("aria-current", selected ? "true" : "false");
     button.addEventListener("click", () => options.onSelect(revision.id));
     item.append(button);
     if (revision.parentRevisionId !== undefined) {
       const lineage = document.createElement("span");
-      lineage.textContent = ` Parent: ${revision.parentRevisionId}`;
+      lineage.textContent = ` Previous journal entry: ${revision.parentRevisionId}`;
       item.append(lineage);
     }
     list.append(item);
