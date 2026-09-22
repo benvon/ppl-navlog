@@ -81,17 +81,10 @@ export async function saveAircraftProfile(
   input: AircraftProfileInput,
   ids: UseCaseIds,
   clock: UseCaseClock,
-  existingProfile?: AircraftProfile,
 ): Promise<AircraftProfile> {
-  const profile = existingProfile === undefined
-    ? createAircraftProfile(input, ids, clock)
-    : {
-      schemaVersion: existingProfile.schemaVersion,
-      id: existingProfile.id,
-      ...input,
-      createdAt: existingProfile.createdAt,
-      updatedAt: clock.now().toISOString(),
-    };
+  // Profiles are immutable inputs. Editing one creates a new identity so an
+  // existing plan revision can continue to resolve the exact profile it used.
+  const profile = createAircraftProfile(input, ids, clock);
   await persistence.saveAircraftProfile(profile);
   return profile;
 }

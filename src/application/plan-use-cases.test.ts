@@ -165,22 +165,23 @@ describe("plan draft use cases", () => {
     expect(await persistence.getAircraftProfile(profile.id)).toEqual(profile);
   });
 
-  it("updates a selected profile in place without changing its identity", async () => {
+  it("creates a new immutable profile identity when saving changed inputs", async () => {
     const persistence = new MemoryPersistence();
     const created = await saveAircraftProfile(persistence, profileInput(), ids("aircraft-1"), fixedClock);
-    const updated = await saveAircraftProfile(persistence, { ...profileInput(), cruiseTasKnots: 105 }, ids("unused-id"), { now: () => new Date("2026-09-21T13:00:00.000Z") }, created);
+    const updated = await saveAircraftProfile(persistence, { ...profileInput(), cruiseTasKnots: 105 }, ids("aircraft-2"), { now: () => new Date("2026-09-21T13:00:00.000Z") });
 
-    expect(updated).toMatchObject({ id: "aircraft-1", cruiseTasKnots: 105, createdAt: created.createdAt, updatedAt: "2026-09-21T13:00:00.000Z" });
-    await expect(persistence.listAircraftProfiles()).resolves.toEqual([updated]);
+    expect(updated).toMatchObject({ id: "aircraft-2", cruiseTasKnots: 105, createdAt: "2026-09-21T13:00:00.000Z", updatedAt: "2026-09-21T13:00:00.000Z" });
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([created, updated]);
   });
 
-  it("removes optional usable fuel when a selected profile is updated without it", async () => {
+  it("omits optional usable fuel from a new profile version when its field is cleared", async () => {
     const persistence = new MemoryPersistence();
     const created = await saveAircraftProfile(persistence, { ...profileInput(), usableFuelGallons: 24 }, ids("aircraft-1"), fixedClock);
-    const updated = await saveAircraftProfile(persistence, profileInput(), ids("unused-id"), fixedClock, created);
+    const updated = await saveAircraftProfile(persistence, profileInput(), ids("aircraft-2"), fixedClock);
 
     expect(updated.usableFuelGallons).toBeUndefined();
     await expect(persistence.getAircraftProfile(updated.id)).resolves.toEqual(expect.not.objectContaining({ usableFuelGallons: expect.anything() }));
+    await expect(persistence.getAircraftProfile(created.id)).resolves.toEqual(expect.objectContaining({ usableFuelGallons: 24 }));
   });
 
   it("persists only an explicitly selected, departure-valid forecast period", async () => {
