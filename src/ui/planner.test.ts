@@ -394,6 +394,24 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Save and select an aircraft profile");
   });
 
+  it("preserves an unsaved aircraft profile draft through unrelated planner renders", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    input(root, "cruise-tas").value = "123";
+    input(root, "cruise-tas").dispatchEvent(new Event("input", { bubbles: true }));
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+
+    expect(input(root, "cruise-tas").value).toBe("123");
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Save the aircraft profile version before saving a plan.");
+  });
+
   it("reports invalid checkpoint and incomplete-route errors without changing the editable draft", async () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
@@ -642,6 +660,10 @@ describe("planner shell", () => {
       expect.objectContaining({ name: "Regression aircraft", cruiseTasKnots: 111, usableFuelGallons: 25.5 }),
       expect.objectContaining({ name: "Regression aircraft", cruiseTasKnots: 115, usableFuelGallons: 25.5 }),
     ]);
+    expect([...root.querySelectorAll<HTMLSelectElement>("select[name='selected-profile'] option")].map((option) => option.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining("Regression aircraft — 111 kt, 6 gph · saved"),
+      expect.stringContaining("Regression aircraft — 115 kt, 6 gph · saved"),
+    ]));
 
     input(root, "usable-fuel").value = "";
     const clearedFuelForm = root.querySelector<HTMLFormElement>(".profile-form");
