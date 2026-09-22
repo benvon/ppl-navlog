@@ -510,8 +510,10 @@ class Planner {
 
   private async handleSaveProfile(form: HTMLFormElement): Promise<void> {
     try {
-      const profile = await saveAircraftProfile(this.dependencies.persistence, profileInputFromForm(form), this.dependencies.ids, this.dependencies.clock);
-      this.state = { ...this.state, profiles: [...this.state.profiles, profile], selectedProfileId: profile.id, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+      const input = profileInputFromForm(form);
+      if (!this.beginInputTransaction("Saving aircraft profile…")) return;
+      const profile = await saveAircraftProfile(this.dependencies.persistence, input, this.dependencies.ids, this.dependencies.clock);
+      this.state = { ...this.state, pendingOperation: undefined, profiles: [...this.state.profiles, profile], selectedProfileId: profile.id, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
       this.feedback.textContent = this.state.draft === undefined
         ? `Saved aircraft profile ${profile.name}.`
         : `Saved and selected aircraft profile ${profile.name}. Save a new journal revision before calculating.`;
@@ -595,10 +597,14 @@ class Planner {
       const profile = this.selectedProfile();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
       const { draft, departure, destination } = this.draftForSave(form, profile);
-      const saved = await saveDraftRevision(this.dependencies.persistence, this.draftWithSelectedForecast(draft), profile, this.dependencies.ids, this.dependencies.clock, ...this.journalSaveTarget());
+      const selectedDraft = this.draftWithSelectedForecast(draft);
+      const saveTarget = this.journalSaveTarget();
+      if (!this.beginInputTransaction("Saving new plan revision…")) return;
+      const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, ...saveTarget);
       this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
+      this.state = { ...this.state, pendingOperation: undefined };
       this.feedback.textContent = `Saved immutable revision ${saved.revision.id}.`;
       this.render();
     } catch (error) {
@@ -669,9 +675,10 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, pendingOperation: undefined, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
+      this.state = { ...this.state, pendingOperation: undefined };
       this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
       this.render();
     } catch (error) {
@@ -703,9 +710,10 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, pendingOperation: undefined, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
+      this.state = { ...this.state, pendingOperation: undefined };
       this.feedback.textContent = `Weather refreshed in immutable revision ${result.revision.id}; compare it with its parent in Saved revision history.`;
       this.render();
     } catch (error) {

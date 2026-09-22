@@ -679,4 +679,35 @@ describe("planner shell", () => {
     expect(input(root, "plan-title").disabled).toBe(false);
     expect(root.textContent).toContain("Navlog blocked: Selected winds are unavailable.");
   });
+
+  it("freezes controls through draft persistence and unlocks when history refresh fails", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    let finishSave: (() => void) | undefined;
+    const saveRevision = persistence.savePlanRevision.bind(persistence);
+    persistence.savePlanRevision = async (family, revision) => new Promise<void>((resolve) => {
+      finishSave = () => { void saveRevision(family, revision).then(resolve); };
+    });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(input(root, "plan-title").disabled).toBe(true);
+    if (finishSave === undefined) throw new Error("Save did not start.");
+    persistence.listPlanRevisions = async () => { throw new Error("History temporarily unavailable."); };
+    finishSave();
+    await settle();
+
+    expect(input(root, "plan-title").disabled).toBe(false);
+    expect(root.textContent).toContain("History temporarily unavailable.");
+  });
 });
