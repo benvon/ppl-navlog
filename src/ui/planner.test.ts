@@ -464,6 +464,46 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
   });
 
+  it("rejects invalid cruise altitudes before saving or calculating", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const calculatePlan = vi.fn();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    const altitude = input(root, "leg-altitude-0");
+    altitude.value = "0";
+    altitude.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(altitude.getAttribute("aria-invalid")).toBe("true");
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+    expect(calculatePlan).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("Correct each highlighted cruise altitude before calculating.");
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(1);
+    expect(root.textContent).toContain("Correct each highlighted cruise altitude before saving a plan.");
+
+    altitude.value = "5500";
+    altitude.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(altitude.getAttribute("aria-invalid")).toBe("false");
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(2);
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.cruiseAltitudeFeetMsl).toBe(5_500);
+  });
+
   it("uses an explicitly selected second profile before the first plan revision", async () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
@@ -576,13 +616,6 @@ describe("planner shell", () => {
     profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
 
-    const selector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
-    if (selector === null) throw new Error("Profile selector was not rendered.");
-    selector.value = "";
-    selector.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(root.textContent).toContain("No aircraft profile selected.");
-
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
@@ -590,6 +623,17 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
+
+    const selector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (selector === null) throw new Error("Profile selector was not rendered.");
+    selector.value = "";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(root.textContent).toContain("No aircraft profile selected.");
+    expect(root.querySelector<HTMLSelectElement>("select[name='selected-profile']")?.value).toBe("");
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(1);
     expect(root.textContent).toContain("Save and select an aircraft profile before saving a plan.");
   });
 

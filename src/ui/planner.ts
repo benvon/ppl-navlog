@@ -41,13 +41,16 @@ export interface PlannerDependencies {
 
 interface PlannerState {
   readonly profiles: readonly AircraftProfile[];
-  readonly selectedProfileId?: string;
+  /** Undefined defers to an opened draft; null is the user's explicit no-profile choice. */
+  readonly selectedProfileId?: string | null;
   readonly routeForm: RouteFormValues;
   readonly descentTargetIsManual: boolean;
   readonly departure?: AirportRoutePoint;
   readonly destination?: AirportRoutePoint;
   readonly checkpoints: readonly CheckpointRoutePoint[];
   readonly cruiseAltitudes: readonly number[];
+  /** Editor validation prevents stale saved altitudes from reaching a new revision or calculation. */
+  readonly invalidCruiseAltitudeIndexes: readonly number[];
   readonly draft?: PlanDraft;
   readonly currentRevision?: PlanRevision;
   readonly unlockedLegId?: string;
@@ -83,7 +86,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], invalidCruiseAltitudeIndexes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -162,7 +165,7 @@ class Planner {
     select.addEventListener("change", () => {
       this.state = {
         ...this.state,
-        selectedProfileId: select.value === "" ? undefined : select.value,
+        selectedProfileId: select.value === "" ? null : select.value,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
@@ -296,7 +299,12 @@ class Planner {
       const next = points[index + 1];
       if (next === undefined) return;
       const field = labeledInput(`leg-altitude-${index}`, `${point.name} to ${next.name} (feet MSL)`, String(this.state.cruiseAltitudes[index] ?? 4_500), "number");
-      field.querySelector("input")?.addEventListener("change", (event) => this.setCruiseAltitude(index, inputNumber(event)));
+      const input = field.querySelector("input");
+      if (input !== null) {
+        input.min = "1";
+        input.setAttribute("aria-invalid", String(this.state.invalidCruiseAltitudeIndexes.includes(index)));
+        input.addEventListener("change", () => this.setCruiseAltitude(index, input.value, input));
+      }
       wrapper.append(field);
     });
     if (points.length < 2) wrapper.append(text("p", "Resolve departure and destination before defining leg altitudes."));
@@ -546,6 +554,7 @@ class Planner {
           descentTarget: this.state.descentTargetIsManual ? routeForm.descentTarget : String(destination.elevationFeetMsl + 1_000),
         },
         cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1),
+        invalidCruiseAltitudeIndexes: [],
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
@@ -571,7 +580,7 @@ class Planner {
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -581,22 +590,32 @@ class Planner {
 
   private removeCheckpoint(id: string): void {
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
     this.render();
   }
 
-  private setCruiseAltitude(index: number, value: number): void {
-    if (!Number.isFinite(value) || value <= 0) {
+  private setCruiseAltitude(index: number, rawValue: string, input: HTMLInputElement): void {
+    const value = Number(rawValue);
+    if (rawValue.trim() === "" || !Number.isFinite(value) || value <= 0) {
+      input.setAttribute("aria-invalid", "true");
+      this.state = {
+        ...this.state,
+        invalidCruiseAltitudeIndexes: [...new Set([...this.state.invalidCruiseAltitudeIndexes, index])],
+        hasUnsavedChanges: this.state.draft !== undefined,
+        calculationPreview: undefined,
+      };
       this.feedback.textContent = "Cruise altitude must be a positive feet-MSL value.";
       return;
     }
+    input.setAttribute("aria-invalid", "false");
     const cruiseAltitudes = [...expandAltitudes(this.state.cruiseAltitudes, index + 1)];
     cruiseAltitudes[index] = value;
-    this.state = { ...this.state, cruiseAltitudes, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.state = { ...this.state, cruiseAltitudes, invalidCruiseAltitudeIndexes: this.state.invalidCruiseAltitudeIndexes.filter((invalidIndex) => invalidIndex !== index), hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
   }
 
   private async handleSaveDraft(form: HTMLFormElement): Promise<void> {
     try {
+      this.requireValidCruiseAltitudes("saving a plan");
       const profile = this.selectedProfile();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
       const { draft, departure, destination } = this.draftForSave(form, profile);
@@ -668,6 +687,7 @@ class Planner {
       if (this.state.currentRevision !== undefined && this.currentJournalHead(this.state.currentRevision.planId)?.id !== this.state.currentRevision.id) {
         throw new Error("Save this historical revision as a new journal entry before calculating.");
       }
+      this.requireValidCruiseAltitudes("calculating");
       if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
       if (!this.beginInputTransaction("Calculating complete navlog…")) return;
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
@@ -735,8 +755,12 @@ class Planner {
     return selectedId === undefined ? undefined : this.state.profiles.find((profile) => profile.id === selectedId);
   }
 
+  private requireValidCruiseAltitudes(action: "saving a plan" | "calculating"): void {
+    if (this.state.invalidCruiseAltitudeIndexes.length > 0) throw new Error(`Correct each highlighted cruise altitude before ${action}.`);
+  }
+
   private selectedProfileId(): string | undefined {
-    return this.state.selectedProfileId ?? this.state.draft?.selectedAircraftProfileId;
+    return this.state.selectedProfileId === undefined ? this.state.draft?.selectedAircraftProfileId : this.state.selectedProfileId ?? undefined;
   }
 
   private async handleReopenRevision(): Promise<void> {
@@ -767,6 +791,7 @@ class Planner {
         destination: lastAirport(reopened.draftSnapshot.route.points),
         checkpoints: reopened.draftSnapshot.route.points.filter((point): point is CheckpointRoutePoint => point.kind === "checkpoint"),
         cruiseAltitudes: reopened.draftSnapshot.route.legs.map((leg) => leg.cruiseAltitudeFeetMsl),
+        invalidCruiseAltitudeIndexes: [],
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
         descentTargetIsManual: reopened.draftSnapshot.descentTargetAltitudeFeetMsl.origin === "pilot-input",
@@ -1052,11 +1077,6 @@ function routeFormFromElement(form: HTMLFormElement): RouteFormValues {
 function inputValue(form: HTMLFormElement, name: string): string {
   const element = form.elements.namedItem(name);
   return element instanceof HTMLInputElement ? element.value : "";
-}
-
-function inputNumber(event: Event): number {
-  const input = event.currentTarget;
-  return input instanceof HTMLInputElement ? Number(input.value) : Number.NaN;
 }
 
 function dateTimeLocalToUtc(value: string): string {
