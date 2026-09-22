@@ -22,8 +22,14 @@ describe("weather refresh comparison", () => {
       id: "new",
       payload: { selectedForecast: { levels: [{ wind: 10 }], fetchedAt: "2026-09-21T13:00:00.000Z" }, requestIds: { forecast: "new-request" }, surfaceToAloftInterpolation: { metar: { wind: 8, provenance: { cache: "new" } } } },
     };
-    const priorCalculation = { schema: "complete-navlog/v1", status: "calculated", navlog: { fuel: 4 }, weatherRefreshComparison: { prior: true } };
-    const refreshedCalculation = { schema: "complete-navlog/v1", status: "calculated", navlog: { fuel: 4 } };
+    const priorCalculation = {
+      schema: "complete-navlog/v1", status: "calculated", navlog: { fuel: 4 }, weatherRefreshComparison: { prior: true },
+      weather: { provenance: { stationDiscoveryRequestId: "station-request-old", forecastRequestId: "forecast-request-old", forecastFetchedAt: "2026-09-21T12:00:00.000Z" } },
+    };
+    const refreshedCalculation = {
+      schema: "complete-navlog/v1", status: "calculated", navlog: { fuel: 4 },
+      weather: { provenance: { stationDiscoveryRequestId: "station-request-new", forecastRequestId: "forecast-request-new", forecastFetchedAt: "2026-09-21T13:00:00.000Z" } },
+    };
 
     const comparison = compareWeatherRefresh("parent", [prior], [refreshed], priorCalculation, refreshedCalculation);
 

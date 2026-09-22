@@ -143,7 +143,7 @@ interface PhaseRequirementInternal extends PhaseRequirement {
 }
 
 const EPSILON_NAUTICAL_MILES = 1e-9;
-const POLICY_WARNING = "Altitude-transition policy: a changed user-leg altitude begins at that preceding checkpoint and consumes following route space; it is never applied as an instantaneous jump.";
+const POLICY_WARNING = "Altitude-transition policy: changes start at prior checkpoint, consume route space, and are never instantaneous jumps.";
 
 /**
  * Allocates departure climb, every changed user-leg altitude, and arrival

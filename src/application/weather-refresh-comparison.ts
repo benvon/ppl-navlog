@@ -87,7 +87,9 @@ const comparableCalculation = (value: JsonValue | undefined): JsonValue | undefi
   if (!isJsonRecord(value)) return value;
   const calculation = { ...value };
   delete calculation.weatherRefreshComparison;
-  return calculation;
+  return "weather" in calculation
+    ? { ...calculation, weather: withoutTransportMetadata(calculation.weather) }
+    : calculation;
 };
 
 const comparisonAsJson = (comparison: WeatherRefreshComparison): JsonValue => ({

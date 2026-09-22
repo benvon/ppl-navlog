@@ -61,7 +61,7 @@ describe("route phase allocation", () => {
     expect(transition?.startingAltitude).toBeCloseTo(3_000, 8);
     expect(transition?.start.longitude).toBeCloseTo(1, 10);
     expect(result.sublegs.filter((subleg) => subleg.phase === "cruise").every((subleg) => subleg.startingAltitude === subleg.endingAltitude)).toBe(true);
-    expect(result.warnings.join(" ")).toMatch(/never applied as an instantaneous jump/i);
+    expect(result.warnings.join(" ")).toMatch(/altitude-transition policy.*never instantaneous jumps/i);
   });
 
   it("samples arrival-descent wind at candidate TODs during bounded convergence", () => {
