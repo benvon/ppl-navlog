@@ -81,6 +81,7 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
   };
   const familyIds = ensureUnique(bundle.planFamilies, "$.planFamilies");
   const revisionIds = ensureUnique(bundle.planRevisions, "$.planRevisions");
+  const revisionsById = new Map(bundle.planRevisions.map((revision) => [revision.id, revision]));
   const weatherIds = ensureUnique(bundle.weatherSnapshots, "$.weatherSnapshots");
   ensureUnique(bundle.aircraftProfiles, "$.aircraftProfiles");
   bundle.planRevisions.forEach((revision, index) => {
@@ -92,6 +93,10 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
   });
   bundle.planFamilies.forEach((family, index) => {
     if (family.latestRevisionId !== undefined && !revisionIds.has(family.latestRevisionId)) issues.push({ path: `$.planFamilies[${index}].latestRevisionId`, message: "must reference an exported revision" });
+    const latestRevision = family.latestRevisionId === undefined ? undefined : revisionsById.get(family.latestRevisionId);
+    if (latestRevision !== undefined && latestRevision.planId !== family.id) {
+      issues.push({ path: `$.planFamilies[${index}].latestRevisionId`, message: "must reference a revision from the same plan family" });
+    }
   });
   if (issues.length > 0) throw new StorageValidationError(issues);
 }

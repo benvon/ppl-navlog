@@ -86,7 +86,10 @@ export async function saveAircraftProfile(
 }
 
 export function createRouteDefinition(input: RouteDraftInput, ids: UseCaseIds): RouteDefinition {
-  const points: readonly RoutePoint[] = [input.departure, ...input.checkpoints, input.destination];
+  // A route point is an occurrence, not a globally unique airport. This keeps
+  // departure and destination distinct for a KXYZ → checkpoint → KXYZ route.
+  const points: readonly RoutePoint[] = [input.departure, ...input.checkpoints, input.destination]
+    .map((point, index) => ({ ...point, id: `route-point-${index + 1}` }));
   if (input.cruiseAltitudesFeetMsl.length !== points.length - 1) {
     throw new DraftUseCaseError("Each route leg requires one selected cruise altitude.");
   }

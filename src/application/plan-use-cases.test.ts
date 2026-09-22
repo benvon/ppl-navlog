@@ -63,9 +63,19 @@ describe("plan draft use cases", () => {
     const route = createRouteDefinition({ departure, checkpoints: [checkpoint], destination, cruiseAltitudesFeetMsl: [4_500, 5_500] }, ids("leg-1", "leg-2", "route-1"));
 
     expect(route.legs).toMatchObject([
-      { fromPointId: departure.id, toPointId: checkpoint.id, cruiseAltitudeFeetMsl: 4_500 },
-      { fromPointId: checkpoint.id, toPointId: destination.id, cruiseAltitudeFeetMsl: 5_500 },
+      { fromPointId: "route-point-1", toPointId: "route-point-2", cruiseAltitudeFeetMsl: 4_500 },
+      { fromPointId: "route-point-2", toPointId: "route-point-3", cruiseAltitudeFeetMsl: 5_500 },
     ]);
+  });
+
+  it("assigns distinct route-point identities to repeated airport endpoints", async () => {
+    const airports = createLocalStudyAirportLookup();
+    const departure = await airports.lookupExactIcao("KORD");
+    const destination = await airports.lookupExactIcao("KORD");
+    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
+
+    expect(route.points.map((point) => point.id)).toEqual(["route-point-1", "route-point-2"]);
+    expect(route.legs[0]).toMatchObject({ fromPointId: "route-point-1", toPointId: "route-point-2" });
   });
 
   it("preserves the aircraft default when a per-leg TAS override is restored", async () => {

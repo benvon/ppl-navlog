@@ -560,14 +560,14 @@ const buildAllocatedSubleg = (
   if (!start.ok) return propagateFailure(start);
   const end = pointAlongGreatCircle(leg.start, leg.course, value(nauticalMiles(intervalEnd - leg.startRouteDistance)));
   if (!end.ok) return propagateFailure(end);
-  const distance = nauticalMiles(intervalEnd - intervalStart);
-  if (!distance.ok) return propagateFailure(distance);
+  const geometry = calculateGreatCircleDistanceAndInitialCourse(start.value, end.value);
+  if (!geometry.ok) return propagateFailure(geometry);
   const altitude = sublegAltitudes(activePhase, intervalStart, intervalEnd, leg.cruiseAltitude);
   if (!altitude.ok) return propagateFailure(altitude);
   return success({
     id: `${leg.sourceLegId}:${activePhase?.id ?? "cruise"}:${ordinal}`,
     sourceLegId: leg.sourceLegId, phase: activePhase?.kind ?? "cruise", phaseId: activePhase?.id ?? `cruise:${leg.sourceLegId}`,
-    start: start.value, end: end.value, distance: distance.value, trueCourse: leg.course,
+    start: start.value, end: end.value, distance: geometry.value.distance, trueCourse: geometry.value.initialTrueCourse,
     routeStartDistance: value(nauticalMiles(intervalStart)), routeEndDistance: value(nauticalMiles(intervalEnd)),
     startingAltitude: altitude.value.startingAltitude, endingAltitude: altitude.value.endingAltitude, selectedCruiseAltitude: leg.cruiseAltitude,
   });

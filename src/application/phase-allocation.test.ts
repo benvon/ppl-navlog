@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { coordinate } from "../domain/coordinates";
+import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import type { DomainResult } from "../domain/errors";
 import type { RouteGeometryLeg } from "../domain/phase-geometry";
 import type { EffectiveWindResolver } from "../domain/phase-planning";
@@ -136,6 +137,24 @@ describe("route phase allocation", () => {
     expect(result).toMatchObject({ status: "allocated", phases: [], boundaries: [] });
     if (result.status !== "allocated") throw new Error("Expected allocation.");
     expect(result.sublegs.every((subleg) => subleg.phase === "cruise" && subleg.startingAltitude === 3_000 && subleg.endingAltitude === 3_000)).toBe(true);
+  });
+
+  it("derives each generated subleg's course from its own great-circle endpoints", () => {
+    const longHighLatitudeRoute = [{ sourceLegId: "leg-1", start: value(coordinate(65, -30)), end: value(coordinate(65, 60)) }];
+    const result = value(allocateRoutePhases({
+      route: longHighLatitudeRoute,
+      legAltitudes: [{ sourceLegId: "leg-1", cruiseAltitude: value(feetMsl(11_000)) }],
+      departureAltitude: value(feetMsl(1_000)), destinationAltitude: value(feetMsl(11_000)),
+      climbPerformance, descentPerformance, windResolver: calmResolver,
+    }));
+    if (result.status !== "allocated") throw new Error("Expected allocation.");
+    const cruise = result.sublegs.find((subleg) => subleg.phase === "cruise");
+    if (cruise === undefined) throw new Error("Expected a generated cruise subleg.");
+    const direct = value(calculateGreatCircleDistanceAndInitialCourse(cruise.start, cruise.end));
+    const source = value(calculateGreatCircleDistanceAndInitialCourse(longHighLatitudeRoute[0]!.start, longHighLatitudeRoute[0]!.end));
+
+    expect(cruise.trueCourse).toBeCloseTo(direct.initialTrueCourse, 10);
+    expect(cruise.trueCourse).not.toBeCloseTo(source.initialTrueCourse, 4);
   });
 
   it("allocates an explicit descending checkpoint transition with descent performance", () => {
