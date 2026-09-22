@@ -14,10 +14,12 @@ import { readBoundedText } from './bounded-text';
 
 const AVIATION_WEATHER_ORIGIN = 'https://aviationweather.gov';
 const MAX_RESPONSE_BYTES = 512 * 1024;
+const MAX_STATION_CATALOG_BYTES = 3 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5_000;
 const FRESH_TTL_MS = 20 * 60 * 1_000;
 const STALE_TTL_MS = 2 * 60 * 60 * 1_000;
-const MAX_STATION_IDS_PER_REQUEST = 100;
+const STATION_CATALOG_FRESH_TTL_MS = 26 * 60 * 60 * 1_000;
+const STATION_CATALOG_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const FORECAST_CYCLES: readonly WindsForecastCycle[] = ['06', '12', '24'];
 
 export interface ServiceFetcher { fetch(request: Request): Promise<Response>; }
@@ -40,6 +42,13 @@ interface CachedProduct {
 
 interface DecodedForecast extends WindsForecastAvailability { readonly stationId: string; readonly levels: WindsAloftLevel[]; }
 interface StationInfo { readonly id: string; readonly name: string | null; readonly coordinates: AirportCoordinates; readonly elevationFt: number | null; }
+interface StationCatalogEntry { readonly identifiers: readonly string[]; readonly info: Omit<StationInfo, 'id'>; }
+interface CachedStationCatalog {
+  readonly fetchedAt: string;
+  readonly freshUntil: string;
+  readonly staleUntil: string;
+  readonly entries: readonly StationCatalogEntry[];
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isFiniteNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
@@ -72,6 +81,10 @@ function isContiguousUs(point: AirportCoordinates): boolean { return point.latit
 
 function cacheRequest(region: WindsRegion, cycle: WindsForecastCycle): Request {
   return new Request(`https://ppl-navlog-cache.invalid/winds/${region}/${cycle}`);
+}
+
+function stationCatalogCacheRequest(): Request {
+  return new Request('https://ppl-navlog-cache.invalid/winds/station-catalog-v1');
 }
 
 function cacheProvenance(status: CacheProvenance['status'], source: CacheProvenance['source'], cacheKey: string, fetchedAt: string, freshUntil: string, staleUntil: string, now: Date): CacheProvenance {
@@ -107,6 +120,18 @@ function isDecodedForecast(value: unknown): value is DecodedForecast {
 function isCachedProduct(value: unknown): value is CachedProduct {
   return isRecord(value) && isIsoTimestamp(value.fetchedAt) && isIsoTimestamp(value.freshUntil) && isIsoTimestamp(value.staleUntil) && isWindsRegion(value.region)
     && isCycle(value.cycle) && typeof value.rawProduct === 'string' && Array.isArray(value.forecasts) && value.forecasts.every(isDecodedForecast);
+}
+
+function isStationCatalogEntry(value: unknown): value is StationCatalogEntry {
+  return isRecord(value) && Array.isArray(value.identifiers) && value.identifiers.length > 0 && value.identifiers.length <= 3
+    && value.identifiers.every((identifier) => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier))
+    && isRecord(value.info) && (value.info.name === null || (typeof value.info.name === 'string' && value.info.name.length <= 200))
+    && isCoordinates(value.info.coordinates) && (value.info.elevationFt === null || isFiniteNumber(value.info.elevationFt));
+}
+
+function isCachedStationCatalog(value: unknown): value is CachedStationCatalog {
+  return isRecord(value) && isIsoTimestamp(value.fetchedAt) && isIsoTimestamp(value.freshUntil) && isIsoTimestamp(value.staleUntil)
+    && Array.isArray(value.entries) && value.entries.length > 0 && value.entries.length <= 20_000 && value.entries.every(isStationCatalogEntry);
 }
 
 async function boundedText(fetcher: ServiceFetcher, request: Request): Promise<string> {
@@ -232,45 +257,90 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
   return forecasts;
 }
 
-function stationEntry(value: unknown): { identifiers: string[]; info: Omit<StationInfo, 'id'> } | null {
+function stationEntry(value: unknown): StationCatalogEntry | null {
   if (!isRecord(value) || !isFiniteNumber(value.lat) || !isFiniteNumber(value.lon) || value.lat < -90 || value.lat > 90 || value.lon < -180 || value.lon > 180) return null;
   const identifiers = [value.iataId, value.faaId, value.icaoId].filter((identifier): identifier is string => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier));
+  if (identifiers.length === 0) return null;
   const name = typeof value.site === 'string' && value.site.length <= 200 ? value.site : null;
   return { identifiers, info: { name, coordinates: { latitudeDeg: value.lat, longitudeDeg: value.lon }, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
 }
 
-function parseStationInfo(value: unknown): Map<string, StationInfo> {
-  if (!Array.isArray(value)) throw new ApiError('Aviation Weather Center returned an invalid station-info response.', 502, 'upstream_invalid_response');
-  const result = new Map<string, StationInfo>();
-  for (const entry of value) {
-    const parsed = stationEntry(entry);
-    if (!parsed) continue;
-    for (const identifier of parsed.identifiers) result.set(identifier, { id: identifier, ...parsed.info });
-  }
-  return result;
+function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCatalog {
+  if (!Array.isArray(value)) throw new ApiError('Aviation Weather Center returned an invalid station catalog.', 502, 'upstream_invalid_response');
+  const entries = value.map(stationEntry).filter((entry): entry is StationCatalogEntry => entry !== null);
+  if (entries.length === 0 || entries.length > 20_000) throw new ApiError('Aviation Weather Center returned an unusable station catalog.', 502, 'upstream_invalid_response');
+  return {
+    fetchedAt: fetchedAt.toISOString(),
+    freshUntil: new Date(fetchedAt.getTime() + STATION_CATALOG_FRESH_TTL_MS).toISOString(),
+    staleUntil: new Date(fetchedAt.getTime() + STATION_CATALOG_STALE_TTL_MS).toISOString(),
+    entries,
+  };
 }
 
-async function stationInfo(fetcher: ServiceFetcher, region: WindsRegion, stationIds: readonly string[]): Promise<Map<string, StationInfo>> {
+function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[]): Map<string, StationInfo> {
+  const requestedIds = new Set(stationIds);
   const result = new Map<string, StationInfo>();
-  // The FB product identifies reporting sites with three-character station
-  // IDs (for example ORD), while station-info resolves their ICAO codes.
-  // The V1 contiguous-US product uses K; Alaska and Hawaii use P.
-  const icaoPrefix = region === 'us' ? 'K' : 'P';
-  const icaoIds = stationIds.map((stationId) => `${icaoPrefix}${stationId}`);
-  for (let start = 0; start < icaoIds.length; start += MAX_STATION_IDS_PER_REQUEST) {
-    const ids = icaoIds.slice(start, start + MAX_STATION_IDS_PER_REQUEST);
-    const url = new URL('/api/data/stationinfo', AVIATION_WEATHER_ORIGIN);
-    url.searchParams.set('ids', ids.join(','));
-    url.searchParams.set('format', 'json');
-    const text = await boundedText(fetcher, new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'ppl-navlog/0.1 (educational flight planning)' } }));
-    let payload: unknown;
-    try { payload = JSON.parse(text) as unknown; } catch { throw new ApiError('Aviation Weather Center returned invalid station-info JSON.', 502, 'upstream_invalid_response'); }
-    for (const [id, info] of parseStationInfo(payload)) result.set(id, info);
+  for (const entry of catalog.entries) {
+    for (const identifier of entry.identifiers) {
+      if (requestedIds.has(identifier)) result.set(identifier, { id: identifier, ...entry.info });
+    }
   }
   return result;
 }
 
 export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: CacheStore | undefined, now: () => Date = () => new Date()): WindsDataAdapter {
+  async function stationCatalogUpstream(fetchedAt: Date): Promise<CachedStationCatalog> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    try {
+      const url = new URL('/data/cache/stations.cache.json.gz', AVIATION_WEATHER_ORIGIN);
+      const response = await fetcher.fetch(new Request(url, { headers: { Accept: 'application/octet-stream', 'User-Agent': 'ppl-navlog/0.1 (educational flight planning)' }, signal: controller.signal }));
+      if (!response.ok || response.body === null) throw new ApiError('Aviation Weather Center station catalog is unavailable.', 503, 'upstream_unavailable');
+      let text: string;
+      try {
+        text = await readBoundedText(new Response(response.body.pipeThrough(new DecompressionStream('gzip'))), MAX_STATION_CATALOG_BYTES);
+      } catch {
+        throw new ApiError('Aviation Weather Center returned an oversized or unreadable station catalog.', 502, 'upstream_invalid_response');
+      }
+      try { return parseStationCatalog(JSON.parse(text) as unknown, fetchedAt); }
+      catch (error) {
+        if (error instanceof ApiError) throw error;
+        throw new ApiError('Aviation Weather Center returned invalid station catalog JSON.', 502, 'upstream_invalid_response');
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError('Aviation Weather Center station catalog is unavailable.', 503, 'upstream_unavailable');
+    } finally { clearTimeout(timeout); }
+  }
+
+  async function stationCatalog(): Promise<CachedStationCatalog> {
+    const request = stationCatalogCacheRequest();
+    const current = now();
+    let cached: CachedStationCatalog | undefined;
+    if (cache) {
+      const response = await cache.match(request);
+      if (response) {
+        try {
+          const payload = await response.json() as unknown;
+          if (isCachedStationCatalog(payload)) cached = payload;
+        } catch { /* Invalid edge cache values are replaced below. */ }
+      }
+    }
+    if (cached && Date.parse(cached.freshUntil) > current.getTime()) return cached;
+    try {
+      const refreshed = await stationCatalogUpstream(current);
+      if (cache) {
+        try {
+          await cache.put(request, Response.json(refreshed, { headers: { 'Cache-Control': `max-age=${STATION_CATALOG_STALE_TTL_MS / 1_000}` } }));
+        } catch { /* Best-effort edge cache write; serve the verified catalog regardless. */ }
+      }
+      return refreshed;
+    } catch (error) {
+      if (cached && Date.parse(cached.staleUntil) > current.getTime()) return cached;
+      throw error;
+    }
+  }
+
   async function upstream(region: WindsRegion, cycle: WindsForecastCycle, fetchedAt: Date): Promise<CachedProduct> {
     const url = new URL('/api/data/windtemp', AVIATION_WEATHER_ORIGIN);
     url.searchParams.set('region', region);
@@ -330,7 +400,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         stationForecasts.set(forecast.stationId, forecast);
         availability.set(key, stationForecasts);
       }
-      const stationsById = await stationInfo(fetcher, region, [...stationCycles.keys()].sort());
+      const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort());
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
         const info = stationsById.get(id);
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
@@ -356,7 +426,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       for (const item of await allProducts(region)) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
       if (matches.length !== 1) throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
       const match = matches[0] as { forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance };
-      const info = await stationInfo(fetcher, region, [station]);
+      const info = stationInfo(await stationCatalog(), [station]);
       const stationInfoValue = info.get(station);
       if (!stationInfoValue) throw new ApiError('The requested Winds/Temps station does not have verified Aviation Weather Center coordinates.', 502, 'upstream_invalid_response');
       const windsStation: WindsStation = { id: station, name: stationInfoValue.name, coordinates: stationInfoValue.coordinates, elevationFt: stationInfoValue.elevationFt, region: match.product.region, availableForecastCycles: [match.forecast.forecastCycle], source: 'aviationweather' };

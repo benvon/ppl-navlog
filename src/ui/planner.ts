@@ -377,7 +377,7 @@ class Planner {
         return section;
       }
     }
-    const profile = this.selectedProfile();
+    const profile = this.effectiveProfile();
     const table = document.createElement("table");
     table.append(createNavlogHeader());
     const body = document.createElement("tbody");
@@ -430,7 +430,7 @@ class Planner {
     const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source. Per-leg aircraft defaults and overrides are controlled separately below.");
     section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
     const draft = this.state.draft;
-    const profile = this.selectedProfile();
+    const profile = this.effectiveProfile();
     const leg = draft?.route.legs.find((candidate) => candidate.id === this.state.inspectedLegId) ?? draft?.route.legs[0];
     if (draft === undefined || profile === undefined || leg === undefined) {
       section.append(text("p", "Select an aircraft profile and save a route draft to inspect its performance defaults."));
@@ -684,13 +684,14 @@ class Planner {
     try {
       const calculatePlan = this.dependencies.calculatePlan;
       const draft = this.state.draft;
-      const profile = this.selectedProfile();
-      if (calculatePlan === undefined || draft === undefined || profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
+      if (calculatePlan === undefined || draft === undefined) throw new Error("Save the route and aircraft profile before calculating.");
       if (this.state.currentRevision !== undefined && this.currentJournalHead(this.state.currentRevision.planId)?.id !== this.state.currentRevision.id) {
         throw new Error("Save this historical revision as a new journal entry before calculating.");
       }
       this.requireValidCruiseAltitudes("calculating");
       if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+      const profile = this.effectiveProfile();
+      if (profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
       if (!this.beginInputTransaction("Calculating complete navlog…")) return;
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
@@ -755,6 +756,15 @@ class Planner {
   private selectedProfile(): AircraftProfile | undefined {
     const selectedId = this.selectedProfileId();
     return selectedId === undefined ? undefined : this.state.profiles.find((profile) => profile.id === selectedId);
+  }
+
+  /** Immutable revisions always calculate from the captured aircraft values. */
+  private effectiveProfile(): AircraftProfile | undefined {
+    const revision = this.state.currentRevision;
+    if (revision !== undefined && !this.state.hasUnsavedChanges && !this.state.hasUnsavedForecastSelection) {
+      return revision.aircraftProfileSnapshot.profile;
+    }
+    return this.selectedProfile();
   }
 
   private requireValidCruiseAltitudes(action: "saving a plan" | "calculating"): void {

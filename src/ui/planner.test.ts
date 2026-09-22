@@ -662,6 +662,48 @@ describe("planner shell", () => {
     ]);
   });
 
+  it("calculates a reopened revision from its immutable aircraft-profile snapshot", async () => {
+    const persistence = new MemoryPersistence();
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    input(root, "profile-name").value = "Snapshot aircraft";
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "plan-title").value = "Snapshot route";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    input(root, "cruise-tas").value = "120";
+    const editedProfileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (editedProfileForm === null) throw new Error("Profile form was not rendered after saving.");
+    editedProfileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const calculatePlan = vi.fn(async () => ({ status: "blocked" as const, reason: "test", message: "Test calculation", warnings: [] }));
+    const reopenedRoot = document.createElement("div");
+    renderPlanner(reopenedRoot, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    clickByLabel(reopenedRoot, "Open Snapshot route");
+    await settle();
+    clickByLabel(reopenedRoot, "Calculate complete navlog");
+    await settle();
+
+    expect(calculatePlan).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ name: "Snapshot aircraft", cruiseTasKnots: 95 }),
+      expect.anything(),
+    );
+    expect(reopenedRoot.textContent).toContain("Navlog blocked: Test calculation");
+  });
+
   it("clears the selected aircraft profile when the placeholder is chosen", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();

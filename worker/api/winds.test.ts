@@ -17,18 +17,32 @@ BGR 0215 3512+02 3217+03 2925-01 2846-13 2861-24 278338 781146 770757
 
 const FIXED_NOW = new Date('2026-09-21T18:30:00.000Z');
 
-function responseFor(request: Request): Response {
+const STATION_CATALOG = [
+  { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 },
+  { iataId: 'ATL', faaId: 'ATL', icaoId: 'KATL', site: 'Atlanta', lat: 33.6407, lon: -84.4277, elev: 1026 },
+  { iataId: 'BGR', faaId: 'BGR', icaoId: 'KBGR', site: 'Bangor', lat: 44.8074, lon: -68.8281, elev: 192 },
+  { iataId: 'FAI', faaId: 'FAI', icaoId: 'PAFA', site: 'Fairbanks Intl', lat: 64.8031, lon: -147.87606, elev: 130 },
+  { iataId: 'BRW', faaId: 'BRW', icaoId: 'PABR', site: 'Utqiagvik', lat: 71.28369, lon: -156.78427, elev: 6 },
+  { iataId: 'ITO', faaId: 'ITO', icaoId: 'PHTO', site: 'Hilo Intl', lat: 19.71909, lon: -155.04897, elev: 9 },
+  { iataId: 'LIH', faaId: 'LIH', icaoId: 'PHLI', site: 'Lihue Arpt', lat: 21.98047, lon: -159.33864, elev: 32 },
+  { iataId: 'HNL', faaId: 'HNL', icaoId: 'PHNL', site: 'Honolulu Intl', lat: 21.31869, lon: -157.92242, elev: 13 },
+];
+
+async function stationCatalogResponse(): Promise<Response> {
+  const encoded = new TextEncoder().encode(JSON.stringify(STATION_CATALOG));
+  const source = new ReadableStream<BufferSource>({ start(controller) { controller.enqueue(encoded); controller.close(); } });
+  const body = source.pipeThrough(new CompressionStream('gzip'));
+  return new Response(await new Response(body).arrayBuffer());
+}
+
+async function responseFor(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === '/api/data/windtemp') {
     const product = url.searchParams.get('fcst') === '12' ? PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
       : url.searchParams.get('fcst') === '24' ? PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : PRODUCT;
     return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
   }
-  if (url.pathname === '/api/data/stationinfo') return Response.json([
-    { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 },
-    { iataId: 'ATL', faaId: 'ATL', icaoId: 'KATL', site: 'Atlanta', lat: 33.6407, lon: -84.4277, elev: 1026 },
-    { iataId: 'BGR', faaId: 'BGR', icaoId: 'KBGR', site: 'Bangor', lat: 44.8074, lon: -68.8281, elev: 192 }
-  ]);
+  if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
   return new Response(null, { status: 404 });
 }
 
@@ -84,36 +98,42 @@ describe('Aviation Weather Center adapter', () => {
     expect(result.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ABQ', region: 'us', coordinates: { latitudeDeg: 35.0402, longitudeDeg: -106.609 }, availableForecastCycles: ['06', '12', '24'] })]));
     expect(result.forecasts).toHaveLength(3);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
-    const stationRequest = requestLog.requests.find((request) => new URL(request.url).pathname === '/api/data/stationinfo');
+    const stationRequest = requestLog.requests.find((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz');
     expect(stationRequest).toBeDefined();
-    expect(new URL(stationRequest!.url).searchParams.get('ids')).toContain('KABQ');
     expect(requestLog.requests.every((request) => new URL(request.url).origin === 'https://aviationweather.gov')).toBe(true);
 
     await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
+    expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
   });
 
-  it('uses P-prefixed ICAO identifiers for Alaska and Hawaii station metadata', async () => {
-    const regionalProduct = PRODUCT.replace(/^ABQ/gm, 'ANC');
+  it('maps Alaska and Hawaii FB station IDs through the official station catalog', async () => {
+    const alaskaProduct = PRODUCT.replace(/^ABQ/gm, 'FAI').replace(/^ATL/gm, 'BRW');
+    const hawaiiProduct = PRODUCT.replace(/^ABQ/gm, 'ITO').replace(/^ATL/gm, 'LIH').replace(/^BGR/gm, 'HNL');
     const requests: Request[] = [];
     const regionalFetcher: ServiceFetcher = { async fetch(request) {
       requests.push(request);
       const url = new URL(request.url);
-      if (url.pathname === '/api/data/windtemp') return new Response(regionalProduct, { headers: { 'Content-Type': 'text/plain' } });
-      if (url.pathname === '/api/data/stationinfo') return Response.json([
-        { iataId: 'ANC', faaId: 'ANC', icaoId: 'PANC', site: 'Anchorage', lat: 61.1743, lon: -149.9964, elev: 152 },
-      ]);
+      if (url.pathname === '/api/data/windtemp') {
+        const baseProduct = url.searchParams.get('region') === 'alaska' ? alaskaProduct : hawaiiProduct;
+        const product = url.searchParams.get('fcst') === '12' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : url.searchParams.get('fcst') === '24' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : baseProduct;
+        return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
+      }
+      if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
       return new Response(null, { status: 404 });
     } };
 
-    for (const route of [[{ latitudeDeg: 61.2, longitudeDeg: -150 }], [{ latitudeDeg: 21.3, longitudeDeg: -157.8 }]]) {
-      const adapter = createAviationWeatherAdapter(regionalFetcher, memoryCache(), () => FIXED_NOW);
-      const result = await adapter.getWindsStations(route);
-      expect(result.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ANC' })]));
-    }
-    const stationRequests = requests.filter((request) => new URL(request.url).pathname === '/api/data/stationinfo');
-    expect(stationRequests).toHaveLength(2);
-    expect(stationRequests.map((request) => new URL(request.url).searchParams.get('ids'))).toEqual(['PANC,PATL,PBGR', 'PANC,PATL,PBGR']);
+    const alaska = createAviationWeatherAdapter(regionalFetcher, memoryCache(), () => FIXED_NOW);
+    await expect(alaska.getWindsStations([{ latitudeDeg: 61.2, longitudeDeg: -150 }])).resolves.toMatchObject({
+      stations: expect.arrayContaining([expect.objectContaining({ id: 'FAI', coordinates: { latitudeDeg: 64.8031, longitudeDeg: -147.87606 } }), expect.objectContaining({ id: 'BRW', coordinates: { latitudeDeg: 71.28369, longitudeDeg: -156.78427 } })]),
+    });
+    const hawaii = createAviationWeatherAdapter(regionalFetcher, memoryCache(), () => FIXED_NOW);
+    await expect(hawaii.getWindsForecast('ITO', '2026-09-22T00:00:00.000Z', 'hawaii')).resolves.toMatchObject({
+      forecast: { station: { id: 'ITO', coordinates: { latitudeDeg: 19.71909, longitudeDeg: -155.04897 } } },
+    });
+    expect(requests.filter((request) => new URL(request.url).pathname === '/api/data/stationinfo')).toHaveLength(0);
+    expect(requests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(2);
   });
 
   it('publishes only forecast periods that every selectable station reports', async () => {
