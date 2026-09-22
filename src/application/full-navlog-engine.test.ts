@@ -78,6 +78,25 @@ describe("full navlog calculation engine", () => {
     expect(result.warnings.join(" ")).toMatch(/altitude-transition policy/i);
   });
 
+  it("keeps each altitude-varying vertical phase's row ETE and fuel equal to its phase allocation totals", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: weather() });
+    const snapshot = result.calculationSnapshot as {
+      readonly phaseAllocation: { readonly phases: readonly { readonly id: string; readonly calculation: { readonly duration: number; readonly fuel: number } }[] };
+      readonly navlog: { readonly rows: readonly { readonly subleg: { readonly phaseId: string }; readonly estimatedTimeEnroute: number; readonly fuel: number }[] };
+    };
+
+    for (const phase of snapshot.phaseAllocation.phases) {
+      const rows = snapshot.navlog.rows.filter((row) => row.subleg.phaseId === phase.id);
+      expect(rows.length).toBeGreaterThan(0);
+      // Great-circle segment endpoint reconstruction retains sub-millisecond
+      // floating-point noise; the planning values agree well beyond display
+      // precision while sharing the same altitude-aware wind model.
+      expect(rows.reduce((total, row) => total + row.estimatedTimeEnroute, 0)).toBeCloseTo(phase.calculation.duration, 5);
+      expect(rows.reduce((total, row) => total + row.fuel, 0)).toBeCloseTo(phase.calculation.fuel, 5);
+    }
+  });
+
   it("records an infeasible allocation without fabricating navlog rows", async () => {
     const base = planDraft();
     const draft = {

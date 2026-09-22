@@ -55,4 +55,31 @@ describe("JSON import and export", () => {
     expect(() => parseNavlogExport(JSON.stringify(duplicate), now)).toThrow(/unique/);
     expect(() => parseNavlogExport(" ".repeat(1_000_001), now)).toThrow(/byte limit/);
   });
+
+  it("rejects duplicate route leg ids at the import boundary", () => {
+    const bundle = exportBundle();
+    const draft = bundle.planRevisions[0]!.draftSnapshot;
+    const route = {
+      ...draft.route,
+      legs: [draft.route.legs[0]!, { ...draft.route.legs[1]!, id: draft.route.legs[0]!.id }],
+    };
+    const malformed = {
+      ...bundle,
+      planRevisions: [{ ...bundle.planRevisions[0]!, draftSnapshot: { ...draft, route } }],
+    };
+
+    expect(() => parseNavlogExport(JSON.stringify(malformed), new Date("2027-01-01T00:00:00.000Z"))).toThrow(/legs\[1\]\.id.*unique/u);
+  });
+
+  it("exports valid immutable local history larger than the bounded import size", () => {
+    const bundle = exportBundle();
+    const oversizedButValid = {
+      ...bundle,
+      weatherSnapshots: [{ ...bundle.weatherSnapshots[0]!, payload: { rawProduct: "x".repeat(1_000_001) } }],
+    };
+
+    const serialized = serializeNavlogExport(oversizedButValid);
+    expect(new TextEncoder().encode(serialized).byteLength).toBeGreaterThan(1_000_000);
+    expect(() => parseNavlogExport(serialized, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/byte limit/u);
+  });
 });

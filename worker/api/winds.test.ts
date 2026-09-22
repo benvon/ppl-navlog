@@ -128,6 +128,19 @@ describe('Aviation Weather Center adapter', () => {
     expect(stale.provenance.status).toBe('stale_on_error');
   });
 
+  it('serves fresh validated winds when an edge-cache write fails', async () => {
+    const rejectingCache: CacheStore = {
+      async match() { return undefined; },
+      async put() { throw new Error('cache write unavailable'); },
+    };
+    const adapter = createAviationWeatherAdapter(fetcher().fetcher, rejectingCache, () => FIXED_NOW);
+
+    const result = await adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');
+
+    expect(result.forecast.station.id).toBe('ABQ');
+    expect(result.provenance.status).toBe('upstream_refresh');
+  });
+
   it('rejects routes that cross product regions or fall outside documented v1 support', () => {
     expect(() => regionForRoute([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }, { latitudeDeg: 21.3, longitudeDeg: -157.8 }])).toThrow(ApiError);
     expect(() => regionForRoute([{ latitudeDeg: 10, longitudeDeg: 10 }])).toThrow(ApiError);

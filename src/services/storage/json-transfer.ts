@@ -34,6 +34,15 @@ export function parseNavlogExport(serialized: string, now = new Date()): NavlogE
   } catch {
     throw new StorageValidationError([{ path: "$", message: "must be valid JSON" }]);
   }
+  return validateNavlogExportBundle(value, now);
+}
+
+/**
+ * Validates the export envelope independently of the import byte limit. A
+ * browser-local backup may legitimately grow beyond the intentionally bounded
+ * import size as immutable weather evidence and revision history accumulate.
+ */
+function validateNavlogExportBundle(value: unknown, now: Date): NavlogExportBundle {
   if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
 
   const issues: Array<{ path: string; message: string }> = [];
@@ -108,8 +117,17 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
 }
 
 export function serializeNavlogExport(bundle: NavlogExportBundle): string {
-  // Validate before export too; corrupted IndexedDB data must not propagate.
-  return JSON.stringify(parseNavlogExport(JSON.stringify(bundle)));
+  // Validate the exact JSON representation before export too; corrupted
+  // IndexedDB data must not propagate. Do not apply the inbound import limit:
+  // exports contain the user's complete, immutable local history.
+  const serialized = JSON.stringify(bundle);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    throw new StorageValidationError([{ path: "$", message: "must be serializable JSON" }]);
+  }
+  return JSON.stringify(validateNavlogExportBundle(parsed, new Date()));
 }
 
 function deepClone<T>(value: T): T {

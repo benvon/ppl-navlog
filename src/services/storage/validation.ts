@@ -295,7 +295,14 @@ function validateRouteLegs(points: unknown, legs: unknown, issues: ValidationIss
     add(issues, "$.legs", "must contain exactly one ordered leg between each adjacent route point");
     return;
   }
-  legs.forEach((leg, index) => validateRouteLeg(leg, index, points, issues));
+  const legIds = new Set<string>();
+  legs.forEach((leg, index) => {
+    validateRouteLeg(leg, index, points, issues);
+    if (isRecord(leg) && typeof leg.id === "string") {
+      if (legIds.has(leg.id)) add(issues, `$.legs[${index}].id`, "must be unique");
+      legIds.add(leg.id);
+    }
+  });
 }
 
 function validateRouteLeg(leg: unknown, index: number, points: unknown[], issues: ValidationIssue[]): void {

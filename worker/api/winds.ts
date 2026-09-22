@@ -291,7 +291,14 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
     if (cached && Date.parse(cached.freshUntil) > current.getTime()) return { product: cached, provenance: cacheProvenance('edge_hit', 'edge', request.url, cached.fetchedAt, cached.freshUntil, cached.staleUntil, current) };
     try {
       const refreshed = await upstream(region, cycle, current);
-      if (cache) await cache.put(request, Response.json(refreshed, { headers: { 'Cache-Control': `max-age=${STALE_TTL_MS / 1_000}` } }));
+      // Cache durability must not determine whether fresh, validated aviation
+      // data can be served. A transient Cache API failure is recoverable on
+      // the next request and must never discard the successful upstream read.
+      if (cache) {
+        try {
+          await cache.put(request, Response.json(refreshed, { headers: { 'Cache-Control': `max-age=${STALE_TTL_MS / 1_000}` } }));
+        } catch { /* Best-effort edge cache write; serve fresh data regardless. */ }
+      }
       return { product: refreshed, provenance: cacheProvenance('upstream_refresh', 'upstream', request.url, refreshed.fetchedAt, refreshed.freshUntil, refreshed.staleUntil, current) };
     } catch (error) {
       if (cached && Date.parse(cached.staleUntil) > current.getTime()) return { product: cached, provenance: cacheProvenance('stale_on_error', 'stale', request.url, cached.fetchedAt, cached.freshUntil, cached.staleUntil, current) };

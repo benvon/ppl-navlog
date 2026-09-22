@@ -396,6 +396,8 @@ const integratePhaseAcrossRoute = (
       routeDistance,
       remainingMinutes,
       traveledDistance,
+      elapsedStartMinutes,
+      phaseDurationMinutes: baseCalculation.duration,
       input,
       iteration,
     });
@@ -452,6 +454,8 @@ interface RoutePhaseSegmentInput {
   readonly routeDistance: number;
   readonly remainingMinutes: number;
   readonly traveledDistance: number;
+  readonly elapsedStartMinutes: number;
+  readonly phaseDurationMinutes: number;
   readonly input: {
     readonly kind: VerticalPhaseKind;
     readonly startingAltitude: FeetMsl;
@@ -477,37 +481,94 @@ const integrateRoutePhaseSegment = (state: RoutePhaseSegmentInput): DomainResult
     : Math.max(0, state.routeDistance - leg.startRouteDistance);
   const start = pointAlongGreatCircle(leg.start, leg.course, value(nauticalMiles(distanceWithinLeg)));
   if (!start.ok) return propagateFailure(start);
-  const effectiveWind = state.input.windResolver.resolveEffectiveWind({
-    phase: state.input.kind,
-    start: start.value,
-    courseDegreesTrue: leg.course,
-    startingAltitudeFeetMsl: state.input.startingAltitude,
-    targetAltitudeFeetMsl: state.input.targetAltitude,
-    estimatedDistanceNauticalMiles: value(nauticalMiles(state.traveledDistance)),
-    iteration: state.iteration,
-  });
-  if (!effectiveWind.ok) return propagateFailure(effectiveWind);
-  const windTriangle = solveWindTriangle(leg.course, state.input.performance.trueAirspeed, effectiveWind.value);
-  if (!windTriangle.ok) return propagateFailure(windTriangle);
   const remainingLegDistance = state.routeDistance < state.totalDistance - EPSILON_NAUTICAL_MILES
     ? Math.max(0, leg.endRouteDistance - state.routeDistance)
     : Number.POSITIVE_INFINITY;
-  const minutesToLegEnd = (remainingLegDistance / windTriangle.value.groundspeed) * 60;
-  const segmentMinutes = Math.min(state.remainingMinutes, minutesToLegEnd);
-  if (!Number.isFinite(segmentMinutes)) return failure("NON_FINITE_RESULT", "Route-phase integration produced a non-finite segment duration.");
-  const segmentDistance = (windTriangle.value.groundspeed * segmentMinutes) / 60;
-  const end = pointAlongGreatCircle(start.value, leg.course, value(nauticalMiles(segmentDistance)));
+  const localCourse = state.routeDistance < state.totalDistance - EPSILON_NAUTICAL_MILES
+    ? calculateGreatCircleDistanceAndInitialCourse(start.value, leg.end)
+    : success({ initialTrueCourse: leg.course });
+  if (!localCourse.ok) return propagateFailure(localCourse);
+  const resolved = resolveRoutePhaseSegment(state, start.value, localCourse.value.initialTrueCourse, remainingLegDistance);
+  if (!resolved.ok) return propagateFailure(resolved);
+  const { segmentMinutes, segmentDistance, windTriangle } = resolved.value;
+  const end = pointAlongGreatCircle(start.value, localCourse.value.initialTrueCourse, value(nauticalMiles(segmentDistance)));
   if (!end.ok) return propagateFailure(end);
-  const reachedLegEnd = segmentMinutes >= minutesToLegEnd - EPSILON_NAUTICAL_MILES;
+  const reachedLegEnd = segmentMinutes >= resolved.value.minutesToLegEnd - EPSILON_NAUTICAL_MILES;
   return success({
     routeDistance: state.routeDistance + segmentDistance,
     remainingMinutes: state.remainingMinutes - segmentMinutes,
     traveledDistance: state.traveledDistance + segmentDistance,
     endCoordinate: end.value,
     segmentDistance,
-    windTriangle: windTriangle.value,
+    windTriangle,
     nextLegIndex: reachedLegEnd && state.legIndex < state.route.length - 1 ? state.legIndex + 1 : state.legIndex,
   });
+};
+
+/**
+ * Solves one route-course segment against the exact altitude interval consumed
+ * by that segment. The same local course and altitude bounds are later carried
+ * by the generated navlog row, so phase placement, row ETE, row fuel, and
+ * displayed groundspeed share one wind-triangle model.
+ */
+const resolveRoutePhaseSegment = (
+  state: RoutePhaseSegmentInput,
+  start: Coordinate,
+  course: TrueCourse,
+  remainingLegDistance: number,
+): DomainResult<{
+  readonly segmentMinutes: number;
+  readonly segmentDistance: number;
+  readonly minutesToLegEnd: number;
+  readonly windTriangle: ReturnType<typeof solveWindTriangle> extends DomainResult<infer Result> ? Result : never;
+}> => {
+  const startAltitude = phaseAltitudeAtElapsed(state, state.elapsedStartMinutes);
+  if (!startAltitude.ok) return propagateFailure(startAltitude);
+  let estimatedMinutes = Math.min(state.remainingMinutes, Number.isFinite(remainingLegDistance)
+    ? (remainingLegDistance / state.input.performance.trueAirspeed) * 60
+    : state.remainingMinutes);
+  for (let iteration = 1; iteration <= 24; iteration += 1) {
+    const endAltitude = phaseAltitudeAtElapsed(state, state.elapsedStartMinutes + estimatedMinutes);
+    if (!endAltitude.ok) return propagateFailure(endAltitude);
+    const effectiveWind = state.input.windResolver.resolveEffectiveWind({
+      phase: state.input.kind,
+      start,
+      courseDegreesTrue: course,
+      startingAltitudeFeetMsl: startAltitude.value,
+      targetAltitudeFeetMsl: endAltitude.value,
+      estimatedDistanceNauticalMiles: value(nauticalMiles(state.traveledDistance)),
+      iteration: state.iteration,
+    });
+    if (!effectiveWind.ok) return propagateFailure(effectiveWind);
+    const windTriangle = solveWindTriangle(course, state.input.performance.trueAirspeed, effectiveWind.value);
+    if (!windTriangle.ok) return propagateFailure(windTriangle);
+    const minutesToLegEnd = Number.isFinite(remainingLegDistance)
+      ? (remainingLegDistance / windTriangle.value.groundspeed) * 60
+      : Number.POSITIVE_INFINITY;
+    const segmentMinutes = Math.min(state.remainingMinutes, minutesToLegEnd);
+    if (!Number.isFinite(segmentMinutes) || segmentMinutes <= 0) {
+      return failure("NON_FINITE_RESULT", "Route-phase integration produced a non-finite segment duration.");
+    }
+    if (Math.abs(segmentMinutes - estimatedMinutes) <= 1e-10) {
+      const reachesLegEnd = minutesToLegEnd <= state.remainingMinutes + EPSILON_NAUTICAL_MILES;
+      return success({
+        segmentMinutes,
+        segmentDistance: reachesLegEnd ? remainingLegDistance : (windTriangle.value.groundspeed * segmentMinutes) / 60,
+        minutesToLegEnd,
+        windTriangle: windTriangle.value,
+      });
+    }
+    estimatedMinutes = segmentMinutes;
+  }
+  return failure("NON_CONVERGENT_PHASE_GEOMETRY", "Altitude-aware route-phase segment wind did not converge within the iteration bound.", {
+    phase: state.input.kind,
+    elapsedStartMinutes: state.elapsedStartMinutes,
+  });
+};
+
+const phaseAltitudeAtElapsed = (state: RoutePhaseSegmentInput, elapsedMinutes: number): DomainResult<FeetMsl> => {
+  const clampedElapsed = Math.min(state.phaseDurationMinutes, Math.max(0, elapsedMinutes));
+  return feetMsl(state.input.startingAltitude + (clampedElapsed / state.phaseDurationMinutes) * (state.input.targetAltitude - state.input.startingAltitude));
 };
 
 interface ArrivalDescentInput {
@@ -531,16 +592,28 @@ const calculateOptionalArrivalDescent = (input: ArrivalDescentInput): DomainResu
     if (!calculation.ok) return propagateFailure(calculation);
     const difference = Math.abs(calculation.value.calculation.distance - previousDistance);
     if (iteration > 1 && difference <= options.value.tolerance) {
+      const startRouteDistance = input.totalDistance - calculation.value.calculation.distance;
+      // The final converged distance can differ from the candidate TOD by the
+      // configured tolerance. Translate the complete time geometry by that
+      // residual so its first/last route distances exactly match the published
+      // TOD/destination phase bounds used to generate navlog sublegs.
+      const timeSegmentOffset = startRouteDistance >= 0
+        ? startRouteDistance - Math.max(0, input.totalDistance - previousDistance)
+        : 0;
       return success({
         id: "arrival-descent",
         kind: "descent",
-        startRouteDistance: input.totalDistance - calculation.value.calculation.distance,
+        startRouteDistance,
         endRouteDistance: input.totalDistance,
         startingAltitude: input.startingAltitude,
         targetAltitude: input.targetAltitude,
         calculation: calculation.value.calculation,
         convergenceIterations: iteration,
-        timeSegments: calculation.value.timeSegments,
+        timeSegments: timeSegmentOffset === 0 ? calculation.value.timeSegments : calculation.value.timeSegments.map((segment) => ({
+          ...segment,
+          startRouteDistance: value(nauticalMiles(segment.startRouteDistance + timeSegmentOffset)),
+          endRouteDistance: value(nauticalMiles(segment.endRouteDistance + timeSegmentOffset)),
+        })),
       });
     }
     previousDistance = calculation.value.calculation.distance;

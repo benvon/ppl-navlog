@@ -57,6 +57,8 @@ interface PlannerState {
   readonly selectedForecastValidTimeUtc?: string;
   readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
   readonly calculationPreview?: JsonValue;
+  /** Form/editor state no longer exactly matches the open immutable revision. */
+  readonly hasUnsavedChanges: boolean;
   readonly revisions: readonly PlanRevision[];
   readonly families: readonly PlanFamily[];
 }
@@ -77,7 +79,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -153,8 +155,11 @@ class Planner {
       this.state = {
         ...this.state,
         selectedProfileId: select.value,
-        ...(this.state.draft === undefined ? {} : { draft: { ...this.state.draft, selectedAircraftProfileId: select.value } }),
+        hasUnsavedChanges: this.state.draft !== undefined,
+        calculationPreview: undefined,
       };
+      this.feedback.textContent = this.state.draft === undefined ? "Selected aircraft profile." : "Aircraft profile changed. Save a new revision before calculating; prior per-leg overrides will be cleared.";
+      this.render();
     });
     wrapper.append(select);
     return wrapper;
@@ -308,7 +313,7 @@ class Planner {
       select.append(new Option(labelText, period.validAt, false, period.validAt === this.state.selectedForecastValidTimeUtc));
     });
     select.addEventListener("change", () => {
-      this.state = { ...this.state, selectedForecastValidTimeUtc: select.value || undefined };
+      this.state = { ...this.state, selectedForecastValidTimeUtc: select.value || undefined, calculationPreview: undefined };
     });
     label.append(select);
     section.append(label);
@@ -322,7 +327,7 @@ class Planner {
       const points = routePoints(this.state);
       if (points.length < 2) throw new Error("Resolve the route endpoints before loading winds periods.");
       const discovery = await winds.discoverStations(points.map((point) => point.coordinate));
-      this.state = { ...this.state, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined };
+      this.state = { ...this.state, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined, calculationPreview: undefined };
       this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
       this.render();
     } catch (error) {
@@ -340,6 +345,7 @@ class Planner {
       }
     }
     if (this.state.currentRevision !== undefined) {
+      if (this.state.hasUnsavedChanges) section.append(text("p", "Viewing the saved revision. Route, aircraft, altitude, or forecast edits are unsaved and cannot be calculated until saved."));
       const calculated = renderCalculatedNavlog(this.state.currentRevision, {
         selected: this.state.inspectedCalculation,
         onInspect: (selection) => this.inspectCalculation(selection),
@@ -420,7 +426,7 @@ class Planner {
       section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. Preserved aircraft default: ${override.computedValue} kt.`));
       const restore = button("Restore aircraft default", "button");
       restore.addEventListener("click", () => {
-        this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined };
+        this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
         this.render();
       });
       section.append(restore);
@@ -475,7 +481,7 @@ class Planner {
       const value = inputValue(form, "override-tas");
       const reason = inputValue(form, "override-reason");
       try {
-        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), unlockedLegId: undefined };
+        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
         this.feedback.textContent = "Cruise TAS override applied and flagged in the route table.";
         this.render();
       } catch (error) {
@@ -514,6 +520,8 @@ class Planner {
         cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1),
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
+        hasUnsavedChanges: this.state.draft !== undefined,
+        calculationPreview: undefined,
       };
       this.feedback.textContent = "Exact ICAO endpoints resolved from the configured aviation-data source.";
       this.render();
@@ -534,7 +542,7 @@ class Planner {
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -544,7 +552,7 @@ class Planner {
 
   private removeCheckpoint(id: string): void {
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
+    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
     this.render();
   }
 
@@ -555,7 +563,7 @@ class Planner {
     }
     const cruiseAltitudes = [...expandAltitudes(this.state.cruiseAltitudes, index + 1)];
     cruiseAltitudes[index] = value;
-    this.state = { ...this.state, cruiseAltitudes };
+    this.state = { ...this.state, cruiseAltitudes, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
   }
 
   private async handleSaveDraft(form: HTMLFormElement): Promise<void> {
@@ -566,7 +574,7 @@ class Planner {
       const destination = this.state.destination;
       if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
       const rebuiltRoute = createRouteDefinition({ id: this.state.draft?.route.id, departure, checkpoints: this.state.checkpoints, destination, cruiseAltitudesFeetMsl: this.state.cruiseAltitudes }, this.dependencies.ids);
-      const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route);
+      const route = preserveMatchingLegs(rebuiltRoute, this.state.draft?.route, this.state.draft?.selectedAircraftProfileId === profile.id);
       const draft = createPlanDraft({
         id: this.state.draft?.id,
         planId: this.state.draft?.planId,
@@ -586,7 +594,7 @@ class Planner {
         this.dependencies.clock,
       );
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, this.state.currentRevision);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao) };
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Saved immutable revision ${saved.revision.id}.`;
@@ -602,6 +610,7 @@ class Planner {
       const draft = this.state.draft;
       const profile = this.selectedProfile();
       if (calculatePlan === undefined || draft === undefined || profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
+      if (this.state.hasUnsavedChanges) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
         this.feedback.textContent = `Navlog blocked: ${result.message}`;
@@ -610,7 +619,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
@@ -626,6 +635,7 @@ class Planner {
       const parent = this.state.currentRevision;
       const selectedTime = this.state.selectedForecastValidTimeUtc;
       if (refresh === undefined || parent === undefined) throw new Error("Open a calculated revision before refreshing weather.");
+      if (this.state.hasUnsavedChanges) throw new Error("Save or discard current input edits before refreshing weather.");
       if (selectedTime === undefined) throw new Error("Load published winds periods and choose a forecast before refreshing weather.");
       const selectedDraft = selectPlanWeatherForecast(
         parent.draftSnapshot,
@@ -641,7 +651,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Weather refreshed in immutable revision ${result.revision.id}; compare it with its parent in Saved revision history.`;
@@ -663,7 +673,7 @@ class Planner {
   }
 
   private selectedProfileId(): string | undefined {
-    return this.state.draft?.selectedAircraftProfileId ?? this.state.selectedProfileId;
+    return this.state.selectedProfileId ?? this.state.draft?.selectedAircraftProfileId;
   }
 
   private async handleReopenRevision(): Promise<void> {
@@ -696,6 +706,7 @@ class Planner {
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
         descentTargetIsManual: true,
+        hasUnsavedChanges: false,
         routeForm: routeFormFromDraft(reopened.draftSnapshot, firstAirport(reopened.draftSnapshot.route.points)?.icao ?? "", lastAirport(reopened.draftSnapshot.route.points)?.icao ?? ""),
       };
       this.feedback.textContent = `Reopened revision ${reopened.id}; any save will create a child revision.`;
@@ -723,14 +734,14 @@ class Planner {
     const field = routeFormField(input.name);
     if (field === undefined) return;
     this.state = field === "departureTime"
-      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
+      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
       : field === "descentTarget"
-        ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, descentTargetIsManual: input.value.trim() !== "" }
-        : field === "departureIcao"
-          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
-          : field === "destinationIcao"
-            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
-        : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
+        ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, descentTargetIsManual: input.value.trim() !== "", hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
+      : field === "departureIcao"
+          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
+      : field === "destinationIcao"
+            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
+        : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
   }
 }
 
@@ -818,7 +829,7 @@ function reconcileCruiseAltitudes(state: PlannerState, nextCheckpoints: readonly
  * a pilot decision to a different leg, so those route edits intentionally get
  * newly generated legs instead.
  */
-function preserveMatchingLegs(route: ReturnType<typeof createRouteDefinition>, existing: PlanDraft["route"] | undefined): ReturnType<typeof createRouteDefinition> {
+function preserveMatchingLegs(route: ReturnType<typeof createRouteDefinition>, existing: PlanDraft["route"] | undefined, preservePerformanceOverrides: boolean): ReturnType<typeof createRouteDefinition> {
   if (existing === undefined || route.legs.length !== existing.legs.length) return route;
   const hasMatchingEndpoints = route.legs.every((leg, index) => {
     const previous = existing.legs[index];
@@ -833,7 +844,7 @@ function preserveMatchingLegs(route: ReturnType<typeof createRouteDefinition>, e
       return {
         ...leg,
         id: previous.id,
-        ...(previous.performanceOverrides === undefined ? {} : { performanceOverrides: previous.performanceOverrides }),
+        ...(!preservePerformanceOverrides || previous.performanceOverrides === undefined ? {} : { performanceOverrides: previous.performanceOverrides }),
       };
     }),
   };

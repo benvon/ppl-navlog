@@ -373,6 +373,33 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Enter a planned departure UTC date and time");
   });
 
+  it("blocks calculation after an unsaved route edit instead of silently using the prior revision", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const calculatePlan = vi.fn();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    input(root, "leg-altitude-0").value = "6500";
+    input(root, "leg-altitude-0").dispatchEvent(new Event("change", { bubbles: true }));
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+
+    expect(calculatePlan).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+  });
+
   it("uses an explicitly selected second profile before the first plan revision", async () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
@@ -400,6 +427,52 @@ describe("planner shell", () => {
     await settle();
 
     expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Second aircraft.");
+  });
+
+  it("clears a per-leg override when saving the same route with a different aircraft profile", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const firstProfile = root.querySelector<HTMLFormElement>(".profile-form");
+    if (firstProfile === null) throw new Error("Profile form was not rendered.");
+    input(root, "profile-name").value = "Profile A";
+    firstProfile.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-10-01T12:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    clickByLabel(root, "Override TAS for this leg");
+    input(root, "override-tas").value = "100";
+    input(root, "override-confirmation").checked = true;
+    const overrideForm = root.querySelector<HTMLFormElement>(".override-form");
+    if (overrideForm === null) throw new Error("Override form was not rendered.");
+    overrideForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeDefined();
+
+    const secondProfile = root.querySelector<HTMLFormElement>(".profile-form");
+    if (secondProfile === null) throw new Error("Profile form was not rendered.");
+    input(root, "profile-name").value = "Profile B";
+    input(root, "cruise-tas").value = "120";
+    secondProfile.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    const selector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (selector === null) throw new Error("Profile selector was not rendered.");
+    selector.value = selector.options[selector.options.length - 1]!.value;
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    const saved = persistence.savedRevisions.at(-1);
+    expect(saved?.draftSnapshot.selectedAircraftProfileId).toBe(selector.value);
+    expect(saved?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeUndefined();
   });
 
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {

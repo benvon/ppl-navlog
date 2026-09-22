@@ -20,10 +20,10 @@ describe("complete synthetic flight fixture", () => {
     expect(navlog.rows[1]?.appliedOverrides).toEqual([expect.objectContaining({ input: "true-airspeed", effectiveValue: 102 })]);
     expect(navlog.rows[0]?.estimatedTimeEnroute).toBeCloseTo(7.64, 8);
     expect(navlog.rows[2]?.estimatedTimeEnroute).toBeCloseTo(2, 8);
-    expect(navlog.rows[4]?.estimatedTimeEnroute).toBeCloseTo(9.3921813128, 8);
+    expect(navlog.rows[4]?.estimatedTimeEnroute).toBeCloseTo(9.384, 8);
     expect(navlog.rows[4]?.cumulative.routeDistance).toBeCloseTo(78.5500826, 6);
-    expect(navlog.rows[4]?.cumulative.enrouteFuel).toBeCloseTo(5.9036413068, 6);
-    expect(navlog.fuelSummary.requiredFuel).toBeCloseTo(9.7036413068, 6);
+    expect(navlog.rows[4]?.cumulative.enrouteFuel).toBeCloseTo(5.9038724474, 6);
+    expect(navlog.fuelSummary.requiredFuel).toBeCloseTo(9.7038724474, 6);
     expect(navlog.fuelSummary.requiredFuel).toBeCloseTo(navlog.fuelSummary.enrouteFuel + 0.8 + 3, 10);
     expect(navlog.fuelSummary.usableFuelDifference).toBeCloseTo(24 - navlog.fuelSummary.requiredFuel, 10);
     expect(navlog.fuelSummary.sufficientUsableFuel).toBe(true);
