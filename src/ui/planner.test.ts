@@ -106,6 +106,17 @@ describe("planner shell", () => {
     expect(input(root, "taxi-fuel").value).toBe("1.2");
     expect(input(root, "reserve-fuel").value).toBe("3.5");
     expect(input(root, "descent-target").value).toBe("1808");
+
+    input(root, "destination-icao").value = "KORD";
+    input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first.");
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Saved immutable revision");
@@ -252,6 +263,37 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Added checkpoint Study point.");
     clickByLabel(root, "Remove Study point");
     expect(root.textContent).not.toContain("Remove Study point");
+  });
+
+  it("preserves altitudes on unaffected legs when removing an earlier checkpoint", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    const addCheckpoint = async (name: string, latitude: string, longitude: string): Promise<void> => {
+      input(root, "checkpoint-name").value = name;
+      input(root, "checkpoint-latitude").value = latitude;
+      input(root, "checkpoint-longitude").value = longitude;
+      const form = root.querySelector<HTMLFormElement>(".checkpoint-editor form");
+      if (form === null) throw new Error("Checkpoint form was not rendered.");
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await settle();
+    };
+    await addCheckpoint("A", "41.8", "-88.2");
+    await addCheckpoint("B", "42.0", "-88.5");
+    input(root, "leg-altitude-0").value = "4100";
+    input(root, "leg-altitude-0").dispatchEvent(new Event("change", { bubbles: true }));
+    input(root, "leg-altitude-1").value = "5100";
+    input(root, "leg-altitude-1").dispatchEvent(new Event("change", { bubbles: true }));
+    input(root, "leg-altitude-2").value = "6100";
+    input(root, "leg-altitude-2").dispatchEvent(new Event("change", { bubbles: true }));
+
+    clickByLabel(root, "Remove A");
+    expect(input(root, "leg-altitude-0").value).toBe("4500");
+    expect(input(root, "leg-altitude-1").value).toBe("6100");
   });
 
   it("accepts SkyVector compact DMS and rejects ambiguous mixed coordinate inputs", async () => {

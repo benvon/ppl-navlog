@@ -88,6 +88,8 @@ describe("storage model validation", () => {
 
     const mismatched = { ...planRevision(), planId: "other-plan" };
     expect(() => validatePlanRevision(mismatched, fixedNow)).toThrow(/draftSnapshot.planId/);
+    const mismatchedAircraft = { ...planRevision(), aircraftProfileSnapshot: { ...planRevision().aircraftProfileSnapshot, profile: { ...planRevision().aircraftProfileSnapshot.profile, id: "other-aircraft" } } };
+    expect(() => validatePlanRevision(mismatchedAircraft, fixedNow)).toThrow(/selectedAircraftProfileId/);
     expect(() => validateWeatherReferenceSnapshot({ ...weatherSnapshot(), payload: Number.NaN }, fixedNow)).toThrow(/payload/);
     expect(() => validatePlanFamily({ ...planFamily(), latestRevisionId: "" }, fixedNow)).toThrow(/latestRevisionId/);
   });

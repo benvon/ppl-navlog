@@ -72,6 +72,14 @@ export interface AllocatedVerticalPhase {
   readonly convergenceIterations: number;
 }
 
+/** A route-distance interval with the phase time consumed over that interval. */
+export interface PhaseTimeSegment {
+  readonly startRouteDistance: NauticalMiles;
+  readonly endRouteDistance: NauticalMiles;
+  readonly elapsedStartMinutes: number;
+  readonly elapsedEndMinutes: number;
+}
+
 export interface PhaseRequirement {
   readonly id: string;
   readonly kind: VerticalPhaseKind;
@@ -81,6 +89,8 @@ export interface PhaseRequirement {
   readonly targetAltitude: FeetMsl;
   readonly calculation: VerticalPhaseCalculation;
   readonly convergenceIterations: number;
+  /** Retained so vertical-rate altitude follows elapsed time across turns. */
+  readonly timeSegments: readonly PhaseTimeSegment[];
 }
 
 export type PhaseAllocationViolation =
@@ -325,10 +335,10 @@ const calculateOptionalForwardPhase = (input: ForwardPhaseInput): DomainResult<P
 
 const requirementFromForwardConvergence = (
   input: ForwardPhaseInput,
-  calculation: VerticalPhaseCalculation,
+  integrated: { readonly calculation: VerticalPhaseCalculation; readonly timeSegments: readonly PhaseTimeSegment[] },
   convergenceIterations: number,
 ): DomainResult<PhaseRequirementInternal> => {
-  const endRouteDistance = input.startRouteDistance + calculation.distance;
+  const endRouteDistance = input.startRouteDistance + integrated.calculation.distance;
   return success({
     id: input.id,
     kind: input.kind,
@@ -336,8 +346,9 @@ const requirementFromForwardConvergence = (
     endRouteDistance,
     startingAltitude: input.startingAltitude,
     targetAltitude: input.targetAltitude,
-    calculation,
+    calculation: integrated.calculation,
     convergenceIterations,
+    timeSegments: integrated.timeSegments,
   });
 };
 
@@ -359,7 +370,7 @@ const integratePhaseAcrossRoute = (
     readonly windResolver: EffectiveWindResolver;
   },
   iteration: number,
-): DomainResult<VerticalPhaseCalculation> => {
+): DomainResult<{ readonly calculation: VerticalPhaseCalculation; readonly timeSegments: readonly PhaseTimeSegment[] }> => {
   const totalDistance = route[route.length - 1]?.endRouteDistance;
   const finalLeg = route[route.length - 1];
   if (totalDistance === undefined || finalLeg === undefined) return failure("ROUTE_GEOMETRY_ERROR", "At least one route leg is required.");
@@ -373,8 +384,10 @@ const integratePhaseAcrossRoute = (
   let endCoordinate: Coordinate = initialPosition.value.coordinate;
   let lastWindTriangle = baseCalculation.windTriangle;
   let traversedLegs = 0;
+  const timeSegments: PhaseTimeSegment[] = [];
 
   while (remainingMinutes > EPSILON_NAUTICAL_MILES) {
+    const elapsedStartMinutes = baseCalculation.duration - remainingMinutes;
     const segment = integrateRoutePhaseSegment({
       route,
       finalLeg,
@@ -394,16 +407,27 @@ const integratePhaseAcrossRoute = (
     lastWindTriangle = segment.value.windTriangle;
     legIndex = segment.value.nextLegIndex;
     traversedLegs += 1;
+    const startDistance = nauticalMiles(segment.value.routeDistance - segment.value.segmentDistance);
+    const endDistance = nauticalMiles(segment.value.routeDistance);
+    if (!startDistance.ok) return propagateFailure(startDistance);
+    if (!endDistance.ok) return propagateFailure(endDistance);
+    timeSegments.push({
+      startRouteDistance: startDistance.value,
+      endRouteDistance: endDistance.value,
+      elapsedStartMinutes,
+      elapsedEndMinutes: baseCalculation.duration - segment.value.remainingMinutes,
+    });
   }
 
   const distance = nauticalMiles(traveledDistance);
   if (!distance.ok) return propagateFailure(distance);
   return success({
-    ...baseCalculation,
-    distance: distance.value,
-    end: endCoordinate,
-    windTriangle: lastWindTriangle,
-    trace: trace(
+    calculation: {
+      ...baseCalculation,
+      distance: distance.value,
+      end: endCoordinate,
+      windTriangle: lastWindTriangle,
+      trace: trace(
       "route-course-integrated-vertical-phase",
       [
         { name: "phase", value: input.kind, unit: "unitless" },
@@ -414,7 +438,9 @@ const integratePhaseAcrossRoute = (
       { name: "phase distance", value: distance.value, unit: "nautical-miles" },
       "UI decides presentation rounding.",
       ["Distance is integrated using each route segment's local true course and sampled wind."],
-    ),
+      ),
+    },
+    timeSegments,
   });
 };
 
@@ -441,6 +467,7 @@ const integrateRoutePhaseSegment = (state: RoutePhaseSegmentInput): DomainResult
   readonly remainingMinutes: number;
   readonly traveledDistance: number;
   readonly endCoordinate: Coordinate;
+  readonly segmentDistance: number;
   readonly windTriangle: ReturnType<typeof solveWindTriangle> extends DomainResult<infer Result> ? Result : never;
   readonly nextLegIndex: number;
 }> => {
@@ -477,6 +504,7 @@ const integrateRoutePhaseSegment = (state: RoutePhaseSegmentInput): DomainResult
     remainingMinutes: state.remainingMinutes - segmentMinutes,
     traveledDistance: state.traveledDistance + segmentDistance,
     endCoordinate: end.value,
+    segmentDistance,
     windTriangle: windTriangle.value,
     nextLegIndex: reachedLegEnd && state.legIndex < state.route.length - 1 ? state.legIndex + 1 : state.legIndex,
   });
@@ -501,20 +529,21 @@ const calculateOptionalArrivalDescent = (input: ArrivalDescentInput): DomainResu
   for (let iteration = 1; iteration <= options.value.maxIterations; iteration += 1) {
     const calculation = calculateArrivalDescentIteration(input, previousDistance, iteration);
     if (!calculation.ok) return propagateFailure(calculation);
-    const difference = Math.abs(calculation.value.distance - previousDistance);
+    const difference = Math.abs(calculation.value.calculation.distance - previousDistance);
     if (iteration > 1 && difference <= options.value.tolerance) {
       return success({
         id: "arrival-descent",
         kind: "descent",
-        startRouteDistance: input.totalDistance - calculation.value.distance,
+        startRouteDistance: input.totalDistance - calculation.value.calculation.distance,
         endRouteDistance: input.totalDistance,
         startingAltitude: input.startingAltitude,
         targetAltitude: input.targetAltitude,
-        calculation: calculation.value,
+        calculation: calculation.value.calculation,
         convergenceIterations: iteration,
+        timeSegments: calculation.value.timeSegments,
       });
     }
-    previousDistance = calculation.value.distance;
+    previousDistance = calculation.value.calculation.distance;
   }
   return failure("NON_CONVERGENT_PHASE_GEOMETRY", "Phase geometry did not converge within the configured iteration bound.", {
     maxIterations: options.value.maxIterations,
@@ -538,7 +567,7 @@ const calculateArrivalDescentIteration = (
   input: ArrivalDescentInput,
   previousDistance: number,
   iteration: number,
-): DomainResult<VerticalPhaseCalculation> => {
+): DomainResult<{ readonly calculation: VerticalPhaseCalculation; readonly timeSegments: readonly PhaseTimeSegment[] }> => {
   // A required TOD can be before route origin. Clamp the sampling coordinate
   // only to quantify infeasibility; the requirement keeps its off-route TOD.
   const candidateRouteDistance = Math.max(0, input.totalDistance - previousDistance);
@@ -728,10 +757,22 @@ const sublegAltitudes = (
   cruiseAltitude: FeetMsl,
 ): DomainResult<{ readonly startingAltitude: FeetMsl; readonly endingAltitude: FeetMsl }> => {
   if (phase === undefined) return success({ startingAltitude: cruiseAltitude, endingAltitude: cruiseAltitude });
-  const phaseDistance = phase.endRouteDistance - phase.startRouteDistance;
-  const altitudeAt = (distance: number): DomainResult<FeetMsl> => feetMsl(
-    phase.startingAltitude + ((distance - phase.startRouteDistance) / phaseDistance) * (phase.targetAltitude - phase.startingAltitude),
-  );
+  const elapsedAt = (distance: number): DomainResult<number> => {
+    const segment = phase.timeSegments.find((candidate) =>
+      distance >= candidate.startRouteDistance - EPSILON_NAUTICAL_MILES && distance <= candidate.endRouteDistance + EPSILON_NAUTICAL_MILES,
+    );
+    if (segment === undefined) return failure("ROUTE_GEOMETRY_ERROR", "Phase time geometry does not cover the generated subleg distance.", { phaseId: phase.id, distance });
+    const segmentDistance = segment.endRouteDistance - segment.startRouteDistance;
+    if (segmentDistance <= EPSILON_NAUTICAL_MILES) return success(segment.elapsedEndMinutes);
+    return success(segment.elapsedStartMinutes + ((distance - segment.startRouteDistance) / segmentDistance) * (segment.elapsedEndMinutes - segment.elapsedStartMinutes));
+  };
+  const altitudeAt = (distance: number): DomainResult<FeetMsl> => {
+    const elapsed = elapsedAt(distance);
+    if (!elapsed.ok) return propagateFailure(elapsed);
+    return feetMsl(
+      phase.startingAltitude + (elapsed.value / phase.calculation.duration) * (phase.targetAltitude - phase.startingAltitude),
+    );
+  };
   const startingAltitude = altitudeAt(startDistance);
   if (!startingAltitude.ok) return propagateFailure(startingAltitude);
   const endingAltitude = altitudeAt(endDistance);

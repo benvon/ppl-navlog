@@ -406,9 +406,20 @@ export function validatePlanRevision(value: unknown, now = new Date()): value is
   validateRevisionMetadata(value, issues, now);
   validateRevisionSnapshots(value, issues, now);
   validateRevisionReferences(value, issues);
-  if (isRecord(value.draftSnapshot) && value.planId !== value.draftSnapshot.planId) add(issues, "$.planId", "must equal draftSnapshot.planId");
+  validateRevisionSnapshotRelationships(value, issues);
   if (issues.length > 0) throw new StorageValidationError(issues);
   return true;
+}
+
+function validateRevisionSnapshotRelationships(value: UnknownRecord, issues: ValidationIssue[]): void {
+  if (isRecord(value.draftSnapshot) && value.planId !== value.draftSnapshot.planId) add(issues, "$.planId", "must equal draftSnapshot.planId");
+  const selectedAircraftProfileId = isRecord(value.draftSnapshot) ? value.draftSnapshot.selectedAircraftProfileId : undefined;
+  const snapshottedAircraftProfileId = isRecord(value.aircraftProfileSnapshot) && isRecord(value.aircraftProfileSnapshot.profile)
+    ? value.aircraftProfileSnapshot.profile.id
+    : undefined;
+  if (typeof selectedAircraftProfileId === "string" && typeof snapshottedAircraftProfileId === "string" && selectedAircraftProfileId !== snapshottedAircraftProfileId) {
+    add(issues, "$.aircraftProfileSnapshot.profile.id", "must equal draftSnapshot.selectedAircraftProfileId");
+  }
 }
 
 function validateRevisionMetadata(value: UnknownRecord, issues: ValidationIssue[], now: Date): void {

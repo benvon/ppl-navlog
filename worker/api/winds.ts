@@ -308,12 +308,15 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       const region = regionForRoute(route);
       const products = await allProducts(region);
       const stationCycles = new Map<string, Set<WindsForecastCycle>>();
-      const availability = new Map<string, WindsForecastAvailability>();
+      const availability = new Map<string, Map<string, WindsForecastAvailability>>();
       for (const { product: item } of products) for (const forecast of item.forecasts) {
         const cycles = stationCycles.get(forecast.stationId) ?? new Set<WindsForecastCycle>();
         cycles.add(forecast.forecastCycle);
         stationCycles.set(forecast.stationId, cycles);
-        availability.set(`${forecast.forecastCycle}:${forecast.validAt}`, forecast);
+        const key = `${forecast.forecastCycle}:${forecast.validAt}`;
+        const stationForecasts = availability.get(key) ?? new Map<string, WindsForecastAvailability>();
+        stationForecasts.set(forecast.stationId, forecast);
+        availability.set(key, stationForecasts);
       }
       const stationsById = await stationInfo(fetcher, [...stationCycles.keys()].sort());
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
@@ -321,7 +324,17 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
       }).sort((left, right) => left.id.localeCompare(right.id));
       if (stations.length === 0) throw new ApiError('No Winds/Temps reporting stations with verified coordinates are available for this forecast region.', 404, 'upstream_no_data');
-      return { stations, forecasts: [...availability.values()].sort((left, right) => left.validAt.localeCompare(right.validAt) || left.forecastCycle.localeCompare(right.forecastCycle)), provenance: products.map(({ provenance }) => provenance) };
+      // Discovery does not yet ask the Worker to select the route midpoint's
+      // nearest station. Publish only periods shared by every selectable
+      // station, so the browser can never offer a period that its later
+      // deterministic nearest-station selection cannot retrieve.
+      const stationIds = new Set(stations.map((station) => station.id));
+      const forecasts = [...availability.values()]
+        .filter((stationForecasts) => [...stationIds].every((stationId) => stationForecasts.has(stationId)))
+        .map((stationForecasts) => stationForecasts.values().next().value)
+        .filter((forecast): forecast is WindsForecastAvailability => forecast !== undefined)
+        .sort((left, right) => left.validAt.localeCompare(right.validAt) || left.forecastCycle.localeCompare(right.forecastCycle));
+      return { stations, forecasts, provenance: products.map(({ provenance }) => provenance) };
     },
     async getWindsForecast(station, validTime, region) {
       if (!/^[A-Z0-9]{3}$/.test(station)) throw new ApiError('Invalid Winds/Temps station identifier. Expected exactly three alphanumeric characters.', 400, 'invalid_request');

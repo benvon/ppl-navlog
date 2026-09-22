@@ -90,6 +90,22 @@ describe('Aviation Weather Center adapter', () => {
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
   });
 
+  it('publishes only forecast periods that every selectable station reports', async () => {
+    const stationSpecificFetcher: ServiceFetcher = {
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === '/api/data/windtemp' && url.searchParams.get('fcst') === '12') {
+          return new Response(PRODUCT.replace(/^ATL.*$/m, ''), { headers: { 'Content-Type': 'text/plain' } });
+        }
+        return responseFor(request);
+      },
+    };
+    const adapter = createAviationWeatherAdapter(stationSpecificFetcher, memoryCache(), () => FIXED_NOW);
+    const result = await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
+
+    expect(result.forecasts.map((forecast) => forecast.forecastCycle)).toEqual(['06', '24']);
+  });
+
   it('requires a published valid time and uses the selected region rather than silently substituting a forecast', async () => {
     const adapter = createAviationWeatherAdapter(fetcher().fetcher, memoryCache(), () => FIXED_NOW);
     const result = await adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');

@@ -55,10 +55,10 @@ describe("route phase allocation", () => {
       sourceLegId: "leg-2",
       phase: "transition-climb",
       routeStartDistance: expect.closeTo(60.04, 1),
-      startingAltitude: 3_000,
       endingAltitude: 5_000,
       selectedCruiseAltitude: 5_000,
     });
+    expect(transition?.startingAltitude).toBeCloseTo(3_000, 8);
     expect(transition?.start.longitude).toBeCloseTo(1, 10);
     expect(result.sublegs.filter((subleg) => subleg.phase === "cruise").every((subleg) => subleg.startingAltitude === subleg.endingAltitude)).toBe(true);
     expect(result.warnings.join(" ")).toMatch(/never applied as an instantaneous jump/i);
@@ -111,6 +111,10 @@ describe("route phase allocation", () => {
     expect(climb?.calculation.duration).toBeCloseTo(10, 10);
     expect(climb?.calculation.distance).toBeCloseTo(17, 0);
     expect(climb?.endRouteDistance).toBeCloseTo(17, 0);
+    const firstClimbSubleg = result.sublegs.find((subleg) => subleg.phaseId === "departure-climb" && subleg.sourceLegId === "leg-1");
+    // 4.8 NM at 150 kt takes 1.92 of the 10 climb minutes: altitude follows
+    // vertical rate and elapsed time, not the larger distance fraction.
+    expect(firstClimbSubleg?.endingAltitude).toBeCloseTo(192, 0);
   });
 
   it("returns infeasible instead of overlapping changed-altitude phases or fabricating cruise rows", () => {

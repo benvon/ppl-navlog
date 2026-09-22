@@ -544,7 +544,7 @@ class Planner {
 
   private removeCheckpoint(id: string): void {
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, Math.max(0, checkpoints.length + 1)), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
+    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
     this.render();
   }
 
@@ -726,6 +726,10 @@ class Planner {
       ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
       : field === "descentTarget"
         ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, descentTargetIsManual: input.value.trim() !== "" }
+        : field === "departureIcao"
+          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
+          : field === "destinationIcao"
+            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
         : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
   }
 }
@@ -783,8 +787,29 @@ function text(tag: "h2" | "h3" | "p", content: string): HTMLElement {
 }
 
 function routePoints(state: PlannerState): readonly RoutePoint[] {
-  const endpoints = state.departure === undefined || state.destination === undefined ? [] : [state.departure, ...state.checkpoints, state.destination];
+  const endpoints = routePointsWithCheckpoints(state, state.checkpoints);
   return endpoints.length > 0 ? endpoints : (state.draft?.route.points ?? []);
+}
+
+function routePointsWithCheckpoints(state: PlannerState, checkpoints: readonly CheckpointRoutePoint[]): readonly RoutePoint[] {
+  return state.departure === undefined || state.destination === undefined ? [] : [state.departure, ...checkpoints, state.destination];
+}
+
+function reconcileCruiseAltitudes(state: PlannerState, nextCheckpoints: readonly CheckpointRoutePoint[]): readonly number[] {
+  const previousPoints = routePoints(state);
+  const previousAltitudes = expandAltitudes(state.cruiseAltitudes, Math.max(0, previousPoints.length - 1));
+  const altitudeByEndpoints = new Map<string, number>();
+  previousAltitudes.forEach((altitude, index) => {
+    const from = previousPoints[index];
+    const to = previousPoints[index + 1];
+    if (from !== undefined && to !== undefined) altitudeByEndpoints.set(`${from.id}->${to.id}`, altitude);
+  });
+  const nextPoints = routePointsWithCheckpoints(state, nextCheckpoints);
+  return Array.from({ length: Math.max(0, nextPoints.length - 1) }, (_, index) => {
+    const from = nextPoints[index];
+    const to = nextPoints[index + 1];
+    return from === undefined || to === undefined ? 4_500 : altitudeByEndpoints.get(`${from.id}->${to.id}`) ?? 4_500;
+  });
 }
 
 /**
