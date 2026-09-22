@@ -1,6 +1,6 @@
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
-import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
+import type { AircraftProfile, AircraftProfileInput, CompassDeviationEntry } from "../domain/aircraft";
 import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanFamily, PlanRevision, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
 import type { AirportLookup } from "../application/airport-lookup";
 import {
@@ -127,8 +127,10 @@ class Planner {
       ["descent-tas", "Descent TAS (kt)", "100"],
       ["descent-fuel", "Descent fuel flow (gph)", "5"],
       ["usable-fuel", "Usable fuel (gal, optional)", ""],
+      ["compass-deviation-card", "Compass deviation card (magnetic heading: signed degrees)", "000: 0"],
     ];
-    fields.forEach(([id, label, value]) => form.append(labeledInput(id, label, value, id === "profile-name" ? "text" : "number")));
+    fields.forEach(([id, label, value]) => form.append(labeledInput(id, label, value, id === "profile-name" || id === "compass-deviation-card" ? "text" : "number")));
+    form.append(text("p", "Enter card points such as 000:+1, 090:-1. A single point applies a constant deviation at every heading. The default 000: 0 is an explicit study-only zero-deviation assumption; replace it with the aircraft’s compass-deviation card when available."));
     form.append(button("Save aircraft profile", "submit"));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -933,6 +935,28 @@ function profileInputFromForm(form: HTMLFormElement): AircraftProfileInput {
     descentTasKnots: Number(inputValue(form, "descent-tas")),
     descentFuelFlowGallonsPerHour: Number(inputValue(form, "descent-fuel")),
     ...(usableFuel === "" ? {} : { usableFuelGallons: Number(usableFuel) }),
-    compassDeviationTable: [],
+    compassDeviationTable: parseCompassDeviationCard(inputValue(form, "compass-deviation-card")),
   };
+}
+
+function parseCompassDeviationCard(value: string): readonly CompassDeviationEntry[] {
+  const entries = value.trim().split(/[;,\n]+/).map((entry) => entry.trim()).filter(Boolean);
+  if (entries.length === 0) throw new Error("Enter at least one compass-deviation card point, for example 000: 0.");
+  if (entries.length > 360) throw new Error("Compass-deviation card supports at most 360 points.");
+  const headings = new Set<number>();
+  return entries.map((entry) => {
+    const match = /^(\d+(?:\.\d+)?)\s*:\s*([+-]?\d+(?:\.\d+)?)$/.exec(entry);
+    if (match === null) throw new Error(`Compass-deviation entry "${entry}" must use magnetic-heading: signed-degrees, for example 090: -2.`);
+    const magneticHeadingDegrees = Number(match[1]);
+    const deviationDegrees = Number(match[2]);
+    if (!Number.isFinite(magneticHeadingDegrees) || magneticHeadingDegrees < 0 || magneticHeadingDegrees >= 360) {
+      throw new Error("Compass-deviation magnetic headings must be at least 0 and less than 360 degrees.");
+    }
+    if (!Number.isFinite(deviationDegrees) || deviationDegrees < -180 || deviationDegrees > 180) {
+      throw new Error("Compass-deviation values must be between -180 and 180 degrees.");
+    }
+    if (headings.has(magneticHeadingDegrees)) throw new Error(`Compass-deviation card has duplicate magnetic heading ${magneticHeadingDegrees}.`);
+    headings.add(magneticHeadingDegrees);
+    return { magneticHeadingDegrees, deviationDegrees };
+  });
 }

@@ -88,6 +88,9 @@ describe("planner shell", () => {
     profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
     expect(root.textContent).toContain("Saved aircraft profile Study aircraft.");
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([
+      expect.objectContaining({ compassDeviationTable: [{ magneticHeadingDegrees: 0, deviationDegrees: 0 }] }),
+    ]);
 
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
@@ -160,6 +163,32 @@ describe("planner shell", () => {
     clickByLabel(root, "Reopen saved revision");
     await settle();
     expect(root.textContent).toContain("Reopened revision");
+  });
+
+  it("requires a usable compass-deviation card and saves each supplied point", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+
+    input(root, "compass-deviation-card").value = "";
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("Enter at least one compass-deviation card point");
+
+    input(root, "compass-deviation-card").value = "000: +1, 090: -1";
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([
+      expect.objectContaining({
+        compassDeviationTable: [
+          { magneticHeadingDegrees: 0, deviationDegrees: 1 },
+          { magneticHeadingDegrees: 90, deviationDegrees: -1 },
+        ],
+      }),
+    ]);
   });
 
   it("reports malformed airport identifiers without mutating the route", async () => {
