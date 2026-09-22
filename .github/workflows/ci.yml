@@ -10,7 +10,6 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  queue: max
 
 jobs:
   validate:

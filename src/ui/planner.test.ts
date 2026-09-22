@@ -105,7 +105,7 @@ describe("planner shell", () => {
     expect(input(root, "departure-time").value).toBe("2026-10-01T12:00");
     expect(input(root, "taxi-fuel").value).toBe("1.2");
     expect(input(root, "reserve-fuel").value).toBe("3.5");
-    expect(input(root, "descent-target").value).toBe("808");
+    expect(input(root, "descent-target").value).toBe("1808");
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Saved immutable revision");
@@ -138,6 +138,7 @@ describe("planner shell", () => {
       id: originalLegId,
       performanceOverrides: { cruiseTasKnots: { computedValue: 95, effectiveValue: 100, override: { value: 100, reason: "Instructor exercise" } } },
     });
+
     const reopenedRoot = document.createElement("div");
     renderPlanner(reopenedRoot, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
     await settle();
@@ -163,6 +164,37 @@ describe("planner shell", () => {
     clickByLabel(root, "Reopen saved revision");
     await settle();
     expect(root.textContent).toContain("Reopened revision");
+
+    input(root, "destination-icao").value = "KORD";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeUndefined();
+  });
+
+  it("updates an automatic descent target for each newly resolved destination but preserves pilot input", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+
+    input(root, "departure-icao").value = "KJVL";
+    input(root, "destination-icao").value = "KORD";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    expect(input(root, "descent-target").value).toBe("1680");
+
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    expect(input(root, "descent-target").value).toBe("1808");
+
+    input(root, "descent-target").value = "2500";
+    input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
+    input(root, "destination-icao").value = "KORD";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    expect(input(root, "descent-target").value).toBe("2500");
   });
 
   it("requires a usable compass-deviation card and saves each supplied point", async () => {

@@ -14,6 +14,9 @@ for (const file of files) {
   if (/\tpull_request_target:/.test(content) || /^\s*pull_request_target:/m.test(content)) {
     errors.push(`${path}: pull_request_target is not permitted.`);
   }
+  if (/^\s+queue:\s*/m.test(content)) {
+    errors.push(`${path}: GitHub Actions concurrency does not support queue.`);
+  }
   for (const line of content.split(/\r?\n/)) {
     const match = line.match(/^\s*uses:\s*([^\s]+)/);
     if (match && !match[1].startsWith('./') && !/@[0-9a-f]{40}$/i.test(match[1])) {

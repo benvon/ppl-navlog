@@ -63,8 +63,8 @@ describe("plan draft use cases", () => {
     const route = createRouteDefinition({ departure, checkpoints: [checkpoint], destination, cruiseAltitudesFeetMsl: [4_500, 5_500] }, ids("leg-1", "leg-2", "route-1"));
 
     expect(route.legs).toMatchObject([
-      { fromPointId: "route-point-1", toPointId: "route-point-2", cruiseAltitudeFeetMsl: 4_500 },
-      { fromPointId: "route-point-2", toPointId: "route-point-3", cruiseAltitudeFeetMsl: 5_500 },
+      { fromPointId: "route-point-1-airport-kord", toPointId: "route-point-2-checkpoint-1", cruiseAltitudeFeetMsl: 4_500 },
+      { fromPointId: "route-point-2-checkpoint-1", toPointId: "route-point-3-airport-kjvl", cruiseAltitudeFeetMsl: 5_500 },
     ]);
   });
 
@@ -74,8 +74,8 @@ describe("plan draft use cases", () => {
     const destination = await airports.lookupExactIcao("KORD");
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
 
-    expect(route.points.map((point) => point.id)).toEqual(["route-point-1", "route-point-2"]);
-    expect(route.legs[0]).toMatchObject({ fromPointId: "route-point-1", toPointId: "route-point-2" });
+    expect(route.points.map((point) => point.id)).toEqual(["route-point-1-airport-kord", "route-point-2-airport-kord"]);
+    expect(route.legs[0]).toMatchObject({ fromPointId: "route-point-1-airport-kord", toPointId: "route-point-2-airport-kord" });
   });
 
   it("preserves the aircraft default when a per-leg TAS override is restored", async () => {

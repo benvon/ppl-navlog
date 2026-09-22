@@ -43,6 +43,7 @@ interface PlannerState {
   readonly profiles: readonly AircraftProfile[];
   readonly selectedProfileId?: string;
   readonly routeForm: RouteFormValues;
+  readonly descentTargetIsManual: boolean;
   readonly departure?: AirportRoutePoint;
   readonly destination?: AirportRoutePoint;
   readonly checkpoints: readonly CheckpointRoutePoint[];
@@ -76,7 +77,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm() };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -502,7 +503,18 @@ class Planner {
         this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "departure-icao")),
         this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "destination-icao")),
       ]);
-      this.state = { ...this.state, departure, destination, routeForm: { ...routeForm, descentTarget: routeForm.descentTarget || String(destination.elevationFeetMsl) }, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1), availableForecasts: [], selectedForecastValidTimeUtc: undefined };
+      this.state = {
+        ...this.state,
+        departure,
+        destination,
+        routeForm: {
+          ...routeForm,
+          descentTarget: this.state.descentTargetIsManual ? routeForm.descentTarget : String(destination.elevationFeetMsl + 1_000),
+        },
+        cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1),
+        availableForecasts: [],
+        selectedForecastValidTimeUtc: undefined,
+      };
       this.feedback.textContent = "Exact ICAO endpoints resolved from the configured aviation-data source.";
       this.render();
     } catch (error) {
@@ -683,6 +695,7 @@ class Planner {
         cruiseAltitudes: reopened.draftSnapshot.route.legs.map((leg) => leg.cruiseAltitudeFeetMsl),
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
+        descentTargetIsManual: true,
         routeForm: routeFormFromDraft(reopened.draftSnapshot, firstAirport(reopened.draftSnapshot.route.points)?.icao ?? "", lastAirport(reopened.draftSnapshot.route.points)?.icao ?? ""),
       };
       this.feedback.textContent = `Reopened revision ${reopened.id}; any save will create a child revision.`;
@@ -711,7 +724,9 @@ class Planner {
     if (field === undefined) return;
     this.state = field === "departureTime"
       ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined }
-      : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
+      : field === "descentTarget"
+        ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, descentTargetIsManual: input.value.trim() !== "" }
+        : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value } };
   }
 }
 
@@ -855,7 +870,7 @@ function routeBasicFields(values: RouteFormValues): readonly HTMLLabelElement[] 
     labeledInput("departure-time", "Planned departure UTC", values.departureTime, "datetime-local"),
     labeledInput("taxi-fuel", "Taxi/run-up fuel (gal)", values.taxiFuel, "number"),
     labeledInput("reserve-fuel", "Reserve fuel (gal)", values.reserveFuel, "number"),
-    labeledInput("descent-target", "Arrival descent target (ft MSL; defaults to destination field elevation)", values.descentTarget, "number"),
+    labeledInput("descent-target", "Arrival descent target (ft MSL; defaults to destination field elevation + 1,000 ft)", values.descentTarget, "number"),
   ];
 }
 
