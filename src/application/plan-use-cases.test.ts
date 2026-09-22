@@ -154,6 +154,7 @@ describe("plan draft use cases", () => {
     await expect(saveDraftRevision(new MemoryPersistence(), draft, { ...profile, id: "wrong-aircraft" }, ids("revision-1"), fixedClock)).rejects.toThrow(/does not match/iu);
     await expect(reopenPlanRevision(new MemoryPersistence(), "missing-revision")).rejects.toThrow(/no longer available/iu);
     expect(() => normalizeIcao("too-long")).toThrow(AirportLookupError);
+    expect(() => normalizeIcao("1C8")).toThrow(/FAA location identifiers such as 1C8 are not supported/iu);
     await expect(airports.lookupExactIcao("KAAA")).rejects.toThrow(/local study airport/iu);
   });
 
@@ -162,6 +163,15 @@ describe("plan draft use cases", () => {
     const profile = await saveAircraftProfile(persistence, profileInput(), ids("aircraft-1"), fixedClock);
 
     expect(await persistence.getAircraftProfile(profile.id)).toEqual(profile);
+  });
+
+  it("updates a selected profile in place without changing its identity", async () => {
+    const persistence = new MemoryPersistence();
+    const created = await saveAircraftProfile(persistence, profileInput(), ids("aircraft-1"), fixedClock);
+    const updated = await saveAircraftProfile(persistence, { ...profileInput(), cruiseTasKnots: 105 }, ids("unused-id"), { now: () => new Date("2026-09-21T13:00:00.000Z") }, created);
+
+    expect(updated).toMatchObject({ id: "aircraft-1", cruiseTasKnots: 105, createdAt: created.createdAt, updatedAt: "2026-09-21T13:00:00.000Z" });
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([updated]);
   });
 
   it("persists only an explicitly selected, departure-valid forecast period", async () => {

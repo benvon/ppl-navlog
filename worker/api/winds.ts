@@ -252,8 +252,13 @@ function parseStationInfo(value: unknown): Map<string, StationInfo> {
 
 async function stationInfo(fetcher: ServiceFetcher, stationIds: readonly string[]): Promise<Map<string, StationInfo>> {
   const result = new Map<string, StationInfo>();
-  for (let start = 0; start < stationIds.length; start += MAX_STATION_IDS_PER_REQUEST) {
-    const ids = stationIds.slice(start, start + MAX_STATION_IDS_PER_REQUEST);
+  // The FB product identifies domestic reporting sites with three-character
+  // station IDs (for example ORD), but AWC's station-info endpoint currently
+  // resolves those sites by their four-character ICAO identifiers (KORD).
+  // All V1 forecast regions are within the FAA K-prefix namespace.
+  const icaoIds = stationIds.map((stationId) => `K${stationId}`);
+  for (let start = 0; start < icaoIds.length; start += MAX_STATION_IDS_PER_REQUEST) {
+    const ids = icaoIds.slice(start, start + MAX_STATION_IDS_PER_REQUEST);
     const url = new URL('/api/data/stationinfo', AVIATION_WEATHER_ORIGIN);
     url.searchParams.set('ids', ids.join(','));
     url.searchParams.set('format', 'json');

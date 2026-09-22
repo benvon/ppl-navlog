@@ -91,6 +91,8 @@ describe("planner shell", () => {
     await expect(persistence.listAircraftProfiles()).resolves.toEqual([
       expect.objectContaining({ compassDeviationTable: [{ magneticHeadingDegrees: 0, deviationDegrees: 0 }] }),
     ]);
+    expect(input(root, "profile-name").value).toBe("Study aircraft");
+    expect(input(root, "usable-fuel").value).toBe("24");
 
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
@@ -291,7 +293,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Resolve exact ICAO endpoints");
     await settle();
 
-    expect(root.textContent).toContain("exact four-character ICAO");
+    expect(root.textContent).toContain("FAA location identifiers such as 1C8 are not supported in v1.");
     expect(root.textContent).toContain("Resolve departure and destination before defining leg altitudes.");
   });
 
@@ -517,6 +519,10 @@ describe("planner shell", () => {
     };
 
     await saveNamedProfile("First aircraft");
+    const firstSelect = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (firstSelect === null) throw new Error("Profile selector was not rendered.");
+    firstSelect.value = "";
+    firstSelect.dispatchEvent(new Event("change", { bubbles: true }));
     await saveNamedProfile("Second aircraft");
     const select = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
     if (select === null || select.options.length < 3) throw new Error("Expected two selectable profiles.");
@@ -551,8 +557,14 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
 
+    const profileSelector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (profileSelector === null) throw new Error("Profile selector was not rendered.");
+    profileSelector.value = "";
+    profileSelector.dispatchEvent(new Event("change", { bubbles: true }));
     input(root, "profile-name").value = "Different aircraft";
-    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    const newProfileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (newProfileForm === null) throw new Error("Profile form was not rendered.");
+    newProfileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
     clickByLabel(root, "Calculate complete navlog");
     await settle();
@@ -588,6 +600,10 @@ describe("planner shell", () => {
     await settle();
     expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeDefined();
 
+    const profileSelector = root.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (profileSelector === null) throw new Error("Profile selector was not rendered.");
+    profileSelector.value = "";
+    profileSelector.dispatchEvent(new Event("change", { bubbles: true }));
     const secondProfile = root.querySelector<HTMLFormElement>(".profile-form");
     if (secondProfile === null) throw new Error("Profile form was not rendered.");
     input(root, "profile-name").value = "Profile B";
@@ -604,6 +620,36 @@ describe("planner shell", () => {
     const saved = persistence.savedRevisions.at(-1);
     expect(saved?.draftSnapshot.selectedAircraftProfileId).toBe(selector.value);
     expect(saved?.draftSnapshot.route.legs[0]?.performanceOverrides).toBeUndefined();
+  });
+
+  it("keeps saved profile values visible and updates the selected profile without duplicates", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+
+    const form = root.querySelector<HTMLFormElement>(".profile-form");
+    if (form === null) throw new Error("Profile form was not rendered.");
+    input(root, "profile-name").value = "Regression aircraft";
+    input(root, "cruise-tas").value = "111";
+    input(root, "usable-fuel").value = "25.5";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(input(root, "profile-name").value).toBe("Regression aircraft");
+    expect(input(root, "cruise-tas").value).toBe("111");
+    expect(input(root, "usable-fuel").value).toBe("25.5");
+
+    input(root, "cruise-tas").value = "115";
+    const updatedForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (updatedForm === null) throw new Error("Profile form was not rendered after saving.");
+    updatedForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(root.textContent).toContain("Updated aircraft profile Regression aircraft.");
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([
+      expect.objectContaining({ name: "Regression aircraft", cruiseTasKnots: 115, usableFuelGallons: 25.5 }),
+    ]);
   });
 
   it("clears the selected aircraft profile when the placeholder is chosen", async () => {

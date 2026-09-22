@@ -84,6 +84,9 @@ describe('Aviation Weather Center adapter', () => {
     expect(result.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ABQ', region: 'us', coordinates: { latitudeDeg: 35.0402, longitudeDeg: -106.609 }, availableForecastCycles: ['06', '12', '24'] })]));
     expect(result.forecasts).toHaveLength(3);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
+    const stationRequest = requestLog.requests.find((request) => new URL(request.url).pathname === '/api/data/stationinfo');
+    expect(stationRequest).toBeDefined();
+    expect(new URL(stationRequest!.url).searchParams.get('ids')).toContain('KABQ');
     expect(requestLog.requests.every((request) => new URL(request.url).origin === 'https://aviationweather.gov')).toBe(true);
 
     await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);

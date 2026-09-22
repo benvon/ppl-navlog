@@ -81,8 +81,15 @@ export async function saveAircraftProfile(
   input: AircraftProfileInput,
   ids: UseCaseIds,
   clock: UseCaseClock,
+  existingProfile?: AircraftProfile,
 ): Promise<AircraftProfile> {
-  const profile = createAircraftProfile(input, ids, clock);
+  const profile = existingProfile === undefined
+    ? createAircraftProfile(input, ids, clock)
+    : {
+      ...existingProfile,
+      ...input,
+      updatedAt: clock.now().toISOString(),
+    };
   await persistence.saveAircraftProfile(profile);
   return profile;
 }
