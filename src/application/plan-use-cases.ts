@@ -88,8 +88,10 @@ export async function saveAircraftProfile(
 export function createRouteDefinition(input: RouteDraftInput, ids: UseCaseIds): RouteDefinition {
   // A route point is an occurrence, not a globally unique airport. This keeps
   // departure and destination distinct for a KXYZ → checkpoint → KXYZ route.
+  // Reopened route points already carry an occurrence ID, so route construction
+  // must unwrap that source identity before assigning it again.
   const points: readonly RoutePoint[] = [input.departure, ...input.checkpoints, input.destination]
-    .map((point, index) => ({ ...point, id: `route-point-${index + 1}-${point.id}` }));
+    .map((point, index) => ({ ...point, id: `route-point-${index + 1}-${sourcePointIdentity(point.id)}` }));
   if (input.cruiseAltitudesFeetMsl.length !== points.length - 1) {
     throw new DraftUseCaseError("Each route leg requires one selected cruise altitude.");
   }
@@ -103,6 +105,16 @@ export function createRouteDefinition(input: RouteDraftInput, ids: UseCaseIds): 
   });
   return { id: input.id ?? ids.next(), points, legs };
 }
+
+const sourcePointIdentity = (id: string): string => {
+  let sourceIdentity = id;
+  let match = /^route-point-\d+-(.+)$/u.exec(sourceIdentity);
+  while (match !== null) {
+    sourceIdentity = match[1] ?? sourceIdentity;
+    match = /^route-point-\d+-(.+)$/u.exec(sourceIdentity);
+  }
+  return sourceIdentity;
+};
 
 export function createPlanDraft(input: PlanDraftInput, ids: UseCaseIds, clock: UseCaseClock): PlanDraft {
   const createdAt = clock.now().toISOString();

@@ -15,7 +15,7 @@ import {
   type UseCaseIds,
 } from "./plan-use-cases";
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
-import type { PlanFamily, PlanRevision } from "../domain/route";
+import type { AirportRoutePoint, PlanFamily, PlanRevision } from "../domain/route";
 
 const fixedClock: UseCaseClock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
 const ids = (...values: string[]): UseCaseIds => ({ next: () => values.shift() ?? "unexpected-id" });
@@ -76,6 +76,22 @@ describe("plan draft use cases", () => {
 
     expect(route.points.map((point) => point.id)).toEqual(["route-point-1-airport-kord", "route-point-2-airport-kord"]);
     expect(route.legs[0]).toMatchObject({ fromPointId: "route-point-1-airport-kord", toPointId: "route-point-2-airport-kord" });
+  });
+
+  it("keeps route-point identities stable when reopening an unchanged route", async () => {
+    const airports = createLocalStudyAirportLookup();
+    const departure = await airports.lookupExactIcao("KORD");
+    const destination = await airports.lookupExactIcao("KJVL");
+    const initial = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
+    const reopened = createRouteDefinition({
+      id: initial.id,
+      departure: initial.points[0] as AirportRoutePoint,
+      checkpoints: [],
+      destination: initial.points[1] as AirportRoutePoint,
+      cruiseAltitudesFeetMsl: [4_500],
+    }, ids("leg-2"));
+
+    expect(reopened.points.map((point) => point.id)).toEqual(initial.points.map((point) => point.id));
   });
 
   it("preserves the aircraft default when a per-leg TAS override is restored", async () => {

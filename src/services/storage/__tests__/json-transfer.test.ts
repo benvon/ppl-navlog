@@ -43,6 +43,9 @@ describe("JSON import and export", () => {
     const otherFamily = { ...bundle.planFamilies[0], id: "plan-2", latestRevisionId: otherRevision.id };
     const crossFamilyLatest = { ...bundle, planFamilies: [{ ...bundle.planFamilies[0], latestRevisionId: otherRevision.id }, otherFamily], planRevisions: [bundle.planRevisions[0], otherRevision] };
     expect(() => parseNavlogExport(JSON.stringify(crossFamilyLatest), now)).toThrow(/same plan family/);
+
+    const crossFamilyParent = { ...bundle, planFamilies: [bundle.planFamilies[0], otherFamily], planRevisions: [{ ...bundle.planRevisions[0], parentRevisionId: otherRevision.id }, otherRevision] };
+    expect(() => parseNavlogExport(JSON.stringify(crossFamilyParent), now)).toThrow(/same plan family/);
   });
 
   it("rejects duplicate ids and oversized serialized input", () => {

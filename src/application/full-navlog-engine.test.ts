@@ -73,7 +73,7 @@ describe("full navlog calculation engine", () => {
       navlog: { schema: "navlog-calculation/v1", rows: expect.any(Array) },
     });
     const snapshot = result.calculationSnapshot as { readonly phaseAllocation: { readonly phases: readonly { readonly calculation: { readonly trace: { readonly formulaId: string } } }[] }; readonly navlog: { readonly rows: readonly { readonly effectiveWind: { readonly wind: { readonly provenance: { readonly sourceId: string } } } }[] } };
-    expect(snapshot.phaseAllocation.phases[0]?.calculation.trace.formulaId).toBe("vertical-phase-performance");
+    expect(snapshot.phaseAllocation.phases[0]?.calculation.trace.formulaId).toBe("route-course-integrated-vertical-phase");
     expect(snapshot.navlog.rows[0]?.effectiveWind.wind.provenance.sourceId).toContain("winds-aloft:BRL");
     expect(result.warnings.join(" ")).toMatch(/altitude-transition policy/i);
   });

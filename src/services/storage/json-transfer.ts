@@ -86,7 +86,13 @@ function validateBundleRelationships(bundle: NavlogExportBundle): void {
   ensureUnique(bundle.aircraftProfiles, "$.aircraftProfiles");
   bundle.planRevisions.forEach((revision, index) => {
     if (!familyIds.has(revision.planId)) issues.push({ path: `$.planRevisions[${index}].planId`, message: "must reference an exported plan family" });
-    if (revision.parentRevisionId !== undefined && !revisionIds.has(revision.parentRevisionId)) issues.push({ path: `$.planRevisions[${index}].parentRevisionId`, message: "must reference an exported revision" });
+    if (revision.parentRevisionId !== undefined && !revisionIds.has(revision.parentRevisionId)) {
+      issues.push({ path: `$.planRevisions[${index}].parentRevisionId`, message: "must reference an exported revision" });
+    }
+    const parentRevision = revision.parentRevisionId === undefined ? undefined : revisionsById.get(revision.parentRevisionId);
+    if (parentRevision !== undefined && parentRevision.planId !== revision.planId) {
+      issues.push({ path: `$.planRevisions[${index}].parentRevisionId`, message: "must reference a revision from the same plan family" });
+    }
     revision.weatherSnapshotIds.forEach((id, weatherIndex) => {
       if (!weatherIds.has(id)) issues.push({ path: `$.planRevisions[${index}].weatherSnapshotIds[${weatherIndex}]`, message: "must reference an exported weather snapshot" });
     });

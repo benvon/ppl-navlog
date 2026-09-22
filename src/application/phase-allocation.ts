@@ -1,4 +1,5 @@
 import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } from "../domain/distance-course";
+import { trace } from "../domain/calculation-trace";
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
 import {
   placeGeneratedBoundary,
@@ -8,13 +9,13 @@ import {
 } from "../domain/phase-geometry";
 import {
   calculateConvergedVerticalPhase,
-  type ConvergedVerticalPhase,
   type ConvergenceOptions,
   type EffectiveWindResolver,
 } from "../domain/phase-planning";
-import { calculateVerticalPhase, type VerticalPhaseCalculation, type VerticalPhaseKind, type VerticalPhasePerformance } from "../domain/phase-performance";
+import { type VerticalPhaseCalculation, type VerticalPhaseKind, type VerticalPhasePerformance } from "../domain/phase-performance";
 import { feetMsl, nauticalMiles, type FeetMsl, type NauticalMiles, type TrueCourse } from "../domain/units";
 import type { Coordinate } from "../domain/coordinates";
+import { solveWindTriangle } from "../domain/wind-triangle";
 
 /**
  * The selected altitude for one user-authored route leg. It is deliberately
@@ -228,8 +229,7 @@ const calculatePhaseRequirements = (
   const departureClimb = calculateOptionalForwardPhase({
     id: "departure-climb",
     kind: "climb",
-    start: first.start,
-    course: first.course,
+    route,
     startRouteDistance: value(nauticalMiles(0)),
     startingAltitude: input.departureAltitude,
     targetAltitude: first.cruiseAltitude,
@@ -266,7 +266,7 @@ const calculateTransitionRequirements = (
     const current = route[index];
     const next = route[index + 1];
     if (current === undefined || next === undefined || current.cruiseAltitude === next.cruiseAltitude) continue;
-    const transition = calculateTransitionRequirement(input, current, next);
+    const transition = calculateTransitionRequirement(input, route, current, next);
     if (!transition.ok) return propagateFailure(transition);
     if (transition.value !== undefined) requirements.push(transition.value);
   }
@@ -275,6 +275,7 @@ const calculateTransitionRequirements = (
 
 const calculateTransitionRequirement = (
   input: RoutePhaseAllocationInput,
+  route: readonly CalculatedRouteLeg[],
   current: CalculatedRouteLeg,
   next: CalculatedRouteLeg,
 ): DomainResult<PhaseRequirementInternal | undefined> => {
@@ -282,8 +283,7 @@ const calculateTransitionRequirement = (
   return calculateOptionalForwardPhase({
     id: `transition:${current.sourceLegId}->${next.sourceLegId}`,
     kind: climbing ? "transition-climb" : "transition-descent",
-    start: current.end,
-    course: next.course,
+    route,
     startRouteDistance: current.endRouteDistance,
     startingAltitude: current.cruiseAltitude,
     targetAltitude: next.cruiseAltitude,
@@ -296,8 +296,7 @@ const calculateTransitionRequirement = (
 interface ForwardPhaseInput {
   readonly id: string;
   readonly kind: "climb" | "transition-climb" | "transition-descent";
-  readonly start: Coordinate;
-  readonly course: TrueCourse;
+  readonly route: readonly CalculatedRouteLeg[];
   readonly startRouteDistance: NauticalMiles;
   readonly startingAltitude: FeetMsl;
   readonly targetAltitude: FeetMsl;
@@ -308,23 +307,28 @@ interface ForwardPhaseInput {
 
 const calculateOptionalForwardPhase = (input: ForwardPhaseInput): DomainResult<PhaseRequirementInternal | undefined> => {
   if (input.startingAltitude === input.targetAltitude) return success(undefined);
+  const start = routePosition(input.route, input.startRouteDistance);
+  if (!start.ok) return propagateFailure(start);
   const converged = calculateConvergedVerticalPhase({
     kind: input.kind,
-    start: input.start,
-    course: input.course,
+    start: start.value.coordinate,
+    course: start.value.leg.course,
     startingAltitude: input.startingAltitude,
     targetAltitude: input.targetAltitude,
     performance: input.performance,
   }, input.windResolver, input.convergence);
   if (!converged.ok) return propagateFailure(converged);
-  return requirementFromForwardConvergence(input, converged.value);
+  const integrated = integratePhaseAcrossRoute(input.route, input.startRouteDistance, converged.value.calculation, input, converged.value.iterations);
+  if (!integrated.ok) return propagateFailure(integrated);
+  return requirementFromForwardConvergence(input, integrated.value, converged.value.iterations);
 };
 
 const requirementFromForwardConvergence = (
   input: ForwardPhaseInput,
-  converged: ConvergedVerticalPhase,
+  calculation: VerticalPhaseCalculation,
+  convergenceIterations: number,
 ): DomainResult<PhaseRequirementInternal> => {
-  const endRouteDistance = input.startRouteDistance + converged.calculation.distance;
+  const endRouteDistance = input.startRouteDistance + calculation.distance;
   return success({
     id: input.id,
     kind: input.kind,
@@ -332,8 +336,149 @@ const requirementFromForwardConvergence = (
     endRouteDistance,
     startingAltitude: input.startingAltitude,
     targetAltitude: input.targetAltitude,
-    calculation: converged.calculation,
-    convergenceIterations: converged.iterations,
+    calculation,
+    convergenceIterations,
+  });
+};
+
+/**
+ * Vertical time and fuel come from the aircraft profile, but distance must be
+ * integrated along each local route course. A phase can cross a checkpoint;
+ * using only its first-leg groundspeed would make the generated subleg ETEs
+ * disagree with the phase duration whenever wind changes across the turn.
+ */
+const integratePhaseAcrossRoute = (
+  route: readonly CalculatedRouteLeg[],
+  startRouteDistance: NauticalMiles,
+  baseCalculation: VerticalPhaseCalculation,
+  input: {
+    readonly kind: VerticalPhaseKind;
+    readonly startingAltitude: FeetMsl;
+    readonly targetAltitude: FeetMsl;
+    readonly performance: Omit<VerticalPhasePerformance, "effectiveWind">;
+    readonly windResolver: EffectiveWindResolver;
+  },
+  iteration: number,
+): DomainResult<VerticalPhaseCalculation> => {
+  const totalDistance = route[route.length - 1]?.endRouteDistance;
+  const finalLeg = route[route.length - 1];
+  if (totalDistance === undefined || finalLeg === undefined) return failure("ROUTE_GEOMETRY_ERROR", "At least one route leg is required.");
+  let routeDistance: number = startRouteDistance;
+  let remainingMinutes: number = baseCalculation.duration;
+  let traveledDistance = 0;
+  let legIndex = route.findIndex((leg) => routeDistance < leg.endRouteDistance - EPSILON_NAUTICAL_MILES);
+  if (legIndex < 0) legIndex = route.length - 1;
+  const initialPosition = routePosition(route, Math.min(routeDistance, totalDistance));
+  if (!initialPosition.ok) return propagateFailure(initialPosition);
+  let endCoordinate: Coordinate = initialPosition.value.coordinate;
+  let lastWindTriangle = baseCalculation.windTriangle;
+  let traversedLegs = 0;
+
+  while (remainingMinutes > EPSILON_NAUTICAL_MILES) {
+    const segment = integrateRoutePhaseSegment({
+      route,
+      finalLeg,
+      totalDistance,
+      legIndex,
+      routeDistance,
+      remainingMinutes,
+      traveledDistance,
+      input,
+      iteration,
+    });
+    if (!segment.ok) return propagateFailure(segment);
+    routeDistance = segment.value.routeDistance;
+    remainingMinutes = segment.value.remainingMinutes;
+    traveledDistance = segment.value.traveledDistance;
+    endCoordinate = segment.value.endCoordinate;
+    lastWindTriangle = segment.value.windTriangle;
+    legIndex = segment.value.nextLegIndex;
+    traversedLegs += 1;
+  }
+
+  const distance = nauticalMiles(traveledDistance);
+  if (!distance.ok) return propagateFailure(distance);
+  return success({
+    ...baseCalculation,
+    distance: distance.value,
+    end: endCoordinate,
+    windTriangle: lastWindTriangle,
+    trace: trace(
+      "route-course-integrated-vertical-phase",
+      [
+        { name: "phase", value: input.kind, unit: "unitless" },
+        { name: "phase duration", value: baseCalculation.duration, unit: "minutes" },
+        { name: "phase fuel", value: baseCalculation.fuel, unit: "gallons" },
+      ],
+      [{ name: "route courses traversed", value: traversedLegs, unit: "unitless" }],
+      { name: "phase distance", value: distance.value, unit: "nautical-miles" },
+      "UI decides presentation rounding.",
+      ["Distance is integrated using each route segment's local true course and sampled wind."],
+    ),
+  });
+};
+
+interface RoutePhaseSegmentInput {
+  readonly route: readonly CalculatedRouteLeg[];
+  readonly finalLeg: CalculatedRouteLeg;
+  readonly totalDistance: NauticalMiles;
+  readonly legIndex: number;
+  readonly routeDistance: number;
+  readonly remainingMinutes: number;
+  readonly traveledDistance: number;
+  readonly input: {
+    readonly kind: VerticalPhaseKind;
+    readonly startingAltitude: FeetMsl;
+    readonly targetAltitude: FeetMsl;
+    readonly performance: Omit<VerticalPhasePerformance, "effectiveWind">;
+    readonly windResolver: EffectiveWindResolver;
+  };
+  readonly iteration: number;
+}
+
+const integrateRoutePhaseSegment = (state: RoutePhaseSegmentInput): DomainResult<{
+  readonly routeDistance: number;
+  readonly remainingMinutes: number;
+  readonly traveledDistance: number;
+  readonly endCoordinate: Coordinate;
+  readonly windTriangle: ReturnType<typeof solveWindTriangle> extends DomainResult<infer Result> ? Result : never;
+  readonly nextLegIndex: number;
+}> => {
+  const leg = state.route[state.legIndex] ?? state.finalLeg;
+  const distanceWithinLeg = state.routeDistance > state.totalDistance
+    ? state.finalLeg.distance + state.routeDistance - state.totalDistance
+    : Math.max(0, state.routeDistance - leg.startRouteDistance);
+  const start = pointAlongGreatCircle(leg.start, leg.course, value(nauticalMiles(distanceWithinLeg)));
+  if (!start.ok) return propagateFailure(start);
+  const effectiveWind = state.input.windResolver.resolveEffectiveWind({
+    phase: state.input.kind,
+    start: start.value,
+    courseDegreesTrue: leg.course,
+    startingAltitudeFeetMsl: state.input.startingAltitude,
+    targetAltitudeFeetMsl: state.input.targetAltitude,
+    estimatedDistanceNauticalMiles: value(nauticalMiles(state.traveledDistance)),
+    iteration: state.iteration,
+  });
+  if (!effectiveWind.ok) return propagateFailure(effectiveWind);
+  const windTriangle = solveWindTriangle(leg.course, state.input.performance.trueAirspeed, effectiveWind.value);
+  if (!windTriangle.ok) return propagateFailure(windTriangle);
+  const remainingLegDistance = state.routeDistance < state.totalDistance - EPSILON_NAUTICAL_MILES
+    ? Math.max(0, leg.endRouteDistance - state.routeDistance)
+    : Number.POSITIVE_INFINITY;
+  const minutesToLegEnd = (remainingLegDistance / windTriangle.value.groundspeed) * 60;
+  const segmentMinutes = Math.min(state.remainingMinutes, minutesToLegEnd);
+  if (!Number.isFinite(segmentMinutes)) return failure("NON_FINITE_RESULT", "Route-phase integration produced a non-finite segment duration.");
+  const segmentDistance = (windTriangle.value.groundspeed * segmentMinutes) / 60;
+  const end = pointAlongGreatCircle(start.value, leg.course, value(nauticalMiles(segmentDistance)));
+  if (!end.ok) return propagateFailure(end);
+  const reachedLegEnd = segmentMinutes >= minutesToLegEnd - EPSILON_NAUTICAL_MILES;
+  return success({
+    routeDistance: state.routeDistance + segmentDistance,
+    remainingMinutes: state.remainingMinutes - segmentMinutes,
+    traveledDistance: state.traveledDistance + segmentDistance,
+    endCoordinate: end.value,
+    windTriangle: windTriangle.value,
+    nextLegIndex: reachedLegEnd && state.legIndex < state.route.length - 1 ? state.legIndex + 1 : state.legIndex,
   });
 };
 
@@ -396,19 +541,22 @@ const calculateArrivalDescentIteration = (
 ): DomainResult<VerticalPhaseCalculation> => {
   // A required TOD can be before route origin. Clamp the sampling coordinate
   // only to quantify infeasibility; the requirement keeps its off-route TOD.
-  const candidate = routePosition(input.route, Math.max(0, input.totalDistance - previousDistance));
+  const candidateRouteDistance = Math.max(0, input.totalDistance - previousDistance);
+  const candidate = routePosition(input.route, candidateRouteDistance);
   if (!candidate.ok) return propagateFailure(candidate);
-  const effectiveWind = input.windResolver.resolveEffectiveWind({
-    phase: "descent", start: candidate.value.coordinate, courseDegreesTrue: candidate.value.leg.course,
-    startingAltitudeFeetMsl: input.startingAltitude, targetAltitudeFeetMsl: input.targetAltitude,
-    estimatedDistanceNauticalMiles: value(nauticalMiles(previousDistance)), iteration,
-  });
-  if (!effectiveWind.ok) return propagateFailure(effectiveWind);
-  return calculateVerticalPhase({
+  const converged = calculateConvergedVerticalPhase({
     kind: "descent", start: candidate.value.coordinate, course: candidate.value.leg.course,
     startingAltitude: input.startingAltitude, targetAltitude: input.targetAltitude,
-    performance: { ...input.performance, effectiveWind: effectiveWind.value },
-  });
+    performance: input.performance,
+  }, input.windResolver, input.convergence);
+  if (!converged.ok) return propagateFailure(converged);
+  return integratePhaseAcrossRoute(input.route, value(nauticalMiles(candidateRouteDistance)), converged.value.calculation, {
+    kind: "descent",
+    startingAltitude: input.startingAltitude,
+    targetAltitude: input.targetAltitude,
+    performance: input.performance,
+    windResolver: input.windResolver,
+  }, iteration);
 };
 
 const locateAvailableBoundaries = (

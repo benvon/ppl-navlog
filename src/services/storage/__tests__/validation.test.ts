@@ -38,6 +38,10 @@ describe("storage model validation", () => {
     expect(() => validateAircraftProfile(malformed, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/must be unique/);
   });
 
+  it("rejects an empty compass-deviation table at the storage boundary", () => {
+    expect(() => validateAircraftProfile({ ...aircraftProfile(), compassDeviationTable: [] }, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/between 1 and 360/u);
+  });
+
   it("uses the shared [0, 360) canonical heading range for compass-deviation entries", () => {
     const profile = aircraftProfile();
     expect(validateAircraftProfile({ ...profile, compassDeviationTable: [{ magneticHeadingDegrees: 0, deviationDegrees: 0 }] }, new Date("2027-01-01T00:00:00.000Z"))).toBe(true);

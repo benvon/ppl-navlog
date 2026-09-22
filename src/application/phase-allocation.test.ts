@@ -83,9 +83,34 @@ describe("route phase allocation", () => {
     }));
 
     expect(result.status).toBe("allocated");
-    expect(descentSampleStarts).toHaveLength(2);
+    expect(descentSampleStarts.length).toBeGreaterThanOrEqual(4);
     expect(descentSampleStarts[0]).toBeCloseTo(3, 10);
-    expect(descentSampleStarts[1]).toBeLessThan(3);
+    expect(descentSampleStarts.some((longitude) => longitude < 3)).toBe(true);
+  });
+
+  it("integrates a climb through each turned route segment instead of carrying the first-leg groundspeed forward", () => {
+    const turnedRoute = [
+      { sourceLegId: "leg-1", start: value(coordinate(0, 0)), end: value(coordinate(0.08, 0)) },
+      { sourceLegId: "leg-2", start: value(coordinate(0.08, 0)), end: value(coordinate(0.08, -2)) },
+    ];
+    const resolver: EffectiveWindResolver = {
+      resolveEffectiveWind: (request) => wind(request.courseDegreesTrue < 45 ? 180 : 270, 30),
+    };
+    const result = value(allocateRoutePhases({
+      route: turnedRoute,
+      legAltitudes: turnedRoute.map((leg) => ({ sourceLegId: leg.sourceLegId, cruiseAltitude: value(feetMsl(1_000)) })),
+      departureAltitude: value(feetMsl(0)),
+      destinationAltitude: value(feetMsl(1_000)),
+      climbPerformance: value(phasePerformanceFromAircraftValues(100, 120, 8, value(wind(0, 0)))),
+      descentPerformance,
+      windResolver: resolver,
+    }));
+
+    if (result.status !== "allocated") throw new Error("Expected allocation.");
+    const climb = result.phases.find((phase) => phase.id === "departure-climb");
+    expect(climb?.calculation.duration).toBeCloseTo(10, 10);
+    expect(climb?.calculation.distance).toBeCloseTo(17, 0);
+    expect(climb?.endRouteDistance).toBeCloseTo(17, 0);
   });
 
   it("returns infeasible instead of overlapping changed-altitude phases or fabricating cruise rows", () => {

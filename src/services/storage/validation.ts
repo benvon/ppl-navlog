@@ -140,8 +140,8 @@ export function validateAircraftProfile(value: unknown, now = new Date()): value
   positiveNumber(value.descentTasKnots, "$.descentTasKnots", issues);
   positiveNumber(value.descentFuelFlowGallonsPerHour, "$.descentFuelFlowGallonsPerHour", issues);
   if (value.usableFuelGallons !== undefined) nonNegativeNumber(value.usableFuelGallons, "$.usableFuelGallons", issues);
-  if (!Array.isArray(value.compassDeviationTable) || value.compassDeviationTable.length > 360) {
-    add(issues, "$.compassDeviationTable", "must be an array with at most 360 entries");
+  if (!Array.isArray(value.compassDeviationTable) || value.compassDeviationTable.length === 0 || value.compassDeviationTable.length > 360) {
+    add(issues, "$.compassDeviationTable", "must be an array with between 1 and 360 entries");
   } else {
     const headings = new Set<number>();
     value.compassDeviationTable.forEach((entry, index) => {
