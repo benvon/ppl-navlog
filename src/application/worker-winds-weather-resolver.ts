@@ -46,7 +46,9 @@ export const createWorkerWindsPlanWeatherResolver = (
       selectedForecastValidTimeUtc: loaded.forecastSelection.period.id,
       phaseWindResolver: createSampledPhaseWindResolver(loaded),
       loadedWindsData: loaded,
-      warnings: [],
+      warnings: loaded.provenance.forecast.cache.status === "stale_on_error"
+        ? ["Winds forecast was served from stale cache because the upstream refresh failed. Verify current official weather before flight."]
+        : [],
       provenance: weatherProvenance(loaded),
     };
   },

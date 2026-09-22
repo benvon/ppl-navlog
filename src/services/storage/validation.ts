@@ -34,6 +34,8 @@ const MAX_REASON_LENGTH = 500;
 const MAX_WARNINGS = 100;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ITEMS = 20_000;
+/** Worker timestamps may lead an individual browser clock slightly. */
+const EXTERNAL_RETRIEVAL_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const icaoPattern = /^[A-Z0-9]{4}$/;
 const utcPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -120,8 +122,8 @@ function schemaVersion(value: unknown, expected: number, path: string, issues: V
   if (value !== expected) add(issues, path, `must equal supported schema version ${expected}`);
 }
 
-function checkNoFutureTimestamp(value: string, path: string, issues: ValidationIssue[], now: Date): void {
-  if (Date.parse(value) > now.getTime()) add(issues, path, "must not be in the future");
+function checkNoFutureTimestamp(value: string, path: string, issues: ValidationIssue[], now: Date, toleranceMs = 0): void {
+  if (Date.parse(value) > now.getTime() + toleranceMs) add(issues, path, "must not be in the future");
 }
 
 function validateDeviationEntry(value: unknown, path: string, issues: ValidationIssue[]): value is CompassDeviationEntry {
@@ -417,7 +419,7 @@ export function validateWeatherReferenceSnapshot(value: unknown, now = new Date(
   schemaVersion(value.schemaVersion, PLAN_SCHEMA_VERSION, "$.schemaVersion", issues);
   identifier(value.id, "$.id", issues);
   requiredString(value.source, "$.source", issues);
-  if (utcInstant(value.retrievedAt, "$.retrievedAt", issues)) checkNoFutureTimestamp(value.retrievedAt, "$.retrievedAt", issues, now);
+  if (utcInstant(value.retrievedAt, "$.retrievedAt", issues)) checkNoFutureTimestamp(value.retrievedAt, "$.retrievedAt", issues, now, EXTERNAL_RETRIEVAL_CLOCK_SKEW_MS);
   if (!isJsonValue(value.payload)) add(issues, "$.payload", "must be finite JSON data within supported depth and collection limits");
   if (issues.length > 0) throw new StorageValidationError(issues);
   return true;

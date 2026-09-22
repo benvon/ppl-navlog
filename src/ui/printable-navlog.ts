@@ -33,6 +33,7 @@ export function createPrintableNavlog(revision: PlanRevision, weatherSnapshots: 
   sheet.append(boundarySection(child(snapshot, "phaseAllocation")));
   sheet.append(fuelSummary(child(navlog, "fuelSummary")));
   sheet.append(sourceSection(weatherSnapshots, revision));
+  sheet.append(warningsSection(revision.warnings));
   sheet.append(assumptionsSection(navlog.rows as Data[]));
   sheet.append(element("p", "Values are displayed rounded for readability; calculations and saved evidence retain unrounded values. Verify all data against current official sources before flight."));
   return sheet;
@@ -145,6 +146,16 @@ const assumptionsSection = (rows: readonly Data[]): HTMLElement => {
     overrides.forEach((override) => list.append(element("li", `Row ${index + 1} OVERRIDDEN ${string(override.input)}: ${decimal(override.computedValue)} to ${decimal(override.effectiveValue)}. Reason: ${string(override.reason)}`)));
   });
   if (list.childElementCount === 0) list.append(element("li", "No row-level assumptions or overrides recorded."));
+  section.append(list);
+  return section;
+};
+
+const warningsSection = (warnings: readonly string[]): HTMLElement => {
+  const section = element("section");
+  section.append(element("h2", "Planning warnings"));
+  const list = element("ul");
+  warnings.forEach((warning) => list.append(element("li", warning)));
+  if (warnings.length === 0) list.append(element("li", "No saved planning warnings."));
   section.append(list);
   return section;
 };

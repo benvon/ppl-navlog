@@ -89,6 +89,8 @@ describe("storage model validation", () => {
     expect(validateAircraftProfileSnapshot({ profile: aircraftProfile(), snapshottedAt: timestamp }, fixedNow)).toBe(true);
     expect(validatePlanFamily(planFamily(), fixedNow)).toBe(true);
     expect(validateWeatherReferenceSnapshot(weatherSnapshot(), fixedNow)).toBe(true);
+    expect(validateWeatherReferenceSnapshot({ ...weatherSnapshot(), retrievedAt: "2027-01-01T00:04:59.000Z" }, fixedNow)).toBe(true);
+    expect(() => validateWeatherReferenceSnapshot({ ...weatherSnapshot(), retrievedAt: "2027-01-01T00:05:01.000Z" }, fixedNow)).toThrow(/future/u);
     expect(validatePlanRevision(planRevision(), fixedNow)).toBe(true);
 
     const mismatched = { ...planRevision(), planId: "other-plan" };

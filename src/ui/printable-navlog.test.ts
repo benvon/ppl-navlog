@@ -32,4 +32,13 @@ describe("one-way print/PDF output", () => {
     expect(sheet?.querySelector("img")).toBeNull();
     expect(sheet?.textContent).toContain("<img src=x onerror=alert(1)>");
   });
+
+  it("includes saved weather warnings in the one-way output", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const revision = { ...fixture.revision, warnings: ["Winds forecast was served from stale cache because the upstream refresh failed."] };
+    const sheet = createPrintableNavlog(revision, fixture.weatherSnapshots);
+
+    expect(sheet?.textContent).toContain("Planning warnings");
+    expect(sheet?.textContent).toContain("stale cache");
+  });
 });

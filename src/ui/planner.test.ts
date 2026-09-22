@@ -649,4 +649,34 @@ describe("planner shell", () => {
     expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z" }));
     expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
   });
+
+  it("freezes controls while a calculation owns the saved draft", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    let finishCalculation: ((result: Awaited<ReturnType<BrowserPlanCalculator>>) => void) | undefined;
+    const calculatePlan: BrowserPlanCalculator = async () => new Promise((resolve) => { finishCalculation = resolve; });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    clickByLabel(root, "Resolve exact ICAO endpoints");
+    await settle();
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+
+    expect(input(root, "plan-title").disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("button")?.disabled).toBe(true);
+    if (finishCalculation === undefined) throw new Error("Calculation did not start.");
+    finishCalculation({ status: "blocked", reason: "weather-unavailable", message: "Selected winds are unavailable.", warnings: [] });
+    await settle();
+    expect(input(root, "plan-title").disabled).toBe(false);
+    expect(root.textContent).toContain("Navlog blocked: Selected winds are unavailable.");
+  });
 });

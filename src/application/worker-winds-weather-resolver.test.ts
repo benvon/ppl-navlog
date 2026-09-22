@@ -83,4 +83,19 @@ describe("Worker winds complete-plan resolver", () => {
 
     expect(result.loadedWindsData?.surfaceToAloftInterpolation).toBeUndefined();
   });
+
+  it("warns when the winds product is retained only because upstream refresh failed", async () => {
+    const staleForecast = forecast();
+    const staleProvenance = { ...staleForecast.provenance, cache: { ...staleForecast.provenance.cache, status: "stale_on_error" as const, source: "stale" as const, freshnessRemainingSeconds: 0 } };
+    const winds: WindsTransportClient = {
+      discoverStations: async () => discovery(),
+      fetchForecast: async () => ({ ...staleForecast, provenance: staleProvenance }),
+    };
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(winds), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-stale",
+    });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
+
+    await expect(resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] })).resolves.toMatchObject({ warnings: [expect.stringMatching(/stale cache/i)] });
+  });
 });

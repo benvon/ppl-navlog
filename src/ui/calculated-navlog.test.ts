@@ -32,6 +32,21 @@ describe("calculated visual flight log", () => {
     expect(renderCalculatedNavlog(revision)?.textContent).toContain("No flyable navlog was invented");
   });
 
+  it("prominently reports insufficient usable fuel and saved stale-weather warnings", () => {
+    const revision = {
+      ...planRevision(),
+      warnings: ["Winds forecast was served from stale cache because the upstream refresh failed."],
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: {},
+        navlog: { rows: [], fuelSummary: { requiredFuel: 13.5, enrouteFuel: 9.5, usableFuel: 12, usableFuelDifference: -1.5, sufficientUsableFuel: false } },
+      },
+    };
+    const rendered = renderCalculatedNavlog(revision);
+
+    expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("short 1.5 gal");
+    expect(rendered?.querySelector(".navlog-warnings")?.textContent).toContain("stale cache");
+  });
+
   it("exposes calculated cells as keyboard-operable inspector controls when wired", () => {
     const revision = {
       ...planRevision(),

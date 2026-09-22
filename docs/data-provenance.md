@@ -5,3 +5,5 @@ Every planning value records its effective value, origin, timestamp, and enough 
 Saved plans are immutable, linearly ordered journal revisions. Refreshing weather or recalculating from changed inputs creates the next journal entry rather than silently changing an existing plan. The browser retains raw weather only when needed to explain a selected plan or troubleshoot a result. A JSON recovery snapshot contains only the current route draft and selected aircraft profile; it is versioned, validated on import, and excludes credentials, weather evidence, calculations, and revision history.
 
 API responses contain a request ID and normalized cache/source provenance. The application validates transport payloads at its service boundary before mapping them to domain models, so an upstream contract change cannot silently corrupt calculation inputs.
+
+Externally retrieved weather timestamps allow up to five minutes of browser-to-Worker clock skew; locally authored timestamps remain strict. A `stale_on_error` winds response is retained as evidence but produces a visible saved warning in both the browser navlog and printable output.

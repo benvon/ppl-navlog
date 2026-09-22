@@ -38,12 +38,23 @@ export const renderCalculatedNavlog = (revision: PlanRevision, options: Calculat
     section.append(message);
     return section;
   }
+  return renderCalculatedResult(section, snapshot, navlog, revision, options);
+};
+
+const renderCalculatedResult = (
+  section: HTMLElement,
+  snapshot: RecordValue,
+  navlog: RecordValue,
+  revision: PlanRevision,
+  options: CalculatedNavlogViewOptions,
+): HTMLElement => {
+  const rows = navlog.rows as readonly RecordValue[];
   const table = document.createElement("table");
   const caption = document.createElement("caption");
   caption.textContent = "Calculated visual flight log — unrounded values are retained in each row's explanation";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
-  navlog.rows.forEach((row, index) => body.append(navlogRow(row, revision, index, options)));
+  rows.forEach((row, index) => body.append(navlogRow(row, revision, index, options)));
   table.append(body);
   const scroll = document.createElement("div");
   scroll.className = "navlog-table-scroll";
@@ -51,8 +62,41 @@ export const renderCalculatedNavlog = (revision: PlanRevision, options: Calculat
   const summary = nested(navlog, "fuelSummary");
   const fuel = document.createElement("p");
   fuel.textContent = `Fuel required including taxi/run-up and reserve: ${number(summary?.requiredFuel)} gal. Enroute: ${number(summary?.enrouteFuel)} gal.`;
-  section.append(scroll, fuel, details("Phase boundaries and weather selection", { phaseAllocation: snapshot.phaseAllocation, weather: snapshot.weather }));
+  section.append(scroll, fuel);
+  const usableFuel = usableFuelNotice(summary);
+  if (usableFuel !== undefined) section.append(usableFuel);
+  const warnings = revisionWarnings(revision);
+  if (warnings !== undefined) section.append(warnings);
+  section.append(details("Phase boundaries and weather selection", { phaseAllocation: snapshot.phaseAllocation, weather: snapshot.weather }));
   if (snapshot.weatherRefreshComparison !== undefined) section.append(details("Weather refresh comparison with parent revision", snapshot.weatherRefreshComparison));
+  return section;
+};
+
+const usableFuelNotice = (summary: RecordValue | undefined): HTMLElement | undefined => {
+  if (typeof summary?.usableFuel !== "number" || typeof summary.usableFuelDifference !== "number") return undefined;
+  const notice = document.createElement("p");
+  if (summary.sufficientUsableFuel === false) {
+    notice.className = "navlog-fuel-warning";
+    notice.textContent = `WARNING: Usable fuel is ${number(summary.usableFuel)} gal; this plan is short ${number(Math.abs(summary.usableFuelDifference))} gal of required fuel.`;
+  } else {
+    notice.textContent = `Usable fuel: ${number(summary.usableFuel)} gal; margin above required fuel: ${number(summary.usableFuelDifference)} gal.`;
+  }
+  return notice;
+};
+
+const revisionWarnings = (revision: PlanRevision): HTMLElement | undefined => {
+  if (revision.warnings.length === 0) return undefined;
+  const section = document.createElement("section");
+  section.className = "navlog-warnings";
+  const heading = document.createElement("h3");
+  heading.textContent = "Planning warnings";
+  const list = document.createElement("ul");
+  revision.warnings.forEach((warning) => {
+    const item = document.createElement("li");
+    item.textContent = warning;
+    list.append(item);
+  });
+  section.append(heading, list);
   return section;
 };
 

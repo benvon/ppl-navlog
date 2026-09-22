@@ -63,6 +63,8 @@ interface PlannerState {
   readonly hasUnsavedForecastSelection: boolean;
   readonly revisions: readonly PlanRevision[];
   readonly families: readonly PlanFamily[];
+  /** An async operation owns the current form snapshot until it resolves. */
+  readonly pendingOperation?: string;
 }
 
 interface RouteFormValues {
@@ -115,6 +117,11 @@ class Planner {
       navlog: this.renderNavlogPanel(),
       inspector: this.renderInspector(),
     }));
+    if (this.state.pendingOperation !== undefined) {
+      this.content.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button").forEach((control) => {
+        control.disabled = true;
+      });
+    }
   }
 
   private renderProfilePanel(): HTMLElement {
@@ -335,8 +342,9 @@ class Planner {
       if (winds === undefined) throw new Error("Live winds selection is unavailable.");
       const points = routePoints(this.state);
       if (points.length < 2) throw new Error("Resolve the route endpoints before loading winds periods.");
+      if (!this.beginInputTransaction("Loading published winds periods…")) return;
       const discovery = await winds.discoverStations(points.map((point) => point.coordinate));
-      this.state = { ...this.state, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = { ...this.state, pendingOperation: undefined, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
       this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
       this.render();
     } catch (error) {
@@ -516,12 +524,16 @@ class Planner {
   private async handleResolveAirports(form: HTMLFormElement): Promise<void> {
     try {
       const routeForm = routeFormFromElement(form);
+      const departureIcao = inputValue(form, "departure-icao");
+      const destinationIcao = inputValue(form, "destination-icao");
+      if (!this.beginInputTransaction("Resolving exact ICAO endpoints…")) return;
       const [departure, destination] = await Promise.all([
-        this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "departure-icao")),
-        this.dependencies.airportLookup.lookupExactIcao(inputValue(form, "destination-icao")),
+        this.dependencies.airportLookup.lookupExactIcao(departureIcao),
+        this.dependencies.airportLookup.lookupExactIcao(destinationIcao),
       ]);
       this.state = {
         ...this.state,
+        pendingOperation: undefined,
         departure,
         destination,
         routeForm: {
@@ -648,15 +660,16 @@ class Planner {
         throw new Error("Save this historical revision as a new journal entry before calculating.");
       }
       if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+      if (!this.beginInputTransaction("Calculating complete navlog…")) return;
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
         this.feedback.textContent = `Navlog blocked: ${result.message}`;
-        this.state = { ...this.state, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
         this.render();
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, pendingOperation: undefined, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Calculated and saved complete navlog revision ${result.revision.id}.`;
@@ -681,15 +694,16 @@ class Planner {
         selectedTime,
         this.dependencies.clock,
       );
+      if (!this.beginInputTransaction("Refreshing weather and recalculating…")) return;
       const result = await refresh(parent, selectedDraft.weatherSelection);
       if (result.status === "blocked") {
         this.feedback.textContent = `Weather refresh blocked: ${result.message}`;
-        this.state = { ...this.state, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
         this.render();
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, pendingOperation: undefined, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.feedback.textContent = `Weather refreshed in immutable revision ${result.revision.id}; compare it with its parent in Saved revision history.`;
@@ -777,7 +791,19 @@ class Planner {
   }
 
   private reportError(error: unknown): void {
+    const hadPendingOperation = this.state.pendingOperation !== undefined;
+    if (hadPendingOperation) this.state = { ...this.state, pendingOperation: undefined };
     this.feedback.textContent = error instanceof Error ? error.message : "The requested action could not be completed.";
+    if (hadPendingOperation) this.render();
+  }
+
+  /** Locks all controls so an asynchronous result cannot overwrite a newer edit. */
+  private beginInputTransaction(message: string): boolean {
+    if (this.state.pendingOperation !== undefined) return false;
+    this.state = { ...this.state, pendingOperation: message };
+    this.feedback.textContent = message;
+    this.render();
+    return true;
   }
 
   private syncRouteFormInput(event: Event): void {

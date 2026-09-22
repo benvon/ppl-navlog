@@ -4,6 +4,15 @@ body {
 }
 
 .planner-feedback { min-height: 1.5rem; color: var(--color-ink); }
+.navlog-fuel-warning,
+.navlog-warnings {
+  padding: var(--space-2);
+  border-inline-start: 0.3rem solid #a63d00;
+  background: #fff2e8;
+  color: #5b2300;
+  font-weight: 700;
+}
+.navlog-warnings h3 { margin: 0; }
 
 .planner-panel {
   min-width: 0;
