@@ -43,6 +43,8 @@ interface PlannerState {
   readonly profiles: readonly AircraftProfile[];
   /** Undefined defers to an opened draft; null is the user's explicit no-profile choice. */
   readonly selectedProfileId?: string | null;
+  /** A reopened revision keeps its captured profile effective until the pilot explicitly changes it. */
+  readonly useRevisionProfileSnapshot: boolean;
   readonly routeForm: RouteFormValues;
   readonly descentTargetIsManual: boolean;
   readonly departure?: AirportRoutePoint;
@@ -86,7 +88,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], invalidCruiseAltitudeIndexes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], invalidCruiseAltitudeIndexes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false, useRevisionProfileSnapshot: false };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -154,6 +156,7 @@ class Planner {
       this.state = {
         ...this.state,
         selectedProfileId: select.value === "" ? null : select.value,
+        useRevisionProfileSnapshot: false,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
@@ -520,6 +523,7 @@ class Planner {
           ? [...this.state.profiles, profile]
           : this.state.profiles.map((candidate) => candidate.id === profile.id ? profile : candidate),
         selectedProfileId: profile.id,
+        useRevisionProfileSnapshot: false,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
@@ -618,14 +622,14 @@ class Planner {
   private async handleSaveDraft(form: HTMLFormElement): Promise<void> {
     try {
       this.requireValidCruiseAltitudes("saving a plan");
-      const profile = this.selectedProfile();
+      const profile = this.profileForSave();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
       const { draft, departure, destination } = this.draftForSave(form, profile);
       const selectedDraft = this.draftWithSelectedForecast(draft);
       const saveTarget = this.journalSaveTarget();
       if (!this.beginInputTransaction("Saving new plan revision…")) return;
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, ...saveTarget);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false, useRevisionProfileSnapshot: true };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -701,7 +705,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false, useRevisionProfileSnapshot: true };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -736,7 +740,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false, useRevisionProfileSnapshot: true };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -758,13 +762,16 @@ class Planner {
     return selectedId === undefined ? undefined : this.state.profiles.find((profile) => profile.id === selectedId);
   }
 
-  /** Immutable revisions always calculate from the captured aircraft values. */
-  private effectiveProfile(): AircraftProfile | undefined {
+  private profileForSave(): AircraftProfile | undefined {
     const revision = this.state.currentRevision;
-    if (revision !== undefined && !this.state.hasUnsavedChanges && !this.state.hasUnsavedForecastSelection) {
-      return revision.aircraftProfileSnapshot.profile;
-    }
-    return this.selectedProfile();
+    return revision !== undefined && this.state.useRevisionProfileSnapshot
+      ? revision.aircraftProfileSnapshot.profile
+      : this.selectedProfile();
+  }
+
+  /** Immutable revisions keep their captured aircraft values effective until explicitly changed. */
+  private effectiveProfile(): AircraftProfile | undefined {
+    return this.profileForSave();
   }
 
   private requireValidCruiseAltitudes(action: "saving a plan" | "calculating"): void {
@@ -799,6 +806,7 @@ class Planner {
         weatherSnapshots,
         calculationPreview: undefined,
         selectedProfileId: reopened.draftSnapshot.selectedAircraftProfileId,
+        useRevisionProfileSnapshot: true,
         departure: firstAirport(reopened.draftSnapshot.route.points),
         destination: lastAirport(reopened.draftSnapshot.route.points),
         checkpoints: reopened.draftSnapshot.route.points.filter((point): point is CheckpointRoutePoint => point.kind === "checkpoint"),

@@ -693,6 +693,12 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(reopenedRoot, "Open Snapshot route");
     await settle();
+    clickByLabel(reopenedRoot, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.aircraftProfileSnapshot.profile).toMatchObject({
+      name: "Snapshot aircraft",
+      cruiseTasKnots: 95,
+    });
     clickByLabel(reopenedRoot, "Calculate complete navlog");
     await settle();
 
@@ -702,6 +708,16 @@ describe("planner shell", () => {
       expect.anything(),
     );
     expect(reopenedRoot.textContent).toContain("Navlog blocked: Test calculation");
+
+    const selector = reopenedRoot.querySelector<HTMLSelectElement>("select[name='selected-profile']");
+    if (selector === null) throw new Error("Profile selector was not rendered.");
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    clickByLabel(reopenedRoot, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.aircraftProfileSnapshot.profile).toMatchObject({
+      name: "Snapshot aircraft",
+      cruiseTasKnots: 120,
+    });
   });
 
   it("clears the selected aircraft profile when the placeholder is chosen", async () => {
