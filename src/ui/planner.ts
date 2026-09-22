@@ -43,6 +43,8 @@ interface PlannerState {
   readonly profiles: readonly AircraftProfile[];
   /** Undefined defers to an opened draft; null is the user's explicit no-profile choice. */
   readonly selectedProfileId?: string | null;
+  /** Raw aircraft form values survive unrelated planner renders until saved or a profile is selected. */
+  readonly profileDraft?: Readonly<Record<string, string>>;
   readonly routeForm: RouteFormValues;
   readonly descentTargetIsManual: boolean;
   readonly departure?: AirportRoutePoint;
@@ -131,27 +133,16 @@ class Planner {
     const section = panel("Aircraft profile", "Pilot-entered values are defaults only; they are not claimed as POH data.");
     const form = document.createElement("form");
     form.className = "profile-form";
-    const fields: ReadonlyArray<readonly [string, string, string]> = [
-      ["profile-name", "Profile name", "Study aircraft"],
-      ["cruise-tas", "Cruise TAS (kt)", "95"],
-      ["cruise-fuel", "Cruise fuel flow (gph)", "6"],
-      ["climb-rate", "Climb rate (fpm)", "500"],
-      ["climb-tas", "Climb TAS (kt)", "75"],
-      ["climb-fuel", "Climb fuel flow (gph)", "7"],
-      ["descent-rate", "Descent rate (fpm)", "500"],
-      ["descent-tas", "Descent TAS (kt)", "100"],
-      ["descent-fuel", "Descent fuel flow (gph)", "5"],
-      ["usable-fuel", "Usable fuel (gal, optional)", ""],
-      ["compass-deviation-card", "Compass deviation card (magnetic heading: signed degrees)", "000: 0"],
-    ];
+    const fields = profileFields(this.effectiveProfile(), this.state.profileDraft);
     fields.forEach(([id, label, value]) => form.append(labeledInput(id, label, value, id === "profile-name" || id === "compass-deviation-card" ? "text" : "number")));
     form.append(text("p", "Enter card points such as 000:+1, 090:-1. A single point applies a constant deviation at every heading. The default 000: 0 is an explicit study-only zero-deviation assumption; replace it with the aircraft’s compass-deviation card when available."));
-    form.append(button("Save aircraft profile", "submit"));
+    form.append(button(this.selectedProfile() === undefined ? "Save aircraft profile" : "Save new aircraft profile version", "submit"));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.handleSaveProfile(form);
     });
-    section.append(form, this.renderProfileSelect());
+    form.addEventListener("input", (event) => this.syncProfileFormInput(event));
+    section.append(form, this.renderProfileSelect(), text("p", "Aircraft profiles are immutable inputs. Saving changes to a selected profile creates a new version; existing plan revisions continue to use their original profile."));
     return section;
   }
 
@@ -161,16 +152,17 @@ class Planner {
     const select = document.createElement("select");
     select.name = "selected-profile";
     select.append(new Option("Choose a saved profile", ""));
-    this.state.profiles.forEach((profile) => select.append(new Option(profile.name, profile.id, false, profile.id === this.selectedProfileId())));
+    this.state.profiles.forEach((profile) => select.append(new Option(profileOptionLabel(profile), profile.id, false, profile.id === this.selectedProfileId())));
     select.addEventListener("change", () => {
       this.state = {
         ...this.state,
         selectedProfileId: select.value === "" ? null : select.value,
+        profileDraft: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
       this.feedback.textContent = select.value === ""
-        ? "No aircraft profile selected. Select one before saving or calculating."
+        ? "No aircraft profile selected. New aircraft profile form selected; enter its values, then save it before planning."
         : this.state.draft === undefined
           ? "Selected aircraft profile."
           : "Aircraft profile changed. Save a new revision before calculating; prior per-leg overrides will be cleared.";
@@ -373,7 +365,7 @@ class Planner {
       }
     }
     if (this.state.currentRevision !== undefined) {
-      if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) section.append(text("p", "Viewing the saved revision. Route, aircraft, altitude, or forecast edits are unsaved and cannot be calculated until saved."));
+      if (this.hasUnsavedPlanInputs()) section.append(text("p", "Viewing the saved revision. Route, aircraft, altitude, or forecast edits are unsaved and cannot be calculated until saved."));
       const calculated = renderCalculatedNavlog(this.state.currentRevision, {
         selected: this.state.inspectedCalculation,
         onInspect: (selection) => this.inspectCalculation(selection),
@@ -389,7 +381,7 @@ class Planner {
         return section;
       }
     }
-    const profile = this.selectedProfile();
+    const profile = this.effectiveProfile();
     const table = document.createElement("table");
     table.append(createNavlogHeader());
     const body = document.createElement("tbody");
@@ -442,7 +434,7 @@ class Planner {
     const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source. Per-leg aircraft defaults and overrides are controlled separately below.");
     section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
     const draft = this.state.draft;
-    const profile = this.selectedProfile();
+    const profile = this.effectiveProfile();
     const leg = draft?.route.legs.find((candidate) => candidate.id === this.state.inspectedLegId) ?? draft?.route.legs[0];
     if (draft === undefined || profile === undefined || leg === undefined) {
       section.append(text("p", "Select an aircraft profile and save a route draft to inspect its performance defaults."));
@@ -522,12 +514,25 @@ class Planner {
   private async handleSaveProfile(form: HTMLFormElement): Promise<void> {
     try {
       const input = profileInputFromForm(form);
+      const existingProfile = this.selectedProfile();
       if (!this.beginInputTransaction("Saving aircraft profile…")) return;
       const profile = await saveAircraftProfile(this.dependencies.persistence, input, this.dependencies.ids, this.dependencies.clock);
-      this.state = { ...this.state, pendingOperation: undefined, profiles: [...this.state.profiles, profile], selectedProfileId: profile.id, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
-      this.feedback.textContent = this.state.draft === undefined
-        ? `Saved aircraft profile ${profile.name}.`
-        : `Saved and selected aircraft profile ${profile.name}. Save a new journal revision before calculating.`;
+      this.state = {
+        ...this.state,
+        pendingOperation: undefined,
+        profiles: [...this.state.profiles, profile],
+        selectedProfileId: profile.id,
+        profileDraft: undefined,
+        hasUnsavedChanges: this.state.draft !== undefined,
+        calculationPreview: undefined,
+      };
+      this.feedback.textContent = existingProfile === undefined
+        ? this.state.draft === undefined
+          ? `Saved aircraft profile ${profile.name}.`
+          : `Saved and selected aircraft profile ${profile.name}. Save a new journal revision before calculating.`
+        : this.state.draft === undefined
+          ? `Saved new aircraft profile version ${profile.name}.`
+          : `Saved new aircraft profile version ${profile.name}. Save a new journal revision before calculating.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -616,6 +621,7 @@ class Planner {
   private async handleSaveDraft(form: HTMLFormElement): Promise<void> {
     try {
       this.requireValidCruiseAltitudes("saving a plan");
+      if (this.state.profileDraft !== undefined) throw new Error("Save the aircraft profile version before saving a plan.");
       const profile = this.selectedProfile();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
       const { draft, departure, destination } = this.draftForSave(form, profile);
@@ -682,13 +688,14 @@ class Planner {
     try {
       const calculatePlan = this.dependencies.calculatePlan;
       const draft = this.state.draft;
-      const profile = this.selectedProfile();
-      if (calculatePlan === undefined || draft === undefined || profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
+      if (calculatePlan === undefined || draft === undefined) throw new Error("Save the route and aircraft profile before calculating.");
       if (this.state.currentRevision !== undefined && this.currentJournalHead(this.state.currentRevision.planId)?.id !== this.state.currentRevision.id) {
         throw new Error("Save this historical revision as a new journal entry before calculating.");
       }
       this.requireValidCruiseAltitudes("calculating");
-      if (this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+      if (this.hasUnsavedPlanInputs()) throw new Error("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+      const profile = this.effectiveProfile();
+      if (profile === undefined) throw new Error("Save the route and aircraft profile before calculating.");
       if (!this.beginInputTransaction("Calculating complete navlog…")) return;
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
@@ -716,7 +723,7 @@ class Planner {
       const selectedTime = this.state.selectedForecastValidTimeUtc;
       if (refresh === undefined || parent === undefined) throw new Error("Open a calculated revision before refreshing weather.");
       if (this.currentJournalHead(parent.planId)?.id !== parent.id) throw new Error("Save this historical revision as a new journal entry before refreshing weather.");
-      if (this.state.hasUnsavedChanges) throw new Error("Save or discard current route, aircraft, or altitude edits before refreshing weather.");
+      if (this.state.hasUnsavedChanges || this.state.profileDraft !== undefined) throw new Error("Save or discard current route, aircraft, or altitude edits before refreshing weather.");
       if (selectedTime === undefined) throw new Error("Load published winds periods and choose a forecast before refreshing weather.");
       const selectedDraft = selectPlanWeatherForecast(
         parent.draftSnapshot,
@@ -755,6 +762,17 @@ class Planner {
     return selectedId === undefined ? undefined : this.state.profiles.find((profile) => profile.id === selectedId);
   }
 
+  /** A clean revision renders and calculates from its own immutable profile snapshot. */
+  private effectiveProfile(): AircraftProfile | undefined {
+    const revision = this.state.currentRevision;
+    if (revision !== undefined && !this.state.hasUnsavedChanges && !this.state.hasUnsavedForecastSelection) return revision.aircraftProfileSnapshot.profile;
+    return this.selectedProfile();
+  }
+
+  private hasUnsavedPlanInputs(): boolean {
+    return this.state.hasUnsavedChanges || this.state.hasUnsavedForecastSelection || this.state.profileDraft !== undefined;
+  }
+
   private requireValidCruiseAltitudes(action: "saving a plan" | "calculating"): void {
     if (this.state.invalidCruiseAltitudeIndexes.length > 0) throw new Error(`Correct each highlighted cruise altitude before ${action}.`);
   }
@@ -787,6 +805,7 @@ class Planner {
         weatherSnapshots,
         calculationPreview: undefined,
         selectedProfileId: reopened.draftSnapshot.selectedAircraftProfileId,
+        profileDraft: undefined,
         departure: firstAirport(reopened.draftSnapshot.route.points),
         destination: lastAirport(reopened.draftSnapshot.route.points),
         checkpoints: reopened.draftSnapshot.route.points.filter((point): point is CheckpointRoutePoint => point.kind === "checkpoint"),
@@ -842,6 +861,12 @@ class Planner {
     this.feedback.textContent = message;
     this.render();
     return true;
+  }
+
+  private syncProfileFormInput(event: Event): void {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !isProfileField(input.name)) return;
+    this.state = { ...this.state, profileDraft: { ...this.state.profileDraft, [input.name]: input.value } };
   }
 
   private syncRouteFormInput(event: Event): void {
@@ -1077,6 +1102,49 @@ function routeFormFromElement(form: HTMLFormElement): RouteFormValues {
 function inputValue(form: HTMLFormElement, name: string): string {
   const element = form.elements.namedItem(name);
   return element instanceof HTMLInputElement ? element.value : "";
+}
+
+const DEFAULT_PROFILE_FIELDS: ReadonlyArray<readonly [string, string, string]> = [
+  ["profile-name", "Profile name", "Study aircraft"],
+  ["cruise-tas", "Cruise TAS (kt)", "95"],
+  ["cruise-fuel", "Cruise fuel flow (gph)", "6"],
+  ["climb-rate", "Climb rate (fpm)", "500"],
+  ["climb-tas", "Climb TAS (kt)", "75"],
+  ["climb-fuel", "Climb fuel flow (gph)", "7"],
+  ["descent-rate", "Descent rate (fpm)", "500"],
+  ["descent-tas", "Descent TAS (kt)", "100"],
+  ["descent-fuel", "Descent fuel flow (gph)", "5"],
+  ["usable-fuel", "Usable fuel (gal, optional)", ""],
+  ["compass-deviation-card", "Compass deviation card (magnetic heading: signed degrees)", "000: 0"],
+];
+
+function profileFields(profile: AircraftProfile | undefined, draft: Readonly<Record<string, string>> | undefined): ReadonlyArray<readonly [string, string, string]> {
+  const source = profile === undefined ? DEFAULT_PROFILE_FIELDS : [
+    ["profile-name", "Profile name", profile.name],
+    ["cruise-tas", "Cruise TAS (kt)", String(profile.cruiseTasKnots)],
+    ["cruise-fuel", "Cruise fuel flow (gph)", String(profile.cruiseFuelFlowGallonsPerHour)],
+    ["climb-rate", "Climb rate (fpm)", String(profile.climbRateFeetPerMinute)],
+    ["climb-tas", "Climb TAS (kt)", String(profile.climbTasKnots)],
+    ["climb-fuel", "Climb fuel flow (gph)", String(profile.climbFuelFlowGallonsPerHour)],
+    ["descent-rate", "Descent rate (fpm)", String(profile.descentRateFeetPerMinute)],
+    ["descent-tas", "Descent TAS (kt)", String(profile.descentTasKnots)],
+    ["descent-fuel", "Descent fuel flow (gph)", String(profile.descentFuelFlowGallonsPerHour)],
+    ["usable-fuel", "Usable fuel (gal, optional)", profile.usableFuelGallons === undefined ? "" : String(profile.usableFuelGallons)],
+    ["compass-deviation-card", "Compass deviation card (magnetic heading: signed degrees)", formatCompassDeviationCard(profile.compassDeviationTable)],
+  ];
+  return source.map(([id, label, value]) => [id, label, draft?.[id] ?? value]);
+}
+
+function isProfileField(name: string): boolean {
+  return DEFAULT_PROFILE_FIELDS.some(([id]) => id === name);
+}
+
+function profileOptionLabel(profile: AircraftProfile): string {
+  return `${profile.name} — ${profile.cruiseTasKnots} kt, ${profile.cruiseFuelFlowGallonsPerHour} gph · saved ${profile.createdAt}`;
+}
+
+function formatCompassDeviationCard(entries: readonly CompassDeviationEntry[]): string {
+  return entries.map(({ magneticHeadingDegrees, deviationDegrees }) => `${String(magneticHeadingDegrees).padStart(3, "0")}: ${deviationDegrees}`).join(", ");
 }
 
 function dateTimeLocalToUtc(value: string): string {

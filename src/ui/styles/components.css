@@ -4,6 +4,13 @@ body {
 }
 
 .planner-feedback { min-height: 1.5rem; color: var(--color-ink); }
+.planner-feedback:not(:empty) {
+  margin-block: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-inline-start: 0.3rem solid var(--color-focus);
+  background: var(--color-surface);
+  font-weight: 600;
+}
 .navlog-fuel-warning,
 .navlog-warnings {
   padding: var(--space-2);

@@ -36,7 +36,7 @@ export class StaticAirportLookup implements AirportLookup {
 export function normalizeIcao(icao: string): string {
   const normalized = icao.trim().toUpperCase();
   if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new AirportLookupError("Enter an exact four-character ICAO identifier.");
+    throw new AirportLookupError("Enter a four-character ICAO identifier (for example KORD). FAA location identifiers such as 1C8 are not supported in v1.");
   }
   return normalized;
 }

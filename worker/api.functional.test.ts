@@ -18,6 +18,17 @@ FT  3000    6000    9000   12000   18000   24000  30000  34000  39000
 ABQ              9900+16 9900+07 2310-08 2322-19 253535 264844 256654
 `;
 
+const STATION_CATALOG = [
+  { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 },
+];
+
+async function stationCatalogResponse(): Promise<Response> {
+  const encoded = new TextEncoder().encode(JSON.stringify(STATION_CATALOG));
+  const source = new ReadableStream<BufferSource>({ start(controller) { controller.enqueue(encoded); controller.close(); } });
+  const compressed = source.pipeThrough(new CompressionStream('gzip'));
+  return new Response(await new Response(compressed).arrayBuffer());
+}
+
 function memoryCache(): CacheStore {
   const entries = new Map<string, Response>();
   return {
@@ -55,9 +66,7 @@ function aviationWeatherFetch(fetches: Request[]): typeof globalThis.fetch {
           : WINDS_PRODUCT;
       return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
     }
-    if (url.pathname === '/api/data/stationinfo') return Response.json([
-      { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 }
-    ]);
+    if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
     return new Response(null, { status: 404 });
   };
 }
@@ -144,7 +153,7 @@ describe('Worker API functional contracts', () => {
       requestId: FIXED_REQUEST_ID
     });
     expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
-    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/stationinfo')).toHaveLength(1);
+    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
   });
 
   it('serves the selected forecast and raw official product without a live network dependency', async () => {
