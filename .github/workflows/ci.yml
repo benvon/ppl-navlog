@@ -10,14 +10,19 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  queue: max
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.release.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -27,6 +32,14 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Determine release candidate version
+        if: github.event_name == 'push'
+        id: release
+        run: node scripts/rc-version.mjs
+
+      - name: Test release version logic
+        run: npx vitest run scripts/rc-version.test.mjs
 
       - name: Typecheck
         run: npm run typecheck
@@ -42,7 +55,7 @@ jobs:
 
       - name: Build immutable artifact
         env:
-          VITE_APP_VERSION: pr-${{ github.event.pull_request.number || github.run_number }}
+          VITE_APP_VERSION: ${{ steps.release.outputs.version || format('pr-{0}', github.event.pull_request.number) }}
           VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run build
 
@@ -54,7 +67,76 @@ jobs:
       - name: Upload validated static artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: static-assets-${{ github.sha }}
+          name: static-assets-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           path: dist/
           retention-days: 14
+
+  deploy_development:
+    name: Deploy development
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: development
+      url: https://navlog.benvon.dev
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Verify deployment prerequisites
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Development Cloudflare token is missing.' >&2; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Development Cloudflare account ID is missing.' >&2; exit 1; }
+          test -n "$RELEASE_VERSION" || { echo 'Release version is missing.' >&2; exit 1; }
+
+      - name: Install deployment tooling
+        run: npm ci
+
+      - name: Download validated artifact from this CI run
+        env:
+          ARTIFACT_NAME: static-assets-${{ github.run_id }}-${{ github.run_attempt }}
+        run: gh run download "$GITHUB_RUN_ID" --name "$ARTIFACT_NAME" --dir dist
+
+      - name: Verify artifact identity
+        run: node scripts/verify-deployment-artifact.mjs
+
+      - name: Deploy to development
+        run: npx wrangler deploy --env development --var "APP_ENV:development" --var "APP_VERSION:$RELEASE_VERSION" --var "APP_COMMIT_SHA:$GITHUB_SHA"
+
+      - name: Smoke deployed application
+        run: node scripts/smoke-development.mjs
+
+      - name: Tag verified release candidate
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_VERSION"; then
+            test "$(git rev-list -n 1 "$RELEASE_VERSION")" = "$GITHUB_SHA" || { echo 'RC tag points to another commit.' >&2; exit 1; }
+          else
+            git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -a "$RELEASE_VERSION" -m "Development release $RELEASE_VERSION" "$GITHUB_SHA"
+            git push origin "refs/tags/$RELEASE_VERSION"
+          fi
+
+      - name: Publish GitHub prerelease
+        run: |
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            echo 'Release candidate already published for this run.'
+          else
+            gh release create "$RELEASE_VERSION" --verify-tag --prerelease --latest=false --title "$RELEASE_VERSION" --notes "Development release candidate for $GITHUB_SHA, deployed and smoke-tested at https://navlog.benvon.dev."
+          fi

@@ -13,6 +13,7 @@ export interface Env {
   };
   APP_VERSION?: string;
   APP_COMMIT_SHA?: string;
+  APP_ENV?: string;
   RUNWAY_PICKER_API?: ServiceFetcher;
   RUNWAY_PICKER_ORIGIN?: string;
   WINDS_CACHE?: CacheStore;
@@ -45,9 +46,17 @@ export default {
 
     if (url.pathname.startsWith(API_PATH_PREFIX)) {
       const requestId = createRequestId(request);
+      if (env.APP_ENV === 'development' && !env.API_RATE_LIMITER) {
+        return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
+      }
       if (env.API_RATE_LIMITER) {
         const sourceKey = request.headers.get('CF-Connecting-IP') ?? 'unattributed';
-        const decision = await env.API_RATE_LIMITER.limit({ key: sourceKey });
+        let decision: { success: boolean };
+        try {
+          decision = await env.API_RATE_LIMITER.limit({ key: sourceKey });
+        } catch {
+          return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
+        }
         if (!decision.success) return errorResponse(errorPayload(new ApiError('Too many requests. Please retry shortly.', 429, 'rate_limited'), requestId), 429);
       }
       const aviationData = env.RUNWAY_PICKER_API

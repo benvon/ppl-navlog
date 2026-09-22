@@ -41,6 +41,21 @@ describe('Worker foundation', () => {
     await expect(response.json()).resolves.toMatchObject({ code: 'rate_limited' });
   });
 
+  it('fails closed when development rate limiting is absent or unavailable', async () => {
+    const request = new Request('https://example.test/api/health');
+    const missing = await worker.fetch(request, { ...env, APP_ENV: 'development' });
+    expect(missing.status).toBe(503);
+    await expect(missing.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+
+    const failed = await worker.fetch(request, {
+      ...env,
+      APP_ENV: 'development',
+      API_RATE_LIMITER: { async limit() { throw new Error('provider unavailable'); } }
+    });
+    expect(failed.status).toBe(503);
+    await expect(failed.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+  });
+
   it('adds security headers to static asset responses', async () => {
     const response = await worker.fetch(new Request('https://example.test/'), env);
 
