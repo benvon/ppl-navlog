@@ -250,13 +250,13 @@ function parseStationInfo(value: unknown): Map<string, StationInfo> {
   return result;
 }
 
-async function stationInfo(fetcher: ServiceFetcher, stationIds: readonly string[]): Promise<Map<string, StationInfo>> {
+async function stationInfo(fetcher: ServiceFetcher, region: WindsRegion, stationIds: readonly string[]): Promise<Map<string, StationInfo>> {
   const result = new Map<string, StationInfo>();
-  // The FB product identifies domestic reporting sites with three-character
-  // station IDs (for example ORD), but AWC's station-info endpoint currently
-  // resolves those sites by their four-character ICAO identifiers (KORD).
-  // All V1 forecast regions are within the FAA K-prefix namespace.
-  const icaoIds = stationIds.map((stationId) => `K${stationId}`);
+  // The FB product identifies reporting sites with three-character station
+  // IDs (for example ORD), while station-info resolves their ICAO codes.
+  // The V1 contiguous-US product uses K; Alaska and Hawaii use P.
+  const icaoPrefix = region === 'us' ? 'K' : 'P';
+  const icaoIds = stationIds.map((stationId) => `${icaoPrefix}${stationId}`);
   for (let start = 0; start < icaoIds.length; start += MAX_STATION_IDS_PER_REQUEST) {
     const ids = icaoIds.slice(start, start + MAX_STATION_IDS_PER_REQUEST);
     const url = new URL('/api/data/stationinfo', AVIATION_WEATHER_ORIGIN);
@@ -330,7 +330,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         stationForecasts.set(forecast.stationId, forecast);
         availability.set(key, stationForecasts);
       }
-      const stationsById = await stationInfo(fetcher, [...stationCycles.keys()].sort());
+      const stationsById = await stationInfo(fetcher, region, [...stationCycles.keys()].sort());
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
         const info = stationsById.get(id);
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
@@ -356,7 +356,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       for (const item of await allProducts(region)) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
       if (matches.length !== 1) throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
       const match = matches[0] as { forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance };
-      const info = await stationInfo(fetcher, [station]);
+      const info = await stationInfo(fetcher, region, [station]);
       const stationInfoValue = info.get(station);
       if (!stationInfoValue) throw new ApiError('The requested Winds/Temps station does not have verified Aviation Weather Center coordinates.', 502, 'upstream_invalid_response');
       const windsStation: WindsStation = { id: station, name: stationInfoValue.name, coordinates: stationInfoValue.coordinates, elevationFt: stationInfoValue.elevationFt, region: match.product.region, availableForecastCycles: [match.forecast.forecastCycle], source: 'aviationweather' };

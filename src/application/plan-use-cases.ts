@@ -86,8 +86,10 @@ export async function saveAircraftProfile(
   const profile = existingProfile === undefined
     ? createAircraftProfile(input, ids, clock)
     : {
-      ...existingProfile,
+      schemaVersion: existingProfile.schemaVersion,
+      id: existingProfile.id,
       ...input,
+      createdAt: existingProfile.createdAt,
       updatedAt: clock.now().toISOString(),
     };
   await persistence.saveAircraftProfile(profile);

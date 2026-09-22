@@ -174,6 +174,15 @@ describe("plan draft use cases", () => {
     await expect(persistence.listAircraftProfiles()).resolves.toEqual([updated]);
   });
 
+  it("removes optional usable fuel when a selected profile is updated without it", async () => {
+    const persistence = new MemoryPersistence();
+    const created = await saveAircraftProfile(persistence, { ...profileInput(), usableFuelGallons: 24 }, ids("aircraft-1"), fixedClock);
+    const updated = await saveAircraftProfile(persistence, profileInput(), ids("unused-id"), fixedClock, created);
+
+    expect(updated.usableFuelGallons).toBeUndefined();
+    await expect(persistence.getAircraftProfile(updated.id)).resolves.toEqual(expect.not.objectContaining({ usableFuelGallons: expect.anything() }));
+  });
+
   it("persists only an explicitly selected, departure-valid forecast period", async () => {
     const airports = createLocalStudyAirportLookup();
     const departure = await airports.lookupExactIcao("KORD");

@@ -93,6 +93,29 @@ describe('Aviation Weather Center adapter', () => {
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
   });
 
+  it('uses P-prefixed ICAO identifiers for Alaska and Hawaii station metadata', async () => {
+    const regionalProduct = PRODUCT.replace(/^ABQ/gm, 'ANC');
+    const requests: Request[] = [];
+    const regionalFetcher: ServiceFetcher = { async fetch(request) {
+      requests.push(request);
+      const url = new URL(request.url);
+      if (url.pathname === '/api/data/windtemp') return new Response(regionalProduct, { headers: { 'Content-Type': 'text/plain' } });
+      if (url.pathname === '/api/data/stationinfo') return Response.json([
+        { iataId: 'ANC', faaId: 'ANC', icaoId: 'PANC', site: 'Anchorage', lat: 61.1743, lon: -149.9964, elev: 152 },
+      ]);
+      return new Response(null, { status: 404 });
+    } };
+
+    for (const route of [[{ latitudeDeg: 61.2, longitudeDeg: -150 }], [{ latitudeDeg: 21.3, longitudeDeg: -157.8 }]]) {
+      const adapter = createAviationWeatherAdapter(regionalFetcher, memoryCache(), () => FIXED_NOW);
+      const result = await adapter.getWindsStations(route);
+      expect(result.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ANC' })]));
+    }
+    const stationRequests = requests.filter((request) => new URL(request.url).pathname === '/api/data/stationinfo');
+    expect(stationRequests).toHaveLength(2);
+    expect(stationRequests.map((request) => new URL(request.url).searchParams.get('ids'))).toEqual(['PANC,PATL,PBGR', 'PANC,PATL,PBGR']);
+  });
+
   it('publishes only forecast periods that every selectable station reports', async () => {
     const stationSpecificFetcher: ServiceFetcher = {
       async fetch(request) {

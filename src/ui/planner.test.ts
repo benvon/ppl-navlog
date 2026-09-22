@@ -650,6 +650,16 @@ describe("planner shell", () => {
     await expect(persistence.listAircraftProfiles()).resolves.toEqual([
       expect.objectContaining({ name: "Regression aircraft", cruiseTasKnots: 115, usableFuelGallons: 25.5 }),
     ]);
+
+    input(root, "usable-fuel").value = "";
+    const clearedFuelForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (clearedFuelForm === null) throw new Error("Profile form was not rendered after updating.");
+    clearedFuelForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(input(root, "usable-fuel").value).toBe("");
+    await expect(persistence.listAircraftProfiles()).resolves.toEqual([
+      expect.not.objectContaining({ usableFuelGallons: expect.anything() }),
+    ]);
   });
 
   it("clears the selected aircraft profile when the placeholder is chosen", async () => {
