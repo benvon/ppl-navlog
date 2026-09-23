@@ -500,7 +500,7 @@ class Planner {
       section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. Preserved aircraft default: ${override.computedValue} kt.`));
       const restore = button("Restore aircraft default", "button");
       restore.addEventListener("click", () => {
-        this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
+        this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), inspectedLegId: undefined, unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
         this.feedback.textContent = "Restored the aircraft TAS default for this leg. Save a new revision before calculating.";
         this.render();
       });
@@ -559,7 +559,7 @@ class Planner {
       const value = inputValue(form, "override-tas");
       const reason = inputValue(form, "override-reason");
       try {
-        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
+        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), inspectedLegId: undefined, unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
         this.feedback.textContent = "Cruise TAS override applied and flagged in the route table.";
         this.render();
       } catch (error) {
@@ -643,7 +643,7 @@ class Planner {
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], inspectedLegId: undefined, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -654,7 +654,7 @@ class Planner {
   private removeCheckpoint(id: string): void {
     const removed = this.state.checkpoints.find((checkpoint) => checkpoint.id === id);
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+    this.state = { ...this.state, checkpoints, inspectedLegId: undefined, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
     this.feedback.textContent = removed === undefined ? "Checkpoint was already absent." : `Removed checkpoint ${removed.name}.`;
     this.render();
   }
@@ -694,7 +694,7 @@ class Planner {
       const saveTarget = this.journalSaveTarget();
       if (!this.beginInputTransaction("Saving new plan revision…")) return;
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, ...saveTarget);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, inspectedLegId: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -779,7 +779,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, inspectedLegId: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -817,7 +817,7 @@ class Planner {
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, inspectedLegId: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -878,6 +878,7 @@ class Planner {
         draft: reopened.draftSnapshot,
         currentRevision: reopened,
         inspectedCalculation: undefined,
+        inspectedLegId: undefined,
         revisions,
         weatherSnapshots,
         calculationPreview: undefined,

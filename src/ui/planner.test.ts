@@ -95,6 +95,48 @@ describe("planner shell", () => {
     expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
   });
 
+  it("clears the inspected draft leg when another draft is opened", async () => {
+    const persistence = new MemoryPersistence();
+    const firstFamily = planFamily();
+    const firstRevision = planRevision();
+    const secondFamily = { ...firstFamily, id: "plan-2", title: "Another route", latestRevisionId: "revision-2" };
+    const secondRevision: PlanRevision = {
+      ...firstRevision, id: "revision-2", planId: "plan-2",
+      draftSnapshot: { ...firstRevision.draftSnapshot, id: "draft-2", planId: "plan-2", title: "Another route", route: { ...firstRevision.draftSnapshot.route, legs: firstRevision.draftSnapshot.route.legs.map((leg) => ({ ...leg, id: `second-${leg.id}` })) } },
+    };
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(firstFamily, firstRevision);
+    await persistence.savePlanRevision(secondFamily, secondRevision);
+    const root = document.createElement("div");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${firstFamily.title}`);
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-region="navlog"] button')?.click();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+    clickByLabel(root, `Open ${secondFamily.title}`);
+    await settle();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Selected draft leg");
+    confirm.mockRestore();
+  });
+
+  it("clears the inspected draft leg when route checkpoints change", async () => {
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, planRevision());
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-region="navlog"] button')?.click();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+    clickByLabel(root, "Remove Study checkpoint");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Selected draft leg");
+  });
+
   it("explains that the optional METAR source anchors winds at departure", async () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
