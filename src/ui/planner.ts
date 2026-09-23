@@ -26,7 +26,6 @@ import { renderRevisionHistory } from "./revision-history";
 import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
 import { renderWorkspaceLayout } from "./workspace-layout";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
-import { createPrintableNavlog } from "./printable-navlog";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -405,6 +404,7 @@ class Planner {
         section.append(this.renderRawWeatherEvidence());
         if (isCalculatedRevision(this.state.currentRevision)) {
           const print = button("Print / Save PDF", "button");
+          print.classList.add("print-navlog-action");
           print.addEventListener("click", () => this.printCurrentRevision());
           section.append(print);
         }
@@ -426,16 +426,27 @@ class Planner {
   private printCurrentRevision(): void {
     const revision = this.state.currentRevision;
     if (revision === undefined) return;
-    const sheet = createPrintableNavlog(revision, this.state.weatherSnapshots);
-    if (sheet === undefined) {
-      this.feedback.textContent = "Only a complete saved calculated revision can be printed as a navlog PDF.";
+    const completeEvidence = revision.weatherSnapshotIds.length > 0 && revision.weatherSnapshotIds.every(
+      (id) => this.state.weatherSnapshots.some((snapshot) => snapshot.id === id),
+    );
+    const panel = this.content.querySelector<HTMLElement>('[data-region="navlog"]');
+    if (!isCalculatedRevision(revision) || !completeEvidence || panel === null) {
+      this.feedback.textContent = "Only a complete saved calculated revision with weather evidence can be printed.";
       return;
     }
-    document.querySelector(".print-sheet")?.remove();
-    document.body.append(sheet);
-    window.addEventListener("afterprint", () => sheet.remove(), { once: true });
     this.feedback.textContent = "Opening the browser print dialog. Choose Save as PDF to create a PDF artifact.";
-    window.print();
+    const cleanup = (): void => {
+      document.body.classList.remove("printing-navlog");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    document.body.classList.add("printing-navlog");
+    window.addEventListener("afterprint", cleanup, { once: true });
+    try {
+      window.print();
+    } catch (error) {
+      cleanup();
+      this.reportError(error);
+    }
   }
 
   private renderRawWeatherEvidence(): HTMLElement {

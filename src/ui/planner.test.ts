@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
 import type { AircraftProfile } from "../domain/aircraft";
-import type { PlanFamily, PlanRevision } from "../domain/route";
+import type { JsonValue, PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import { aircraftProfile, planFamily, planRevision } from "../services/storage/__tests__/fixtures";
@@ -54,8 +54,70 @@ function clickByLabel(root: HTMLElement, label: string): void {
   control.click();
 }
 
+function legacyMismatchedWeatherSnapshots(fixture: Awaited<ReturnType<typeof createCompleteFlightFixture>>) {
+  let found = false;
+  const snapshots = fixture.weatherSnapshots.map((snapshot) => {
+    if (typeof snapshot.payload !== "object" || snapshot.payload === null || Array.isArray(snapshot.payload)) return snapshot;
+    const payload = snapshot.payload as Record<string, JsonValue>;
+    const value = payload.surfaceToAloftInterpolation;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return snapshot;
+    const evidence = { ...(value as Record<string, JsonValue>) };
+    const metar = evidence.metar;
+    if (typeof metar !== "object" || metar === null || Array.isArray(metar)) return snapshot;
+    delete evidence.surfaceWeatherIcao;
+    evidence.airportIcao = "1C8";
+    evidence.metar = { ...(metar as Record<string, JsonValue>), icao: "KORD" };
+    found = true;
+    return { ...snapshot, payload: { ...payload, surfaceToAloftInterpolation: evidence } };
+  });
+  if (!found) throw new Error("Complete flight fixture did not include surface interpolation evidence.");
+  return snapshots;
+}
+
 describe("planner shell", () => {
   it("offers browser-local PDF printing only for a complete saved revision", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const weatherSnapshots = legacyMismatchedWeatherSnapshots(fixture);
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
+    renderPlanner(root, {
+      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
+      weatherEvidence: { getWeatherSnapshot: async (id) => weatherSnapshots.find((snapshot) => snapshot.id === id) },
+    });
+    await settle();
+    expect(root.textContent).not.toContain("Print / Save PDF");
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+    const panel = root.querySelector<HTMLElement>('[data-region="navlog"]');
+    const closed = panel?.querySelector<HTMLDetailsElement>("details");
+    expect(panel).not.toBeNull();
+    expect(closed?.open).toBe(false);
+    expect(panel?.querySelectorAll(".calculated-navlog tbody tr")).toHaveLength(5);
+    expect(panel?.querySelector<HTMLButtonElement>(".navlog-value")?.textContent).toMatch(/^\d/);
+    clickByLabel(root, "Print / Save PDF");
+    expect(print).toHaveBeenCalledOnce();
+    expect(document.body.classList.contains("printing-navlog")).toBe(true);
+    expect(document.querySelector(".print-sheet")).toBeNull();
+    expect(panel?.querySelector("details")).toBe(closed);
+    expect(panel?.textContent).not.toContain("Surface METAR Unavailable");
+    window.dispatchEvent(new Event("afterprint"));
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    expect(document.querySelector(".print-sheet")).toBeNull();
+    if (closed == null) throw new Error("Expected a navlog disclosure.");
+    closed.open = true;
+    clickByLabel(root, "Print / Save PDF");
+    expect(print).toHaveBeenCalledTimes(2);
+    expect(closed.open).toBe(true);
+    expect(document.body.classList.contains("printing-navlog")).toBe(true);
+    window.dispatchEvent(new Event("afterprint"));
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    print.mockRestore();
+  });
+
+  it("refuses to print a saved revision when its referenced weather evidence is missing", async () => {
     const fixture = await createCompleteFlightFixture();
     const persistence = new MemoryPersistence();
     await persistence.saveAircraftProfile(fixture.profile);
@@ -64,17 +126,39 @@ describe("planner shell", () => {
     const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
     renderPlanner(root, {
       airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
+      weatherEvidence: { getWeatherSnapshot: async () => undefined },
+    });
+    await settle();
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+
+    clickByLabel(root, "Print / Save PDF");
+
+    expect(print).not.toHaveBeenCalled();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("weather evidence");
+    print.mockRestore();
+  });
+
+  it("clears print mode and reports a browser print error", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const print = vi.spyOn(window, "print").mockImplementation(() => { throw new Error("print unavailable"); });
+    renderPlanner(root, {
+      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
       weatherEvidence: { getWeatherSnapshot: async (id) => fixture.weatherSnapshots.find((snapshot) => snapshot.id === id) },
     });
     await settle();
-    expect(root.textContent).not.toContain("Print / Save PDF");
     clickByLabel(root, `Open ${fixture.family.title}`);
     await settle();
+
     clickByLabel(root, "Print / Save PDF");
+
     expect(print).toHaveBeenCalledOnce();
-    expect(document.querySelector(".print-sheet")?.textContent).toContain("Visual Flight Log");
-    window.dispatchEvent(new Event("afterprint"));
-    expect(document.querySelector(".print-sheet")).toBeNull();
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("print unavailable");
     print.mockRestore();
   });
 
