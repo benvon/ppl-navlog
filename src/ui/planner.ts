@@ -255,7 +255,7 @@ class Planner {
     form.className = "route-form";
     const resolveButton = workflowButton("Resolve airport endpoints", "button", "resolve-airports", this.workflowUnavailableReason("resolve-airports"));
     form.append(...routeBasicFields(this.state.routeForm), ...routeAirportFields(this.state.routeForm), resolveButton, actionStatus("resolve-airports", this.workflowUnavailableReason("resolve-airports")));
-    form.append(text("p", "This METAR station applies only to the departure surface-wind anchor. Destination METAR sources are not used in this calculation; check arrival weather separately."));
+    form.append(text("p", "The selected METAR wind is anchored at the departure field elevation. Station proximity is not verified. Entering a destination station here still anchors its wind at departure, not arrival. The current calculation uses one wind profile across the route. Route-aware weather is planned; check arrival weather separately."));
     form.addEventListener("input", (event) => this.syncRouteFormInput(event));
     resolveButton?.addEventListener("click", () => void this.handleResolveAirports(form));
     return form;
@@ -1285,7 +1285,7 @@ function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[
   return [
     labeledInput("departure-icao", "Departure airport code (FAA LID or ICAO)", values.departureIcao, "text"),
     labeledInput("destination-icao", "Destination airport code (FAA LID or ICAO)", values.destinationIcao, "text"),
-    labeledInput("surface-weather-icao", "Departure-area METAR station ICAO (optional; used to anchor surface wind at the departure airport field elevation)", values.surfaceWeatherIcao, "text"),
+    labeledInput("surface-weather-icao", "Surface METAR source ICAO (optional; anchors wind at departure field elevation)", values.surfaceWeatherIcao, "text"),
   ];
 }
 

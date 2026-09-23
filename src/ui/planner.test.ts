@@ -141,8 +141,11 @@ describe("planner shell", () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
     await settle();
-    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure");
-    expect(root.querySelector('[data-region="route"]')?.textContent).toContain("Destination METAR sources are not used in this calculation");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure field elevation");
+    const routeText = root.querySelector('[data-region="route"]')?.textContent;
+    expect(routeText).toContain("Station proximity is not verified");
+    expect(routeText).toContain("Entering a destination station here still anchors its wind at departure");
+    expect(routeText).toContain("Route-aware weather is planned");
   });
   it("offers browser-local PDF printing only for a complete saved revision", async () => {
     const fixture = await createCompleteFlightFixture();
@@ -1235,7 +1238,7 @@ describe("planner shell", () => {
     const load = root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]');
     expect(load?.disabled).toBe(true);
     expect(root.textContent).toContain("Unavailable: Resolve both route endpoints before loading winds periods.");
-    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure airport field elevation");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure field elevation");
     load?.dispatchEvent(new Event("click"));
     await settle();
     expect(discoverStations).not.toHaveBeenCalled();
