@@ -1,4 +1,4 @@
-import type { AirportData, CacheProvenance, MetarData } from './contracts';
+import { AIRPORT_CODE_PATTERN, ICAO_PATTERN, type AirportData, type CacheProvenance, type MetarData } from './contracts';
 import { ApiError } from './errors';
 import { readBoundedText } from './bounded-text';
 
@@ -53,7 +53,7 @@ function hasAirportPhysicalData(value: Record<string, unknown>): boolean {
 
 function isAirportPayload(value: unknown, requestedIcao: string): value is RunwayPickerAirportPayload {
   if (!isRecord(value) || !isCacheProvenance(value.cache)) return false;
-  return hasAirportIdentity(value, requestedIcao) && hasAirportDetails(value) && hasAirportPhysicalData(value) && value.source === 'airportdb' && isIsoTimestamp(value.fetchedAt);
+  return AIRPORT_CODE_PATTERN.test(requestedIcao) && hasAirportIdentity(value, requestedIcao) && hasAirportDetails(value) && hasAirportPhysicalData(value) && value.source === 'airportdb' && isIsoTimestamp(value.fetchedAt);
 }
 
 function isDirectionVariation(value: unknown): boolean {
@@ -70,7 +70,7 @@ function isMetarWind(value: unknown): boolean {
 function isMetarPayload(value: unknown, requestedIcao: string): value is RunwayPickerMetarPayload {
   if (!isRecord(value) || !isMetarWind(value.wind) || !isCacheProvenance(value.cache)) return false;
   const timingValid = isIsoTimestamp(value.fetchedAt) && (value.observedAt === null || isIsoTimestamp(value.observedAt));
-  return value.icao === requestedIcao && typeof value.metarRaw === 'string' && value.source === 'aviationweather' && timingValid;
+  return ICAO_PATTERN.test(requestedIcao) && value.icao === requestedIcao && typeof value.metarRaw === 'string' && value.source === 'aviationweather' && timingValid;
 }
 
 async function readJsonResponse(fetcher: ServiceFetcher, request: Request): Promise<unknown> {

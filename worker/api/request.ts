@@ -1,4 +1,4 @@
-import { ICAO_PATTERN, type WindsRegion, type WindsRoutePoint } from './contracts';
+import { AIRPORT_CODE_PATTERN, ICAO_PATTERN, type WindsRegion, type WindsRoutePoint } from './contracts';
 import { ApiError } from './errors';
 
 const REQUEST_ID_HEADER = 'X-Request-Id';
@@ -15,6 +15,12 @@ export function createRequestId(request: Request): string {
 
 export function requireGet(request: Request): void {
   if (request.method !== 'GET') throw new ApiError('Method not allowed.', 405, 'method_not_allowed');
+}
+
+function normalizeAirportCode(value: string): string {
+  const code = value.trim().toUpperCase();
+  if (!AIRPORT_CODE_PATTERN.test(code)) throw new ApiError('Invalid airport code. Expected exactly three or four alphanumeric characters, such as 1C8 or KORD.', 400, 'invalid_request');
+  return code;
 }
 
 function normalizeIcao(value: string): string {
@@ -83,7 +89,7 @@ function parseBaseRoute(segments: string[], url: URL): ApiRoute | null {
   }
   if (airportRoute) {
     if ([...url.searchParams.keys()].length > 0) throw new ApiError('Query parameters are not accepted by this endpoint.', 400, 'invalid_request');
-    return { kind: 'airport', icao: normalizeIcao(segments[2] ?? '') };
+    return { kind: 'airport', icao: normalizeAirportCode(segments[2] ?? '') };
   }
   if (metarRoute) {
     if ([...url.searchParams.keys()].length > 0) throw new ApiError('Query parameters are not accepted by this endpoint.', 400, 'invalid_request');

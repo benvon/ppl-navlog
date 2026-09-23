@@ -41,7 +41,14 @@ function input(root: HTMLElement, id: string): HTMLInputElement {
 }
 
 function clickByLabel(root: HTMLElement, label: string): void {
-  const control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
+  const routeInputs = (names: readonly string[]): void => {
+    names.forEach((name) => root.querySelector<HTMLInputElement>(`#${name}`)?.dispatchEvent(new Event("input", { bubbles: true })));
+  };
+  let control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
+  if (control?.disabled && label === "Resolve airport endpoints") routeInputs(["departure-icao", "destination-icao"]);
+  if (control?.disabled && label === "Load available winds periods") routeInputs(["departure-time"]);
+  if (control?.disabled && label === "Save new plan revision" && root.querySelector("#selected-forecast-period") === null) routeInputs(["departure-time"]);
+  control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
   if (control === undefined) throw new Error(`Missing button ${label}`);
   control.click();
 }
@@ -100,9 +107,9 @@ describe("planner shell", () => {
     input(root, "departure-time").value = "2026-10-01T12:00";
     input(root, "taxi-fuel").value = "1.2";
     input(root, "reserve-fuel").value = "3.5";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
-    expect(root.textContent).toContain("Exact ICAO endpoints resolved from the configured aviation-data source.");
+    expect(root.textContent).toContain("Resolved airport endpoints: KORD and KJVL.");
     expect(input(root, "plan-title").value).toBe("Preserved study route");
     expect(input(root, "departure-time").value).toBe("2026-10-01T12:00");
     expect(input(root, "taxi-fuel").value).toBe("1.2");
@@ -113,10 +120,10 @@ describe("planner shell", () => {
     input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first.");
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints first.");
     input(root, "destination-icao").value = "KJVL";
     input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     clickByLabel(root, "Save new plan revision");
@@ -179,7 +186,7 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Opened current journal revision");
 
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -193,19 +200,19 @@ describe("planner shell", () => {
 
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1680");
 
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1808");
 
     input(root, "descent-target").value = "2500";
     input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("2500");
   });
@@ -222,7 +229,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -230,7 +237,7 @@ describe("planner shell", () => {
     await settle();
 
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1808");
   });
@@ -247,7 +254,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "descent-target").value = "";
     input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
@@ -290,11 +297,34 @@ describe("planner shell", () => {
 
     input(root, "departure-icao").value = "TOO-LONG";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
-    expect(root.textContent).toContain("FAA location identifiers such as 1C8 are not supported in v1.");
+    expect(root.textContent).toContain("Unavailable: Enter both exact three- or four-character FAA LID or ICAO airport codes.");
     expect(root.textContent).toContain("Resolve departure and destination before defining leg altitudes.");
+  });
+
+  it("resolves an FAA LID exactly and does not invent an ICAO prefix", async () => {
+    const root = document.createElement("div");
+    const local = createLocalStudyAirportLookup();
+    renderPlanner(root, {
+      airportLookup: {
+        lookupAirportCode: async (code) => code.toUpperCase() === "1C8"
+          ? { ...(await local.lookupAirportCode("KORD")), id: "airport-1c8", icao: "1C8", name: "FAA LID study airport" }
+          : local.lookupAirportCode(code),
+      },
+      persistence: new MemoryPersistence(),
+      ids: ids(),
+      clock,
+    });
+    await settle();
+
+    input(root, "departure-icao").value = "1c8";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve airport endpoints");
+    await settle();
+
+    expect(root.textContent).toContain("Resolved airport endpoints: 1C8 and KJVL.");
   });
 
   it("adds and removes a manually entered checkpoint only after coordinate validation", async () => {
@@ -320,7 +350,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     const addCheckpoint = async (name: string, latitude: string, longitude: string): Promise<void> => {
       input(root, "checkpoint-name").value = name;
@@ -387,7 +417,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -403,13 +433,13 @@ describe("planner shell", () => {
     input(root, "cruise-tas").dispatchEvent(new Event("input", { bubbles: true }));
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     expect(input(root, "cruise-tas").value).toBe("123");
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Save the aircraft profile version before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Save the pending aircraft profile version first.");
   });
 
   it("reports invalid checkpoint and incomplete-route errors without changing the editable draft", async () => {
@@ -436,7 +466,7 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first");
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints first.");
   });
 
   it("requires a UTC date/time before creating an immutable revision", async () => {
@@ -449,12 +479,12 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Enter a planned departure UTC date and time");
+    expect(root.textContent).toContain("Unavailable: Enter the planned departure UTC time first.");
   });
 
   it("blocks calculation after an unsaved route edit instead of silently using the prior revision", async () => {
@@ -469,7 +499,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-10-01T12:00";
     clickByLabel(root, "Save new plan revision");
@@ -481,7 +511,7 @@ describe("planner shell", () => {
     await settle();
 
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+    expect(root.textContent).toContain("Unavailable: Save the current route, aircraft, altitude, and weather edits as a new revision first.");
   });
 
   it("rejects invalid cruise altitudes before saving or calculating", async () => {
@@ -497,7 +527,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -509,11 +539,11 @@ describe("planner shell", () => {
     clickByLabel(root, "Calculate complete navlog");
     await settle();
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Correct each highlighted cruise altitude before calculating.");
+    expect(root.textContent).toContain("Unavailable: Correct the highlighted cruise altitude values first.");
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions).toHaveLength(1);
-    expect(root.textContent).toContain("Correct each highlighted cruise altitude before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Correct the highlighted cruise altitude values first.");
 
     altitude.value = "5500";
     altitude.dispatchEvent(new Event("change", { bubbles: true }));
@@ -548,7 +578,7 @@ describe("planner shell", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-10-01T12:00";
     clickByLabel(root, "Save new plan revision");
@@ -570,7 +600,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -587,7 +617,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Calculate complete navlog");
     await settle();
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+    expect(root.textContent).toContain("Unavailable: Save the current route, aircraft, altitude, and weather edits as a new revision first.");
   });
 
   it("clears profile-derived overrides when saving a changed aircraft profile version", async () => {
@@ -603,7 +633,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -692,7 +722,7 @@ describe("planner shell", () => {
     input(root, "destination-icao").value = "KJVL";
     input(root, "plan-title").value = "Snapshot route";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -751,7 +781,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -766,7 +796,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions).toHaveLength(1);
-    expect(root.textContent).toContain("Save and select an aircraft profile before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Save and select an aircraft profile first.");
   });
 
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {
@@ -781,7 +811,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-09-21T22:00";
     input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
@@ -818,7 +848,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-09-21T22:00";
     clickByLabel(root, "Save new plan revision");
@@ -839,7 +869,7 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Formula: wind-triangle");
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
-    expect(root.textContent).toContain("choose a forecast before refreshing weather");
+    expect(root.textContent).toContain("Unavailable: Load and select a published winds period first.");
     expect(refreshWeather).not.toHaveBeenCalled();
     clickByLabel(root, "Load available winds periods");
     await settle();
@@ -867,7 +897,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -900,7 +930,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -926,7 +956,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();

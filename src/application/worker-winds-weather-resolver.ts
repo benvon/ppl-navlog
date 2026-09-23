@@ -37,7 +37,8 @@ export const createWorkerWindsPlanWeatherResolver = (
     // A METAR anchor improves low-altitude interpolation, but it is optional:
     // winds entirely within the published FB envelope remain calculable when
     // the runway-picker METAR dependency is temporarily unavailable.
-    const metar = metarClient === undefined ? undefined : await metarClient.fetchMetar(departure.icao).catch(() => undefined);
+    const metarIcao = draft.weatherSelection.surfaceWeatherIcao ?? (isIcao(departure.icao) ? departure.icao : undefined);
+    const metar = metarIcao === undefined || metarClient === undefined ? undefined : await metarClient.fetchMetar(metarIcao).catch(() => undefined);
     const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, draft.weatherSelection.forecastValidTimeUtc, input, departure, metar));
     const snapshot = weatherSnapshot(input.weatherSnapshotId, loaded);
     return {
@@ -66,8 +67,10 @@ const selectionInput = (
   stationSelectionCoordinate: input.stationSelectionCoordinate,
   selectedForecastValidTimeUtc,
   departureTimeUtc,
-  ...(metar === undefined ? {} : { departureSurfaceWind: { airportIcao: departure.icao, fieldElevationFeetMsl: departure.elevationFeetMsl, metar } }),
+  ...(metar === undefined ? {} : { departureSurfaceWind: { airportIcao: departure.icao, surfaceWeatherIcao: metar.metar.icao, fieldElevationFeetMsl: departure.elevationFeetMsl, metar } }),
 });
+
+const isIcao = (value: string): boolean => /^[A-Z0-9]{4}$/.test(value);
 
 const weatherSnapshot = (id: string, data: LoadedWindsData): WeatherReferenceSnapshot => ({
   schemaVersion: 1,

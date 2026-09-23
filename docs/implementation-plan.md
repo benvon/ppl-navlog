@@ -33,7 +33,7 @@ This application is a planning aid and educational tool. It is not an official w
 
 V1 supports:
 
-- departure and destination airports resolved from exact ICAO identifiers;
+- departure and destination airports resolved from exact FAA LID or ICAO identifiers, without invented prefixes;
 - zero or more manually entered checkpoints;
 - route ordering and removal;
 - decimal-degree coordinates and SkyVector-style compact DMS waypoint input such as `420604N0884405W` (normalized to canonical decimal degrees);
@@ -526,7 +526,7 @@ Acceptance criteria:
 
 Deliverables:
 
-- exact ICAO route endpoints using mock/local airport data;
+- exact FAA LID or ICAO route endpoints using mock/local airport data;
 - manual checkpoints;
 - ordered user legs with per-leg altitude;
 - aircraft defaults and guarded overrides;
@@ -675,7 +675,7 @@ Issue IDs below are planning identifiers, not existing tracker numbers. Each iss
 | API-01 | Define and test internal airport/METAR/winds API schemas | FND-04 | Versioned transport contracts |
 | API-02 | Implement Worker request validation, security headers, errors, and request IDs | FND-01, API-01 | Secure API boundary |
 | API-03 | Verify `runway-picker` contract access, versioning, environments, and failure boundaries | API-01 | Evidence-backed integration decision |
-| API-04 | Implement compatible `runway-picker` airport adapter | API-02, API-03 | Exact ICAO resolution |
+| API-04 | Implement compatible `runway-picker` airport adapter | API-02, API-03 | Exact FAA LID or ICAO resolution |
 | API-05 | Implement compatible `runway-picker` METAR adapter | API-02, API-03 | Surface weather data |
 | API-06 | Implement winds-product upstream adapter and decoder | API-01, API-02 | Normalized authoritative forecast |
 | API-07 | Implement Worker caching, rate limiting, timeouts, and stale policies | API-04, API-05, API-06 | Resilient external-data service |
@@ -712,6 +712,6 @@ The issue graph should be delivered in vertical slices rather than completing ev
 
 ## 16. V1 Definition of Done
 
-V1 is complete only when a pilot can enter exact ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save immutable revisions; refresh weather into a new revision; export and import JSON plan data safely; export a print-friendly PDF of a complete saved revision without supporting PDF import; and use the deployed application through a tested, accessible desktop workflow.
+V1 is complete only when a pilot can enter exact FAA LID or ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; choose an explicit ICAO surface-weather source when a LID-only departure needs nearby METAR data; generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save immutable revisions; refresh weather into a new revision; export and import JSON plan data safely; export a print-friendly PDF of a complete saved revision without supporting PDF import; and use the deployed application through a tested, accessible desktop workflow.
 
 All automated quality gates must pass, production deployment and rollback must be documented and smoke-tested, and known limitations must be visible in both the application and user documentation. Human review must confirm that the teaching explanations match the implemented formulas and that the worksheet remains usable at representative laptop sizes.

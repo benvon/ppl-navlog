@@ -1,5 +1,5 @@
 import type { AirportSuccessPayload } from "../../../worker/api/contracts";
-import { normalizeIcao, type AirportLookup } from "../../application/airport-lookup";
+import { normalizeAirportCode, type AirportLookup } from "../../application/airport-lookup";
 import { coordinate } from "../../domain/coordinates";
 import type { AirportRoutePoint } from "../../domain/route";
 
@@ -12,17 +12,17 @@ export class WorkerAirportLookup implements AirportLookup {
     private readonly baseUrl: string = globalThis.location?.origin ?? "http://localhost",
   ) {}
 
-  public async lookupExactIcao(value: string): Promise<AirportRoutePoint> {
-    const icao = normalizeIcao(value);
-    const url = new URL(`/api/airports/${icao}`, this.baseUrl);
+  public async lookupAirportCode(value: string): Promise<AirportRoutePoint> {
+    const code = normalizeAirportCode(value);
+    const url = new URL(`/api/airports/${code}`, this.baseUrl);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5_000);
     try {
       const response = await this.fetcher.fetch(url, { method: "GET", headers: { Accept: "application/json" }, signal: controller.signal });
-      if (!response.ok) throw new Error(`Airport lookup failed with HTTP ${response.status}.`);
+      if (!response.ok) throw new Error(await responseError(response));
       if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) throw new Error("Airport lookup did not return JSON.");
       const payload = await readBoundedJson(response);
-      return airportRoutePoint(payload, icao);
+      return airportRoutePoint(payload, code);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw new Error("Airport lookup timed out.");
       throw error;
@@ -52,6 +52,19 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown; }
   catch { throw new Error("Airport lookup returned invalid JSON."); }
+};
+
+const responseError = async (response: Response): Promise<string> => {
+  if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) return `Airport lookup failed with HTTP ${response.status}.`;
+  try {
+    const payload = await readBoundedJson(response);
+    if (typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" && payload.error.trim() !== "") {
+      return payload.error;
+    }
+  } catch {
+    // The generic status below intentionally avoids revealing transport details.
+  }
+  return `Airport lookup failed with HTTP ${response.status}.`;
 };
 
 const requiredAirport = (value: unknown, requestedIcao: string): AirportSuccessPayload["airport"] => {

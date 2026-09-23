@@ -80,7 +80,10 @@ interface RouteFormValues {
   readonly descentTarget: string;
   readonly departureIcao: string;
   readonly destinationIcao: string;
+  readonly surfaceWeatherIcao: string;
 }
+
+type WorkflowAction = "resolve-airports" | "load-winds" | "save-draft" | "calculate" | "refresh-weather";
 
 export function renderPlanner(root: HTMLElement, dependencies: PlannerDependencies): void {
   const planner = new Planner(root, dependencies);
@@ -173,21 +176,21 @@ class Planner {
   }
 
   private renderRoutePanel(): HTMLElement {
-    const section = panel("Route draft", "Enter exact ICAO endpoints. Airport coordinates and field elevations come from the configured aviation-data Worker.");
+    const section = panel("Route draft", "Enter an exact FAA LID or ICAO airport code. Airport coordinates and field elevations come from the configured aviation-data Worker; the app never invents a missing prefix.");
     const form = this.createRouteForm();
-    const saveButton = button("Save new plan revision", "button");
+    const saveButton = workflowButton("Save new plan revision", "button", "save-draft", this.workflowUnavailableReason("save-draft"));
     saveButton.addEventListener("click", () => void this.handleSaveDraft(form));
-    section.append(this.renderSavedPlans(), form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton);
+    section.append(this.renderSavedPlans(), form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton, actionStatus("save-draft", this.workflowUnavailableReason("save-draft")));
     if (this.dependencies.calculatePlan !== undefined) {
-      const calculateButton = button("Calculate complete navlog", "button");
+      const calculateButton = workflowButton("Calculate complete navlog", "button", "calculate", this.workflowUnavailableReason("calculate"));
       calculateButton.addEventListener("click", () => void this.handleCalculatePlan());
-      section.append(calculateButton);
+      section.append(calculateButton, actionStatus("calculate", this.workflowUnavailableReason("calculate")));
     }
     if (this.dependencies.refreshWeather !== undefined && isCalculatedRevision(this.state.currentRevision)) {
       section.append(text("p", "Weather refresh uses the open saved revision's route, aircraft, and departure time; save any input edits first."));
-      const refreshButton = button("Refresh weather into new revision", "button");
+      const refreshButton = workflowButton("Refresh weather into new revision", "button", "refresh-weather", this.workflowUnavailableReason("refresh-weather"));
       refreshButton.addEventListener("click", () => void this.handleRefreshWeather());
-      section.append(refreshButton);
+      section.append(refreshButton, actionStatus("refresh-weather", this.workflowUnavailableReason("refresh-weather")));
     }
     this.appendReopenControl(section);
     if (this.state.draft !== undefined) section.append(renderRevisionHistory({
@@ -235,9 +238,9 @@ class Planner {
   private createRouteForm(): HTMLFormElement {
     const form = document.createElement("form");
     form.className = "route-form";
-    form.append(...routeBasicFields(this.state.routeForm), ...routeAirportFields(this.state.routeForm), button("Resolve exact ICAO endpoints", "button"));
+    const resolveButton = workflowButton("Resolve airport endpoints", "button", "resolve-airports", this.workflowUnavailableReason("resolve-airports"));
+    form.append(...routeBasicFields(this.state.routeForm), ...routeAirportFields(this.state.routeForm), resolveButton, actionStatus("resolve-airports", this.workflowUnavailableReason("resolve-airports")));
     form.addEventListener("input", (event) => this.syncRouteFormInput(event));
-    const resolveButton = form.querySelector<HTMLButtonElement>("button[type='button']");
     resolveButton?.addEventListener("click", () => void this.handleResolveAirports(form));
     return form;
   }
@@ -311,9 +314,9 @@ class Planner {
       section.append(text("p", "Live winds selection is unavailable in this environment."));
       return section;
     }
-    const load = button("Load available winds periods", "button");
+    const load = workflowButton("Load available winds periods", "button", "load-winds", this.workflowUnavailableReason("load-winds"));
     load.addEventListener("click", () => void this.handleLoadForecastPeriods());
-    section.append(load);
+    section.append(load, actionStatus("load-winds", this.workflowUnavailableReason("load-winds")));
     if (this.state.availableForecasts.length === 0) return section;
     const label = document.createElement("label");
     label.htmlFor = "selected-forecast-period";
@@ -333,6 +336,10 @@ class Planner {
         hasUnsavedForecastSelection: this.state.draft !== undefined && selectedForecastValidTimeUtc !== this.state.draft.weatherSelection?.forecastValidTimeUtc,
         calculationPreview: undefined,
       };
+      this.feedback.textContent = selectedForecastValidTimeUtc === undefined
+        ? "No winds period selected. Select a published period before saving it into a plan revision."
+        : `Selected winds period ${selectedForecastValidTimeUtc}. Save a new plan revision to attach it to the route.`;
+      this.refreshWorkflowAvailability();
     });
     label.append(select);
     section.append(label);
@@ -404,6 +411,7 @@ class Planner {
     document.querySelector(".print-sheet")?.remove();
     document.body.append(sheet);
     window.addEventListener("afterprint", () => sheet.remove(), { once: true });
+    this.feedback.textContent = "Opening the browser print dialog. Choose Save as PDF to create a PDF artifact.";
     window.print();
   }
 
@@ -447,6 +455,7 @@ class Planner {
       const restore = button("Restore aircraft default", "button");
       restore.addEventListener("click", () => {
         this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
+        this.feedback.textContent = "Restored the aircraft TAS default for this leg. Save a new revision before calculating.";
         this.render();
       });
       section.append(restore);
@@ -456,6 +465,7 @@ class Planner {
       const unlock = button("Override TAS for this leg", "button");
       unlock.addEventListener("click", () => {
         this.state = { ...this.state, unlockedLegId: leg.id };
+        this.feedback.textContent = "Opened the deliberate TAS override editor for this leg.";
         this.render();
       });
       section.append(unlock);
@@ -489,6 +499,7 @@ class Planner {
     form.append(button("Apply deliberate override", "submit"), button("Cancel", "button"));
     form.querySelector<HTMLButtonElement>("button[type='button']")?.addEventListener("click", () => {
       this.state = { ...this.state, unlockedLegId: undefined };
+      this.feedback.textContent = "TAS override canceled; no route values changed.";
       this.render();
     });
     form.addEventListener("submit", (event) => {
@@ -542,12 +553,12 @@ class Planner {
   private async handleResolveAirports(form: HTMLFormElement): Promise<void> {
     try {
       const routeForm = routeFormFromElement(form);
-      const departureIcao = inputValue(form, "departure-icao");
-      const destinationIcao = inputValue(form, "destination-icao");
-      if (!this.beginInputTransaction("Resolving exact ICAO endpoints…")) return;
+      const departureCode = inputValue(form, "departure-icao");
+      const destinationCode = inputValue(form, "destination-icao");
+      if (!this.beginInputTransaction("Resolving airport endpoints…")) return;
       const [departure, destination] = await Promise.all([
-        this.dependencies.airportLookup.lookupExactIcao(departureIcao),
-        this.dependencies.airportLookup.lookupExactIcao(destinationIcao),
+        this.dependencies.airportLookup.lookupAirportCode(departureCode),
+        this.dependencies.airportLookup.lookupAirportCode(destinationCode),
       ]);
       this.state = {
         ...this.state,
@@ -566,7 +577,7 @@ class Planner {
         hasUnsavedForecastSelection: false,
         calculationPreview: undefined,
       };
-      this.feedback.textContent = "Exact ICAO endpoints resolved from the configured aviation-data source.";
+      this.feedback.textContent = `Resolved airport endpoints: ${departure.icao} and ${destination.icao}.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -594,8 +605,10 @@ class Planner {
   }
 
   private removeCheckpoint(id: string): void {
+    const removed = this.state.checkpoints.find((checkpoint) => checkpoint.id === id);
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
     this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+    this.feedback.textContent = removed === undefined ? "Checkpoint was already absent." : `Removed checkpoint ${removed.name}.`;
     this.render();
   }
 
@@ -610,12 +623,14 @@ class Planner {
         calculationPreview: undefined,
       };
       this.feedback.textContent = "Cruise altitude must be a positive feet-MSL value.";
+      this.refreshWorkflowAvailability();
       return;
     }
     input.setAttribute("aria-invalid", "false");
     const cruiseAltitudes = [...expandAltitudes(this.state.cruiseAltitudes, index + 1)];
     cruiseAltitudes[index] = value;
     this.state = { ...this.state, cruiseAltitudes, invalidCruiseAltitudeIndexes: this.state.invalidCruiseAltitudeIndexes.filter((invalidIndex) => invalidIndex !== index), hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.refreshWorkflowAvailability();
   }
 
   private async handleSaveDraft(form: HTMLFormElement): Promise<void> {
@@ -643,7 +658,7 @@ class Planner {
   private draftForSave(form: HTMLFormElement, profile: AircraftProfile): { readonly draft: PlanDraft; readonly departure: AirportRoutePoint; readonly destination: AirportRoutePoint } {
     const departure = this.state.departure;
     const destination = this.state.destination;
-    if (departure === undefined || destination === undefined) throw new Error("Resolve exact ICAO departure and destination first.");
+    if (departure === undefined || destination === undefined) throw new Error("Resolve the departure and destination airport codes first.");
     const descentTargetAltitudeFeetMsl = this.state.descentTargetIsManual
       ? Number(inputValue(form, "descent-target"))
       : destination.elevationFeetMsl + 1_000;
@@ -675,6 +690,7 @@ class Planner {
       this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
       selectedTime,
       this.dependencies.clock,
+      emptyToUndefined(this.state.routeForm.surfaceWeatherIcao),
     );
   }
 
@@ -730,6 +746,7 @@ class Planner {
         this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
         selectedTime,
         this.dependencies.clock,
+        emptyToUndefined(this.state.routeForm.surfaceWeatherIcao),
       );
       if (!this.beginInputTransaction("Refreshing weather and recalculating…")) return;
       const result = await refresh(parent, selectedDraft.weatherSelection);
@@ -847,6 +864,85 @@ class Planner {
       : undefined;
   }
 
+  private workflowUnavailableReason(action: WorkflowAction): string | undefined {
+    if (this.state.pendingOperation !== undefined) return `${this.state.pendingOperation} Please wait.`;
+    switch (action) {
+      case "resolve-airports": return this.airportResolutionUnavailableReason();
+      case "load-winds": return this.windsLoadingUnavailableReason();
+      case "save-draft": return this.draftSavingUnavailableReason();
+      case "calculate": return this.calculationUnavailableReason();
+      case "refresh-weather": return this.weatherRefreshUnavailableReason();
+    }
+  }
+
+  private airportResolutionUnavailableReason(): string | undefined {
+    const departure = this.state.routeForm.departureIcao.trim().toUpperCase();
+    const destination = this.state.routeForm.destinationIcao.trim().toUpperCase();
+    return !isAirportCode(departure) || !isAirportCode(destination)
+      ? "Enter both exact three- or four-character FAA LID or ICAO airport codes."
+      : undefined;
+  }
+
+  private windsLoadingUnavailableReason(): string | undefined {
+    if (routePoints(this.state).length < 2) return "Resolve both route endpoints before loading winds periods.";
+    if (!isLocalUtcDateTime(this.state.routeForm.departureTime)) return "Enter the planned departure UTC time before loading winds periods.";
+    return undefined;
+  }
+
+  private draftSavingUnavailableReason(): string | undefined {
+    if (this.state.profileDraft !== undefined) return "Save the pending aircraft profile version first.";
+    if (this.selectedProfile() === undefined) return "Save and select an aircraft profile first.";
+    if (this.state.departure === undefined || this.state.destination === undefined) return "Resolve both route endpoints first.";
+    if (this.state.invalidCruiseAltitudeIndexes.length > 0) return "Correct the highlighted cruise altitude values first.";
+    if (this.state.routeForm.title.trim() === "") return "Enter a plan title first.";
+    if (!isLocalUtcDateTime(this.state.routeForm.departureTime)) return "Enter the planned departure UTC time first.";
+    return this.draftNumbersUnavailableReason();
+  }
+
+  private draftNumbersUnavailableReason(): string | undefined {
+    if (!isNonnegativeNumber(this.state.routeForm.taxiFuel) || !isNonnegativeNumber(this.state.routeForm.reserveFuel)) return "Enter nonnegative taxi/run-up and reserve fuel values.";
+    if (this.state.descentTargetIsManual && !isFiniteNumber(this.state.routeForm.descentTarget)) return "Enter a finite manual descent target altitude.";
+    if (!isOptionalIcao(this.state.routeForm.surfaceWeatherIcao)) return "Surface-weather source must be an exact four-character ICAO code when supplied.";
+    return undefined;
+  }
+
+  private calculationUnavailableReason(): string | undefined {
+    if (this.dependencies.calculatePlan === undefined || this.state.draft === undefined) return "Save a route and aircraft profile first.";
+    if (this.currentJournalHead(this.state.draft.planId)?.id !== this.state.currentRevision?.id) return "Open or save the current journal revision first.";
+    if (this.state.invalidCruiseAltitudeIndexes.length > 0) return "Correct the highlighted cruise altitude values first.";
+    if (this.hasUnsavedPlanInputs()) return "Save the current route, aircraft, altitude, and weather edits as a new revision first.";
+    if (this.effectiveProfile() === undefined) return "Select an aircraft profile first.";
+    return undefined;
+  }
+
+  private weatherRefreshUnavailableReason(): string | undefined {
+    if (this.dependencies.refreshWeather === undefined || !isCalculatedRevision(this.state.currentRevision)) return "Open a calculated revision first.";
+    if (this.currentRevisionIsHistorical()) return "Save the historical revision as a new current journal entry first.";
+    if (this.state.hasUnsavedChanges || this.state.profileDraft !== undefined) return "Save or discard route, aircraft, or altitude edits first.";
+    if (this.state.selectedForecastValidTimeUtc === undefined) return "Load and select a published winds period first.";
+    if (!isOptionalIcao(this.state.routeForm.surfaceWeatherIcao)) return "Surface-weather source must be an exact four-character ICAO code when supplied.";
+    return undefined;
+  }
+
+  private currentRevisionIsHistorical(): boolean {
+    const revision = this.state.currentRevision;
+    return revision !== undefined && this.currentJournalHead(revision.planId)?.id !== revision.id;
+  }
+
+  /** Keeps disabled controls and their visible reasons synchronized without rerendering a focused form. */
+  private refreshWorkflowAvailability(): void {
+    this.content.querySelectorAll<HTMLButtonElement>("button[data-workflow-action]").forEach((control) => {
+      const action = control.dataset.workflowAction as WorkflowAction | undefined;
+      if (action === undefined) return;
+      const reason = this.workflowUnavailableReason(action);
+      configureWorkflowButton(control, reason);
+      this.content.querySelectorAll<HTMLElement>(`[data-workflow-status="${action}"]`).forEach((status) => {
+        status.textContent = reason === undefined ? "" : `Unavailable: ${reason}`;
+        status.hidden = reason === undefined;
+      });
+    });
+  }
+
   private reportError(error: unknown): void {
     const hadPendingOperation = this.state.pendingOperation !== undefined;
     if (hadPendingOperation) this.state = { ...this.state, pendingOperation: undefined };
@@ -867,6 +963,7 @@ class Planner {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || !isProfileField(input.name)) return;
     this.state = { ...this.state, profileDraft: { ...this.state.profileDraft, [input.name]: input.value } };
+    this.refreshWorkflowAvailability();
   }
 
   private syncRouteFormInput(event: Event): void {
@@ -883,6 +980,7 @@ class Planner {
       : field === "destinationIcao"
             ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
         : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.refreshWorkflowAvailability();
   }
 }
 
@@ -923,6 +1021,33 @@ function button(label: string, type: "button" | "submit"): HTMLButtonElement {
   control.type = type;
   control.textContent = label;
   return control;
+}
+
+function workflowButton(label: string, type: "button" | "submit", action: WorkflowAction, unavailableReason: string | undefined): HTMLButtonElement {
+  const control = button(label, type);
+  control.dataset.workflowAction = action;
+  configureWorkflowButton(control, unavailableReason);
+  return control;
+}
+
+function configureWorkflowButton(control: HTMLButtonElement, unavailableReason: string | undefined): void {
+  control.disabled = unavailableReason !== undefined;
+  if (unavailableReason === undefined) {
+    control.removeAttribute("title");
+    control.removeAttribute("aria-describedby");
+    return;
+  }
+  control.title = unavailableReason;
+  control.setAttribute("aria-describedby", `workflow-status-${control.dataset.workflowAction ?? "unavailable"}`);
+}
+
+function actionStatus(action: WorkflowAction, unavailableReason: string | undefined): HTMLParagraphElement {
+  const status = text("p", unavailableReason === undefined ? "" : `Unavailable: ${unavailableReason}`) as HTMLParagraphElement;
+  status.className = "action-availability";
+  status.id = `workflow-status-${action}`;
+  status.dataset.workflowStatus = action;
+  status.hidden = unavailableReason === undefined;
+  return status;
 }
 
 function cell(content: string | HTMLElement): HTMLTableCellElement {
@@ -1053,13 +1178,14 @@ function routeBasicFields(values: RouteFormValues): readonly HTMLLabelElement[] 
 
 function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[] {
   return [
-    labeledInput("departure-icao", "Departure ICAO", values.departureIcao, "text"),
-    labeledInput("destination-icao", "Destination ICAO", values.destinationIcao, "text"),
+    labeledInput("departure-icao", "Departure airport code (FAA LID or ICAO)", values.departureIcao, "text"),
+    labeledInput("destination-icao", "Destination airport code (FAA LID or ICAO)", values.destinationIcao, "text"),
+    labeledInput("surface-weather-icao", "Surface-weather source ICAO (optional; for a nearby METAR when departure is a FAA LID)", values.surfaceWeatherIcao, "text"),
   ];
 }
 
 function emptyRouteForm(): RouteFormValues {
-  return { title: "New study route", departureTime: "", taxiFuel: "0", reserveFuel: "0", descentTarget: "", departureIcao: "", destinationIcao: "" };
+  return { title: "New study route", departureTime: "", taxiFuel: "0", reserveFuel: "0", descentTarget: "", departureIcao: "", destinationIcao: "", surfaceWeatherIcao: "" };
 }
 
 function routeFormFromDraft(draft: PlanDraft, departureIcao: string, destinationIcao: string): RouteFormValues {
@@ -1071,6 +1197,7 @@ function routeFormFromDraft(draft: PlanDraft, departureIcao: string, destination
     descentTarget: String(draft.descentTargetAltitudeFeetMsl.effectiveValue),
     departureIcao,
     destinationIcao,
+    surfaceWeatherIcao: draft.weatherSelection?.surfaceWeatherIcao ?? "",
   };
 }
 
@@ -1083,6 +1210,7 @@ function routeFormField(name: string): keyof RouteFormValues | undefined {
     "descent-target": "descentTarget",
     "departure-icao": "departureIcao",
     "destination-icao": "destinationIcao",
+    "surface-weather-icao": "surfaceWeatherIcao",
   };
   return fields[name];
 }
@@ -1096,12 +1224,41 @@ function routeFormFromElement(form: HTMLFormElement): RouteFormValues {
     descentTarget: inputValue(form, "descent-target"),
     departureIcao: inputValue(form, "departure-icao"),
     destinationIcao: inputValue(form, "destination-icao"),
+    surfaceWeatherIcao: inputValue(form, "surface-weather-icao"),
   };
 }
 
 function inputValue(form: HTMLFormElement, name: string): string {
   const element = form.elements.namedItem(name);
   return element instanceof HTMLInputElement ? element.value : "";
+}
+
+function isAirportCode(value: string): boolean {
+  return /^[A-Z0-9]{3,4}$/.test(value);
+}
+
+function isOptionalIcao(value: string): boolean {
+  const normalized = value.trim().toUpperCase();
+  return normalized === "" || /^[A-Z0-9]{4}$/.test(normalized);
+}
+
+function isLocalUtcDateTime(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}:00.000Z`));
+}
+
+function isNonnegativeNumber(value: string): boolean {
+  const parsed = Number(value);
+  return value.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
+}
+
+function isFiniteNumber(value: string): boolean {
+  const parsed = Number(value);
+  return value.trim() !== "" && Number.isFinite(parsed);
+}
+
+function emptyToUndefined(value: string): string | undefined {
+  const normalized = value.trim();
+  return normalized === "" ? undefined : normalized;
 }
 
 const DEFAULT_PROFILE_FIELDS: ReadonlyArray<readonly [string, string, string]> = [

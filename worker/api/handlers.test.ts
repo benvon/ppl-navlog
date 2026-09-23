@@ -25,8 +25,12 @@ describe('API handlers', () => {
     await expect(response.json()).resolves.toMatchObject({ airport: { icao: 'KJVL' }, provenance: { adapter: 'runway-picker' } });
   });
 
-  it('rejects malformed ICAO identifiers before the adapter is called', async () => {
-    const response = await handleApiRequest(new Request('https://example.test/api/airports/KJV'), { aviationData });
+  it('accepts exact FAA LIDs and rejects malformed airport identifiers before the adapter is called', async () => {
+    const lidData = { getAirport: async (code: string) => ({ airport: { ...runwayPickerAirportFixture, requestedIcao: code, icao: code }, cache: runwayPickerCacheFixture }), getMetar: aviationData.getMetar };
+    const lid = await handleApiRequest(new Request('https://example.test/api/airports/1c8'), { aviationData: lidData });
+    expect(lid.status).toBe(200);
+    await expect(lid.json()).resolves.toMatchObject({ airport: { requestedIcao: '1C8', icao: '1C8' } });
+    const response = await handleApiRequest(new Request('https://example.test/api/airports/12'), { aviationData });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ code: 'invalid_request' });
   });

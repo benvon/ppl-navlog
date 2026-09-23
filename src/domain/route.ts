@@ -7,6 +7,7 @@ export const PLAN_SCHEMA_VERSION = 1 as const;
 export interface AirportRoutePoint {
   readonly kind: "airport";
   readonly id: string;
+  /** Exact 3–4 character airport identifier: FAA LID or ICAO code. */
   readonly icao: string;
   readonly name: string;
   readonly coordinate: Coordinate;
@@ -51,6 +52,8 @@ export interface PlanFuelInputs {
 export interface PlanWeatherSelection {
   readonly forecastValidTimeUtc: string;
   readonly selectedAtUtc: string;
+  /** Explicit nearby ICAO METAR source when the departure is a LID-only airport. */
+  readonly surfaceWeatherIcao?: string;
 }
 
 /** The editable state. Saving it always creates a distinct immutable revision. */

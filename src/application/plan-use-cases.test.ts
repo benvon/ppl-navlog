@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AirportLookupError, createLocalStudyAirportLookup, normalizeIcao } from "./airport-lookup";
+import { AirportLookupError, createLocalStudyAirportLookup, normalizeAirportCode } from "./airport-lookup";
 import {
   applyCruiseTasOverride,
   createAircraftProfile,
@@ -56,8 +56,8 @@ class MemoryPersistence implements NavlogPersistence {
 describe("plan draft use cases", () => {
   it("creates ordered user legs from exact airport endpoints and manual checkpoints", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("kord");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("kord");
+    const destination = await airports.lookupAirportCode("KJVL");
     const checkpoint = { kind: "checkpoint" as const, id: "checkpoint-1", name: "Study point", coordinate: departure.coordinate };
 
     const route = createRouteDefinition({ departure, checkpoints: [checkpoint], destination, cruiseAltitudesFeetMsl: [4_500, 5_500] }, ids("leg-1", "leg-2", "route-1"));
@@ -70,8 +70,8 @@ describe("plan draft use cases", () => {
 
   it("assigns distinct route-point identities to repeated airport endpoints", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KORD");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KORD");
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
 
     expect(route.points.map((point) => point.id)).toEqual(["route-point-1-airport-kord", "route-point-2-airport-kord"]);
@@ -80,8 +80,8 @@ describe("plan draft use cases", () => {
 
   it("keeps route-point identities stable when reopening an unchanged route", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const initial = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const reopened = createRouteDefinition({
       id: initial.id,
@@ -96,8 +96,8 @@ describe("plan draft use cases", () => {
 
   it("preserves the aircraft default when a per-leg TAS override is restored", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
@@ -109,8 +109,8 @@ describe("plan draft use cases", () => {
 
   it("saves an initial revision, then appends a revised immutable child and reopens it", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
@@ -127,8 +127,8 @@ describe("plan draft use cases", () => {
 
   it("records an explicit historical restore without creating a journal branch", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
@@ -142,8 +142,8 @@ describe("plan draft use cases", () => {
 
   it("rejects malformed route, draft, override, revision, and airport-lookup inputs", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
@@ -153,9 +153,9 @@ describe("plan draft use cases", () => {
     expect(() => applyCruiseTasOverride(draft, profile, "missing-leg", 0, undefined, fixedClock)).toThrow(/positive/iu);
     await expect(saveDraftRevision(new MemoryPersistence(), draft, { ...profile, id: "wrong-aircraft" }, ids("revision-1"), fixedClock)).rejects.toThrow(/does not match/iu);
     await expect(reopenPlanRevision(new MemoryPersistence(), "missing-revision")).rejects.toThrow(/no longer available/iu);
-    expect(() => normalizeIcao("too-long")).toThrow(AirportLookupError);
-    expect(() => normalizeIcao("1C8")).toThrow(/FAA location identifiers such as 1C8 are not supported/iu);
-    await expect(airports.lookupExactIcao("KAAA")).rejects.toThrow(/local study airport/iu);
+    expect(() => normalizeAirportCode("too-long")).toThrow(AirportLookupError);
+    expect(normalizeAirportCode("1c8")).toBe("1C8");
+    await expect(airports.lookupAirportCode("KAAA")).rejects.toThrow(/local study airport/iu);
   });
 
   it("persists a newly created profile through the abstraction", async () => {
@@ -186,8 +186,8 @@ describe("plan draft use cases", () => {
 
   it("persists only an explicitly selected, departure-valid forecast period", async () => {
     const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupExactIcao("KORD");
-    const destination = await airports.lookupExactIcao("KJVL");
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
     const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
     const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: "aircraft-1", taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
     const periods = [{ id: "2026-10-01T12:00:00.000Z", validFromUtc: "2026-10-01T10:00:00.000Z", validToUtc: "2026-10-01T15:00:00.000Z" }];

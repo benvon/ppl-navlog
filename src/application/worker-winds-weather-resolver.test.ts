@@ -73,6 +73,29 @@ describe("Worker winds complete-plan resolver", () => {
     expect(result.referenceSnapshots?.[0]?.payload).toMatchObject({ surfaceToAloftInterpolation: { status: "applied", metar: { metarRaw: "KORD 212130Z 27010KT" } } });
   });
 
+  it("uses only an explicit nearby ICAO METAR source for a FAA-LID departure", async () => {
+    const metar: MetarSuccessPayload = {
+      metar: { icao: "KORD", metarRaw: "KORD 212130Z 27010KT", wind: { raw: "27010KT", directionType: "fixed", directionDegTrue: 270, directionVariation: null, speedKt: 10, gustKt: null }, source: "aviationweather", fetchedAt: "2026-09-21T21:31:00.000Z", observedAt: "2026-09-21T21:30:00.000Z" },
+      provenance: { adapter: "runway-picker", fetchedAt: "2026-09-21T21:31:00.000Z", cache: { ...cache, key: "metar:KORD", resource: "metar", fetchedAt: "2026-09-21T21:31:00.000Z", servedAt: "2026-09-21T21:31:00.000Z", expiresAt: "2026-09-21T21:46:00.000Z" } },
+      requestId: "33333333-3333-4333-8333-333333333333",
+    };
+    const requested: string[] = [];
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-lid",
+    }, { fetchMetar: async (icao) => { requested.push(icao); return metar; } });
+    const base = planDraft();
+    const draft = {
+      ...base,
+      departureTimeUtc: "2026-09-21T22:00:00.000Z",
+      route: { ...base.route, points: [{ ...base.route.points[0]!, icao: "1C8" }, ...base.route.points.slice(1)] },
+      weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z", surfaceWeatherIcao: "KORD" },
+    };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+    expect(requested).toEqual(["KORD"]);
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "applied", airportIcao: "1C8", surfaceWeatherIcao: "KORD", fieldElevationFeetMsl: 680 });
+  });
+
   it("continues without a METAR anchor when the optional METAR dependency is unavailable", async () => {
     const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
       stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-3",

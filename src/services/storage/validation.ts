@@ -37,7 +37,7 @@ const MAX_JSON_ITEMS = 20_000;
 /** Worker timestamps may lead an individual browser clock slightly. */
 const EXTERNAL_RETRIEVAL_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const icaoPattern = /^[A-Z0-9]{4}$/;
+const airportCodePattern = /^[A-Z0-9]{3,4}$/;
 const utcPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -268,7 +268,7 @@ function validateRoutePoint(value: unknown, path: string, issues: ValidationIssu
   requiredString(value.name, `${path}.name`, issues);
   validateCoordinate(value.coordinate, `${path}.coordinate`, issues);
   if (kind && value.kind === "airport") {
-    if (typeof value.icao !== "string" || !icaoPattern.test(value.icao)) add(issues, `${path}.icao`, "must be an uppercase four-character ICAO identifier");
+    if (typeof value.icao !== "string" || !airportCodePattern.test(value.icao)) add(issues, `${path}.icao`, "must be an uppercase three- or four-character FAA LID or ICAO code");
     finiteNumber(value.elevationFeetMsl, `${path}.elevationFeetMsl`, issues, -2_000, 50_000);
   }
   return true;
@@ -383,6 +383,9 @@ function validateWeatherSelection(value: unknown, issues: ValidationIssue[], now
     return;
   }
   utcInstant(value.forecastValidTimeUtc, "$.weatherSelection.forecastValidTimeUtc", issues);
+  if (value.surfaceWeatherIcao !== undefined && (typeof value.surfaceWeatherIcao !== "string" || !/^[A-Z0-9]{4}$/.test(value.surfaceWeatherIcao))) {
+    add(issues, "$.weatherSelection.surfaceWeatherIcao", "must be an uppercase four-character ICAO identifier when present");
+  }
   if (utcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues)) {
     checkNoFutureTimestamp(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
   }

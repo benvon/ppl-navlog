@@ -19,6 +19,8 @@ export function renderPlanPortability(repository: PlanPortabilityRepository, act
     exportButton.type = "button";
     exportButton.textContent = label;
     exportButton.addEventListener("click", async () => {
+      exportButton.disabled = true;
+      report(`Preparing ${label.toLowerCase()}…`);
       try {
         const contents = await exportArchive();
         const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
@@ -33,6 +35,8 @@ export function renderPlanPortability(repository: PlanPortabilityRepository, act
         }
       } catch (error) {
         report(error instanceof Error ? error.message : "The archive could not be downloaded.");
+      } finally {
+        exportButton.disabled = false;
       }
     });
     return exportButton;
@@ -53,6 +57,8 @@ export function renderPlanPortability(repository: PlanPortabilityRepository, act
       input.value = "";
       return;
     }
+    input.disabled = true;
+    report("Recovering a plan from JSON…");
     try {
       await repository.importPlanRecoveryArchive(await file.text());
       await onImported();
@@ -61,6 +67,7 @@ export function renderPlanPortability(repository: PlanPortabilityRepository, act
       report(error instanceof Error ? error.message : "Import failed; no records were written.");
     } finally {
       input.value = "";
+      input.disabled = false;
     }
   });
   label.append(input);
