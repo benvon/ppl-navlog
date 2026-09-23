@@ -41,6 +41,10 @@ function input(root: HTMLElement, id: string): HTMLInputElement {
   return element;
 }
 
+function regionText(root: HTMLElement, region: string): string {
+  return root.querySelector<HTMLElement>(`[data-region="${region}"]`)?.textContent ?? "";
+}
+
 function clickByLabel(root: HTMLElement, label: string): void {
   const routeInputs = (names: readonly string[]): void => {
     names.forEach((name) => root.querySelector<HTMLInputElement>(`#${name}`)?.dispatchEvent(new Event("input", { bubbles: true })));
@@ -1195,7 +1199,7 @@ describe("planner shell", () => {
   it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
-    const refreshWeather = vi.fn().mockResolvedValue({ status: "blocked", reason: "weather-unavailable", message: "Fresh winds are unavailable.", warnings: [] });
+    const refreshWeather = vi.fn().mockResolvedValue({ status: "blocked", reason: "infeasible-profile", message: "Route phases overlap.", warnings: [], calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { boundaries: [] } } });
     const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }] }) } as unknown as WindsTransportClient;
     let attempt = 0;
     const calculatePlan: BrowserPlanCalculator = async (_draft, _profile, parent) => {
@@ -1243,21 +1247,44 @@ describe("planner shell", () => {
     if (selector === null) throw new Error("Forecast selector was not rendered.");
     selector.value = "2026-09-22T00:00:00.000Z";
     selector.dispatchEvent(new Event("change", { bubbles: true }));
+    const currentInspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
+    currentInspectedValue?.click();
     input(root, "surface-weather-icao").value = "KORD";
     input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
+    expect(currentInspectedValue?.getAttribute("aria-pressed")).toBe("false");
     expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="refresh-weather"]')?.disabled).toBe(false);
     expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
+    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
+    expect(regionText(root, "inspector")).toContain("Stored unrounded value: 274.25");
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
     expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", surfaceWeatherIcao: "KORD" }));
-    expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
-    const currentInspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
-    currentInspectedValue?.click();
-    input(root, "taxi-fuel").value = "1";
-    input(root, "taxi-fuel").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.textContent).toContain("Weather refresh blocked: Route phases overlap.");
+    expect(regionText(root, "navlog")).toContain("No flyable navlog was invented.");
+    expect(regionText(root, "inspector")).toContain("Choose a value");
+  });
+
+  it("clears inspected calculations when recalculation produces a blocked preview", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const calculatePlan: BrowserPlanCalculator = async () => ({ status: "blocked", reason: "infeasible-profile", message: "Route phases overlap.", warnings: [], calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { boundaries: [] } } });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Stored unrounded value:");
+
+    clickByLabel(root, "Calculate complete navlog");
+    await settle();
+
+    expect(root.querySelector('[data-region="navlog"]')?.textContent).toContain("No flyable navlog was invented.");
     expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Stored unrounded value: 274.25");
-    expect(currentInspectedValue?.getAttribute("aria-pressed")).toBe("false");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Stored unrounded value:");
   });
 
   it("disables winds loading when an edited route endpoint has not been resolved", async () => {

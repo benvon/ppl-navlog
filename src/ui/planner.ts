@@ -812,7 +812,7 @@ class Planner {
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
         this.feedback.textContent = `Navlog blocked: ${result.message}`;
-        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot, inspectedCalculation: undefined };
         this.render();
         return;
       }
@@ -850,7 +850,7 @@ class Planner {
       const result = await refresh(parent, selectedDraft.weatherSelection);
       if (result.status === "blocked") {
         this.feedback.textContent = `Weather refresh blocked: ${result.message}`;
-        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot, inspectedCalculation: undefined };
         this.render();
         return;
       }
