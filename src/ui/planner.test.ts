@@ -75,7 +75,7 @@ function legacyMismatchedWeatherSnapshots(fixture: Awaited<ReturnType<typeof cre
 }
 
 describe("planner shell", () => {
-  it("shows full navlog headings and an explicit calculation state for a saved draft", async () => {
+  it("keeps the Calculation Inspector empty for a saved draft until a calculated value is selected", async () => {
     const persistence = new MemoryPersistence();
     const family = planFamily();
     await persistence.saveAircraftProfile(aircraftProfile());
@@ -91,11 +91,13 @@ describe("planner shell", () => {
     expect(navlog?.textContent).toContain("ETE min");
     expect(navlog?.textContent).toContain("Fuel gal");
     expect(navlog?.textContent).toContain("Calculate complete navlog");
-    navlog?.querySelector<HTMLButtonElement>("button")?.click();
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+    expect(navlog?.textContent).not.toContain("Inspect");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Cruise TAS aircraft default");
+    expect([...root.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toContain("Edit TAS");
   });
 
-  it("clears the inspected draft leg when another draft is opened", async () => {
+  it("clears the TAS editor selection when another draft is opened", async () => {
     const persistence = new MemoryPersistence();
     const firstFamily = planFamily();
     const firstRevision = planRevision();
@@ -113,15 +115,15 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, `Open ${firstFamily.title}`);
     await settle();
-    root.querySelector<HTMLButtonElement>('[data-region="navlog"] button')?.click();
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+    clickByLabel(root, "Edit TAS");
+    expect(root.textContent).toContain("Selected draft leg: Chicago O'Hare → Study checkpoint.");
     clickByLabel(root, `Open ${secondFamily.title}`);
     await settle();
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Selected draft leg");
+    expect(root.textContent).not.toContain("Selected draft leg:");
     confirm.mockRestore();
   });
 
-  it("clears the inspected draft leg when route checkpoints change", async () => {
+  it("clears the TAS editor selection when route checkpoints change", async () => {
     const persistence = new MemoryPersistence();
     const family = planFamily();
     await persistence.saveAircraftProfile(aircraftProfile());
@@ -131,10 +133,36 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, `Open ${family.title}`);
     await settle();
-    root.querySelector<HTMLButtonElement>('[data-region="navlog"] button')?.click();
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+    clickByLabel(root, "Edit TAS");
+    expect(root.textContent).toContain("Selected draft leg: Chicago O'Hare → Study checkpoint.");
     clickByLabel(root, "Remove Study checkpoint");
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Selected draft leg");
+    expect(root.textContent).not.toContain("Selected draft leg:");
+  });
+
+  it("edits and restores TAS on the explicitly selected second saved leg", async () => {
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, planRevision());
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    const editButtons = root.querySelectorAll<HTMLButtonElement>(".tas-editor button");
+    expect(editButtons).toHaveLength(2);
+    editButtons[1]?.click();
+    expect(root.textContent).toContain("Selected draft leg: Study checkpoint → Southern Wisconsin Regional.");
+    clickByLabel(root, "Override TAS for this leg");
+    input(root, "override-tas").value = "102";
+    input(root, "override-confirmation").checked = true;
+    root.querySelector<HTMLFormElement>(".override-form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.textContent).toContain("OVERRIDDEN effective TAS: 102 kt");
+    expect(root.textContent).toContain("Selected draft leg: Study checkpoint → Southern Wisconsin Regional.");
+    clickByLabel(root, "Restore aircraft default");
+    expect(root.textContent).not.toContain("OVERRIDDEN effective TAS: 102 kt");
+    expect(root.textContent).toContain("Selected draft leg: Study checkpoint → Southern Wisconsin Regional.");
   });
 
   it("explains that the optional METAR source anchors winds at departure", async () => {
@@ -288,6 +316,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(root.textContent).toContain("Saved immutable revision");
+    clickByLabel(root, "Edit TAS");
     expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Study aircraft.");
     const originalLegId = persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[0]?.id;
     if (originalLegId === undefined) throw new Error("Initial route leg was not saved.");
@@ -323,6 +352,7 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(reopenedRoot, "Open Preserved study route");
     await settle();
+    clickByLabel(reopenedRoot, "Edit TAS");
     expect(reopenedRoot.textContent).toContain("OVERRIDDEN effective TAS: 100 kt");
     expect(root.textContent).toContain("Saved revision history");
     const revisionButtons = root.querySelectorAll<HTMLButtonElement>(".revision-history button");
@@ -334,6 +364,7 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Opened historical revision");
     root.querySelectorAll<HTMLButtonElement>(".revision-history button")[0]?.click();
     await settle();
+    clickByLabel(root, "Edit TAS");
     expect(root.textContent).toContain("OVERRIDDEN effective TAS");
     confirm.mockRestore();
 
@@ -743,6 +774,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
 
+    clickByLabel(root, "Edit TAS");
     expect(root.textContent).toContain("Cruise TAS aircraft default: 95 kt from Second aircraft.");
   });
 
@@ -796,6 +828,7 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
+    clickByLabel(root, "Edit TAS");
     clickByLabel(root, "Override TAS for this leg");
     input(root, "override-tas").value = "100";
     input(root, "override-confirmation").checked = true;
@@ -1195,7 +1228,8 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal.");
     expect(root.textContent).toContain("RAW FB PRODUCT");
     const navlogTable = root.querySelector(".calculated-navlog table");
-    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
+    const inspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
+    inspectedValue?.click();
     expect(root.querySelector(".calculated-navlog table")).toBe(navlogTable);
     expect(root.textContent).toContain("Stored unrounded value: 274.25");
     expect(root.textContent).toContain("Formula: wind-triangle");
@@ -1217,6 +1251,13 @@ describe("planner shell", () => {
     await settle();
     expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", surfaceWeatherIcao: "KORD" }));
     expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
+    const currentInspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
+    currentInspectedValue?.click();
+    input(root, "taxi-fuel").value = "1";
+    input(root, "taxi-fuel").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Stored unrounded value: 274.25");
+    expect(currentInspectedValue?.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("disables winds loading when an edited route endpoint has not been resolved", async () => {
