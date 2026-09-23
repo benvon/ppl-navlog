@@ -255,6 +255,7 @@ class Planner {
     form.className = "route-form";
     const resolveButton = workflowButton("Resolve airport endpoints", "button", "resolve-airports", this.workflowUnavailableReason("resolve-airports"));
     form.append(...routeBasicFields(this.state.routeForm), ...routeAirportFields(this.state.routeForm), resolveButton, actionStatus("resolve-airports", this.workflowUnavailableReason("resolve-airports")));
+    form.append(text("p", "This METAR station applies only to the departure surface-wind anchor. Destination METAR sources are not used in this calculation; check arrival weather separately."));
     form.addEventListener("input", (event) => this.syncRouteFormInput(event));
     resolveButton?.addEventListener("click", () => void this.handleResolveAirports(form));
     return form;
@@ -412,13 +413,17 @@ class Planner {
       }
     }
     const profile = this.effectiveProfile();
+    section.append(text("p", "Draft route only. Course, heading, wind, distance, time, and fuel are available after you save the route and choose Calculate complete navlog. A dash means not yet calculated."));
     const table = document.createElement("table");
     table.append(createNavlogHeader());
     const body = document.createElement("tbody");
     const points = routePoints(this.state);
     this.state.draft?.route.legs.forEach((leg) => this.appendNavlogRow(body, points, profile, leg));
     table.append(body);
-    section.append(table);
+    const scroll = document.createElement("div");
+    scroll.className = "navlog-table-scroll draft-navlog";
+    scroll.append(table);
+    section.append(scroll);
     if (this.state.draft === undefined) section.append(text("p", "Save a route draft to populate the table."));
     return section;
   }
@@ -463,10 +468,13 @@ class Planner {
     const labels = navlogLabels(points, profile, leg);
     const row = document.createElement("tr");
     row.append(cell(labels.from), cell(labels.to), cell(labels.altitude), cell(labels.tas), cell(labels.fuelFlow));
+    for (let index = 0; index < 8; index += 1) row.append(cell("—"));
     const inspect = button("Inspect", "button");
     inspect.addEventListener("click", () => {
       this.state = { ...this.state, inspectedLegId: leg.id };
+      this.feedback.textContent = `Selected draft leg ${labels.from} to ${labels.to}. Its aircraft defaults are shown in the Calculation Inspector.`;
       this.render();
+      this.content.querySelector<HTMLElement>('[data-region="inspector"]')?.scrollIntoView?.({ block: "nearest" });
     });
     row.append(cell(inspect));
     body.append(row);
@@ -481,6 +489,10 @@ class Planner {
     if (draft === undefined || profile === undefined || leg === undefined) {
       section.append(text("p", "Select an aircraft profile and save a route draft to inspect its performance defaults."));
       return section;
+    }
+    if (this.state.inspectedLegId !== undefined) {
+      const labels = navlogLabels(draft.route.points, profile, leg);
+      section.append(text("p", `Selected draft leg: ${labels.from} → ${labels.to}.`));
     }
     const override = leg.performanceOverrides?.cruiseTasKnots;
     section.append(text("p", `Cruise TAS aircraft default: ${profile.cruiseTasKnots} kt from ${profile.name}.`));
@@ -520,6 +532,7 @@ class Planner {
     inspector.dataset.region = "inspector";
     current.replaceWith(inspector);
     inspector.querySelector<HTMLElement>(".calculation-inspector h3")?.focus();
+    inspector.scrollIntoView?.({ block: "nearest" });
   }
 
   private renderOverrideForm(draft: PlanDraft, profile: AircraftProfile, legId: string): HTMLFormElement {
@@ -1224,7 +1237,7 @@ function navlogLabels(points: readonly RoutePoint[], profile: AircraftProfile | 
 function createNavlogHeader(): HTMLTableSectionElement {
   const header = document.createElement("thead");
   const row = document.createElement("tr");
-  ["From", "To", "Altitude", "Cruise TAS", "Fuel flow", "Explanation"].forEach((label) => {
+  ["From", "To", "Altitude", "Cruise TAS", "Fuel flow", "Course", "Wind", "WCA°", "Heading", "NM", "GS kt", "ETE min", "Fuel gal", "Explanation"].forEach((label) => {
     const cell = document.createElement("th");
     cell.scope = "col";
     cell.textContent = label;
@@ -1271,7 +1284,7 @@ function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[
   return [
     labeledInput("departure-icao", "Departure airport code (FAA LID or ICAO)", values.departureIcao, "text"),
     labeledInput("destination-icao", "Destination airport code (FAA LID or ICAO)", values.destinationIcao, "text"),
-    labeledInput("surface-weather-icao", "Surface-weather source ICAO (optional; required to use a surface-METAR anchor)", values.surfaceWeatherIcao, "text"),
+    labeledInput("surface-weather-icao", "Departure-area METAR station ICAO (optional; used to anchor surface wind at the departure airport field elevation)", values.surfaceWeatherIcao, "text"),
   ];
 }
 

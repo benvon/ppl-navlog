@@ -75,6 +75,33 @@ function legacyMismatchedWeatherSnapshots(fixture: Awaited<ReturnType<typeof cre
 }
 
 describe("planner shell", () => {
+  it("shows full navlog headings and an explicit calculation state for a saved draft", async () => {
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, planRevision());
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    const navlog = root.querySelector<HTMLElement>('[data-region="navlog"]');
+    expect(navlog?.textContent).toContain("Heading");
+    expect(navlog?.textContent).toContain("Course");
+    expect(navlog?.textContent).toContain("ETE min");
+    expect(navlog?.textContent).toContain("Fuel gal");
+    expect(navlog?.textContent).toContain("Calculate complete navlog");
+    navlog?.querySelector<HTMLButtonElement>("button")?.click();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Selected draft leg");
+  });
+
+  it("explains that the optional METAR source anchors winds at departure", async () => {
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
+    await settle();
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure");
+    expect(root.querySelector('[data-region="route"]')?.textContent).toContain("Destination METAR sources are not used in this calculation");
+  });
   it("offers browser-local PDF printing only for a complete saved revision", async () => {
     const fixture = await createCompleteFlightFixture();
     const weatherSnapshots = legacyMismatchedWeatherSnapshots(fixture);
@@ -1166,7 +1193,7 @@ describe("planner shell", () => {
     const load = root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]');
     expect(load?.disabled).toBe(true);
     expect(root.textContent).toContain("Unavailable: Resolve both route endpoints before loading winds periods.");
-    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("optional; required to use a surface-METAR anchor");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure airport field elevation");
     load?.dispatchEvent(new Event("click"));
     await settle();
     expect(discoverStations).not.toHaveBeenCalled();

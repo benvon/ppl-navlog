@@ -40,6 +40,7 @@ body {
 
 .navlog-table-scroll { max-width: 100%; overflow-x: auto; }
 .calculated-navlog table { min-width: 90rem; }
+.draft-navlog table { min-width: 75rem; }
 
 @media (max-width: 80rem) {
   .planner-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
