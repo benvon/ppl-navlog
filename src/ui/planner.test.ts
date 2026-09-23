@@ -141,10 +141,12 @@ describe("planner shell", () => {
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock });
     await settle();
-    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("departure field elevation");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("if usable");
     const routeText = root.querySelector('[data-region="route"]')?.textContent;
+    expect(routeText).toContain("When a selected METAR is fresh and usable");
+    expect(routeText).toContain("otherwise the calculation uses winds aloft only");
     expect(routeText).toContain("Station proximity is not verified");
-    expect(routeText).toContain("Entering a destination station here still anchors its wind at departure");
+    expect(routeText).toContain("Entering a destination station here still treats it as a departure source");
     expect(routeText).toContain("Route-aware weather is planned");
   });
   it("offers browser-local PDF printing only for a complete saved revision", async () => {
