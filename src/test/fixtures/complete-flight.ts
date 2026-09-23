@@ -66,7 +66,7 @@ export function completeFlightDraft(): PlanDraft {
     title: "Synthetic KORD → KJVL teaching flight",
     departureTimeUtc: "2026-09-21T22:00:00.000Z",
     route: { ...base.route, legs: base.route.legs.map((leg, index) => ({ ...leg, cruiseAltitudeFeetMsl: index === 0 ? 4_500 : 5_500 })) },
-    weatherSelection: { forecastValidTimeUtc: COMPLETE_FLIGHT_FORECAST_VALID_AT, selectedAtUtc: COMPLETE_FLIGHT_TIME },
+    weatherSelection: { forecastValidTimeUtc: COMPLETE_FLIGHT_FORECAST_VALID_AT, selectedAtUtc: COMPLETE_FLIGHT_TIME, surfaceWeatherIcao: "KORD" },
     fuelInputs: { taxiRunupFuelGallons: 0.8, reserveFuelGallons: 3 },
     descentTargetAltitudeFeetMsl: {
       computedValue: null, effectiveValue: 808, origin: "pilot-input",

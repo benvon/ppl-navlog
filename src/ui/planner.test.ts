@@ -5,6 +5,7 @@ import type { AircraftProfile } from "../domain/aircraft";
 import type { PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
+import { aircraftProfile, planFamily, planRevision } from "../services/storage/__tests__/fixtures";
 import { renderPlanner } from "./planner";
 import { createCompleteFlightFixture } from "../test/fixtures/complete-flight";
 
@@ -877,10 +878,42 @@ describe("planner shell", () => {
     if (selector === null) throw new Error("Forecast selector was not rendered.");
     selector.value = "2026-09-22T00:00:00.000Z";
     selector.dispatchEvent(new Event("change", { bubbles: true }));
+    input(root, "surface-weather-icao").value = "KORD";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="refresh-weather"]')?.disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
-    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z" }));
+    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", surfaceWeatherIcao: "KORD" }));
     expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
+  });
+
+  it("disables winds loading when an edited route endpoint has not been resolved", async () => {
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision = planRevision();
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    const discoverStations = vi.fn().mockResolvedValue({ forecasts: [] });
+    const winds = { discoverStations } as unknown as WindsTransportClient;
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]')?.disabled).toBe(false);
+    input(root, "departure-icao").value = "KXYZ";
+    input(root, "departure-icao").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const load = root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]');
+    expect(load?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints before loading winds periods.");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("optional; required to use a surface-METAR anchor");
+    load?.dispatchEvent(new Event("click"));
+    await settle();
+    expect(discoverStations).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("Resolve the route endpoints before loading winds periods.");
   });
 
   it("freezes controls while a calculation owns the saved draft", async () => {

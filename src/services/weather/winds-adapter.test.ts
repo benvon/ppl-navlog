@@ -255,11 +255,13 @@ describe("WorkerWindsAdapter", () => {
     expect(loaded.surfaceToAloftInterpolation).toMatchObject({
       status: "applied",
       assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
+      statement: expect.stringContaining("surface METAR KJVL"),
       fieldElevationFeetMsl: 808,
       directionTreatment: "fixed-true",
       firstAloftLevel: { transport: { altitudeFt: 3000 } },
       metar: { metarRaw: expect.stringContaining("18010KT"), requestId: "33333333-3333-4333-8333-333333333333" },
     });
+    expect(loaded.surfaceToAloftInterpolation?.statement).toContain("departure airport KJVL field elevation 808 ft MSL");
     const surface = value(resolveLoadedWindAtAltitude(loaded, 808));
     expect(surface.wind).toMatchObject({ directionFrom: 180, speed: 10 });
     const effective = value(sampleLoadedEffectivePhaseWind(loaded, 808, 6000));

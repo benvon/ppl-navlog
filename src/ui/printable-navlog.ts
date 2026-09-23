@@ -129,7 +129,7 @@ const sourceSection = (snapshots: readonly WeatherReferenceSnapshot[], revision:
     if (snapshot === undefined) continue;
     list.append(element("li", `${snapshot.source} - retrieved ${snapshot.retrievedAt} UTC - snapshot ${snapshot.id}`));
     const interpolation = child(snapshot.payload, "surfaceToAloftInterpolation");
-    if (interpolation?.status === "applied") list.append(element("li", `METAR wind anchored at ${decimal(interpolation.fieldElevationFeetMsl, 0)} ft MSL from ${string(interpolation.fieldElevationSource)}; vector-interpolated toward the first forecast level.`));
+    if (interpolation?.status === "applied") list.append(element("li", `Surface METAR ${string(interpolation.surfaceWeatherIcao)} wind anchored at departure airport ${string(interpolation.airportIcao)} field elevation ${decimal(interpolation.fieldElevationFeetMsl, 0)} ft MSL from ${string(interpolation.fieldElevationSource)}; vector-interpolated toward the first forecast level.`));
   }
   section.append(list);
   return section;

@@ -333,7 +333,7 @@ class Planner {
       this.state = {
         ...this.state,
         selectedForecastValidTimeUtc,
-        hasUnsavedForecastSelection: this.state.draft !== undefined && selectedForecastValidTimeUtc !== this.state.draft.weatherSelection?.forecastValidTimeUtc,
+        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, selectedForecastValidTimeUtc, this.state.routeForm.surfaceWeatherIcao),
         calculationPreview: undefined,
       };
       this.feedback.textContent = selectedForecastValidTimeUtc === undefined
@@ -350,11 +350,18 @@ class Planner {
     try {
       const winds = this.dependencies.winds;
       if (winds === undefined) throw new Error("Live winds selection is unavailable.");
-      const points = routePoints(this.state);
-      if (points.length < 2) throw new Error("Resolve the route endpoints before loading winds periods.");
+      if (this.state.departure === undefined || this.state.destination === undefined) throw new Error("Resolve the route endpoints before loading winds periods.");
+      const points = routePointsWithCheckpoints(this.state, this.state.checkpoints);
       if (!this.beginInputTransaction("Loading published winds periods…")) return;
       const discovery = await winds.discoverStations(points.map((point) => point.coordinate));
-      this.state = { ...this.state, pendingOperation: undefined, availableForecasts: discovery.forecasts, selectedForecastValidTimeUtc: undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = {
+        ...this.state,
+        pendingOperation: undefined,
+        availableForecasts: discovery.forecasts,
+        selectedForecastValidTimeUtc: undefined,
+        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, undefined, this.state.routeForm.surfaceWeatherIcao),
+        calculationPreview: undefined,
+      };
       this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
       this.render();
     } catch (error) {
@@ -884,7 +891,7 @@ class Planner {
   }
 
   private windsLoadingUnavailableReason(): string | undefined {
-    if (routePoints(this.state).length < 2) return "Resolve both route endpoints before loading winds periods.";
+    if (this.state.departure === undefined || this.state.destination === undefined) return "Resolve both route endpoints before loading winds periods.";
     if (!isLocalUtcDateTime(this.state.routeForm.departureTime)) return "Enter the planned departure UTC time before loading winds periods.";
     return undefined;
   }
@@ -979,6 +986,13 @@ class Planner {
           ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
       : field === "destinationIcao"
             ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+        : field === "surfaceWeatherIcao"
+          ? {
+            ...this.state,
+            routeForm: { ...this.state.routeForm, [field]: input.value },
+            hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.state.selectedForecastValidTimeUtc, input.value),
+            calculationPreview: undefined,
+          }
         : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
     this.refreshWorkflowAvailability();
   }
@@ -1180,7 +1194,7 @@ function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[
   return [
     labeledInput("departure-icao", "Departure airport code (FAA LID or ICAO)", values.departureIcao, "text"),
     labeledInput("destination-icao", "Destination airport code (FAA LID or ICAO)", values.destinationIcao, "text"),
-    labeledInput("surface-weather-icao", "Surface-weather source ICAO (optional; for a nearby METAR when departure is a FAA LID)", values.surfaceWeatherIcao, "text"),
+    labeledInput("surface-weather-icao", "Surface-weather source ICAO (optional; required to use a surface-METAR anchor)", values.surfaceWeatherIcao, "text"),
   ];
 }
 
@@ -1240,6 +1254,17 @@ function isAirportCode(value: string): boolean {
 function isOptionalIcao(value: string): boolean {
   const normalized = value.trim().toUpperCase();
   return normalized === "" || /^[A-Z0-9]{4}$/.test(normalized);
+}
+
+function normalizedOptionalIcao(value: string): string | undefined {
+  return value.trim().toUpperCase() || undefined;
+}
+
+function weatherSelectionIsDirty(draft: PlanDraft | undefined, forecastValidTimeUtc: string | undefined, surfaceWeatherIcao: string): boolean {
+  return draft !== undefined && (
+    forecastValidTimeUtc !== draft.weatherSelection?.forecastValidTimeUtc
+    || normalizedOptionalIcao(surfaceWeatherIcao) !== normalizedOptionalIcao(draft.weatherSelection?.surfaceWeatherIcao ?? "")
+  );
 }
 
 function isLocalUtcDateTime(value: string): boolean {

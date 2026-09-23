@@ -354,7 +354,7 @@ const resolveSurfaceToAloftInterpolation = (
     evidence: {
       status: "applied",
       assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
-      statement: "Planning assumption: the selected surface METAR true wind is anchored at the departure field elevation supplied by airport data (not by the METAR report) and vector-interpolated only to the first available FB winds-aloft level.",
+      statement: `Planning assumption: surface METAR ${input.surfaceWeatherIcao ?? input.airportIcao} true wind is anchored at departure airport ${input.airportIcao} field elevation ${input.fieldElevationFeetMsl} ft MSL supplied by airport data (not by the METAR report) and vector-interpolated only to the first available FB winds-aloft level.`,
       airportIcao: input.airportIcao,
       surfaceWeatherIcao: input.surfaceWeatherIcao ?? input.airportIcao,
       fieldElevationFeetMsl: input.fieldElevationFeetMsl,

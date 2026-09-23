@@ -67,7 +67,7 @@ describe("Worker winds complete-plan resolver", () => {
     const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
       stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-2",
     }, { fetchMetar: async () => metar });
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z", surfaceWeatherIcao: "KORD" } };
     const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
     expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "applied", fieldElevationFeetMsl: 680, fieldElevationSource: "departure-airport-data" });
     expect(result.referenceSnapshots?.[0]?.payload).toMatchObject({ surfaceToAloftInterpolation: { status: "applied", metar: { metarRaw: "KORD 212130Z 27010KT" } } });
@@ -96,6 +96,54 @@ describe("Worker winds complete-plan resolver", () => {
     expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "applied", airportIcao: "1C8", surfaceWeatherIcao: "KORD", fieldElevationFeetMsl: 680 });
   });
 
+  it("does not infer a METAR source from an ICAO-looking departure identifier", async () => {
+    const requested: string[] = [];
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-implicit-source",
+    }, { fetchMetar: async (icao) => { requested.push(icao); throw new Error("unexpected METAR request"); } });
+    const base = planDraft();
+    const draft = {
+      ...base,
+      departureTimeUtc: "2026-09-21T22:00:00.000Z",
+      route: { ...base.route, points: [{ ...base.route.points[0]!, icao: "KORD" }, ...base.route.points.slice(1)] },
+      weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" },
+    };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+
+    expect(requested).toEqual([]);
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toBeUndefined();
+  });
+
+  it("warns when an explicitly selected surface METAR cannot be loaded", async () => {
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-metar-failure",
+    }, { fetchMetar: async () => { throw new Error("transport details must not be exposed"); } });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z", surfaceWeatherIcao: "KORD" } };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+
+    expect(result.warnings).toEqual(["Selected surface METAR KORD could not be loaded; calculation uses winds aloft only."]);
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toBeUndefined();
+  });
+
+  it("does not apply interpolation when the returned METAR identity mismatches the selected source", async () => {
+    const metar: MetarSuccessPayload = {
+      metar: { icao: "KMKE", metarRaw: "KMKE 212130Z 27010KT", wind: { raw: "27010KT", directionType: "fixed", directionDegTrue: 270, directionVariation: null, speedKt: 10, gustKt: null }, source: "aviationweather", fetchedAt: "2026-09-21T21:31:00.000Z", observedAt: "2026-09-21T21:30:00.000Z" },
+      provenance: { adapter: "runway-picker", fetchedAt: "2026-09-21T21:31:00.000Z", cache: { ...cache, key: "metar:KORD", resource: "metar", fetchedAt: "2026-09-21T21:31:00.000Z", servedAt: "2026-09-21T21:31:00.000Z", expiresAt: "2026-09-21T21:46:00.000Z" } },
+      requestId: "33333333-3333-4333-8333-333333333333",
+    };
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-metar-mismatch",
+    }, { fetchMetar: async () => metar });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z", surfaceWeatherIcao: "KORD" } };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+
+    expect(result.loadedWindsData?.surfaceToAloftInterpolation).toMatchObject({ status: "unavailable", reason: "airport-identity-mismatch", surfaceWeatherIcao: "KORD" });
+    expect(result.warnings).toEqual(["Selected surface METAR KORD was not usable; calculation uses winds aloft only."]);
+  });
+
   it("continues without a METAR anchor when the optional METAR dependency is unavailable", async () => {
     const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(new Client()), {
       stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-3",
@@ -120,5 +168,25 @@ describe("Worker winds complete-plan resolver", () => {
     const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z" } };
 
     await expect(resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] })).resolves.toMatchObject({ warnings: [expect.stringMatching(/stale cache/i)] });
+  });
+
+  it("composes selected-METAR failure and stale-winds warnings", async () => {
+    const staleForecast = forecast();
+    const staleProvenance = { ...staleForecast.provenance, cache: { ...staleForecast.provenance.cache, status: "stale_on_error" as const, source: "stale" as const, freshnessRemainingSeconds: 0 } };
+    const winds: WindsTransportClient = {
+      discoverStations: async () => discovery(),
+      fetchForecast: async () => ({ ...staleForecast, provenance: staleProvenance }),
+    };
+    const resolver = createWorkerWindsPlanWeatherResolver(new WorkerWindsAdapter(winds), {
+      stationSelectionCoordinate: value(coordinate(40.8, -91.1)), weatherSnapshotId: "winds-snapshot-stale-metar-failure",
+    }, { fetchMetar: async () => { throw new Error("METAR outage"); } });
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", selectedAtUtc: "2026-09-21T18:30:00.000Z", surfaceWeatherIcao: "KORD" } };
+
+    const result = await resolver.resolve({ draft, aircraftProfile: aircraftProfile(), routeLegs: [] });
+
+    expect(result.warnings).toEqual([
+      "Selected surface METAR KORD could not be loaded; calculation uses winds aloft only.",
+      expect.stringMatching(/stale cache/i),
+    ]);
   });
 });

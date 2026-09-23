@@ -15,6 +15,8 @@ describe("one-way print/PDF output", () => {
     expect(sheet?.textContent).toContain("OVERRIDDEN true-airspeed: 95.0 to 102.0");
     expect(sheet?.textContent).toContain("Required total9.70 gal");
     expect(sheet?.textContent).toContain("680 ft");
+    expect(sheet?.textContent).toContain("Surface METAR KORD");
+    expect(sheet?.textContent).toContain("departure airport KORD field elevation 680 ft MSL");
     expect(JSON.stringify(fixture.revision)).toBe(before);
   });
 
