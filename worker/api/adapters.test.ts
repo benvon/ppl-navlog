@@ -16,6 +16,14 @@ describe('runway-picker adapter', () => {
     expect(new URL(requests[0]?.url ?? '').searchParams.get('icao')).toBe('KJVL');
   });
 
+  it('passes a FAA LID through as an exact AirportDB identifier', async () => {
+    const lidAirport = { ...runwayPickerAirportFixture, requestedIcao: '1C8', icao: '1C8' };
+    const { fetcher, requests } = fetcherFor({ ...lidAirport, cache: runwayPickerCacheFixture });
+    const result = await createRunwayPickerAdapter(fetcher, 'https://runway-picker.internal').getAirport('1C8');
+    expect(result.airport.icao).toBe('1C8');
+    expect(new URL(requests[0]?.url ?? '').searchParams.get('icao')).toBe('1C8');
+  });
+
   it('uses the evidenced METAR endpoint and validates its response', async () => {
     const { fetcher, requests } = fetcherFor({ ...runwayPickerMetarFixture, cache: runwayPickerCacheFixture });
     const result = await createRunwayPickerAdapter(fetcher, 'https://runway-picker.internal').getMetar('KJVL');

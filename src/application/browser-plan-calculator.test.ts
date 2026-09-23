@@ -40,7 +40,7 @@ describe("browser plan composition", () => {
     const saved: { family: PlanFamily; revision: PlanRevision; snapshots: readonly WeatherReferenceSnapshot[] }[] = [];
     let next = 0;
     const calculator = createBrowserPlanCalculator({ saveCalculatedPlanRevision: async (family, revision, snapshots) => { saved.push({ family, revision, snapshots }); } }, client, { next: () => `new-${++next}` }, { now: () => new Date(timestamp) });
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: period.validAt, selectedAtUtc: timestamp } };
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: period.validAt, selectedAtUtc: timestamp, surfaceWeatherIcao: "KORD" } };
     const result = await calculator(draft, aircraftProfile());
     expect(result.status).toBe("saved");
     expect(saved).toHaveLength(1);

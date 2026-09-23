@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
 import type { AircraftProfile } from "../domain/aircraft";
-import type { PlanFamily, PlanRevision } from "../domain/route";
+import type { JsonValue, PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
+import { aircraftProfile, planFamily, planRevision } from "../services/storage/__tests__/fixtures";
 import { renderPlanner } from "./planner";
 import { createCompleteFlightFixture } from "../test/fixtures/complete-flight";
 
@@ -41,13 +42,82 @@ function input(root: HTMLElement, id: string): HTMLInputElement {
 }
 
 function clickByLabel(root: HTMLElement, label: string): void {
-  const control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
+  const routeInputs = (names: readonly string[]): void => {
+    names.forEach((name) => root.querySelector<HTMLInputElement>(`#${name}`)?.dispatchEvent(new Event("input", { bubbles: true })));
+  };
+  let control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
+  if (control?.disabled && label === "Resolve airport endpoints") routeInputs(["departure-icao", "destination-icao"]);
+  if (control?.disabled && label === "Load available winds periods") routeInputs(["departure-time"]);
+  if (control?.disabled && label === "Save new plan revision" && root.querySelector("#selected-forecast-period") === null) routeInputs(["departure-time"]);
+  control = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label);
   if (control === undefined) throw new Error(`Missing button ${label}`);
   control.click();
 }
 
+function legacyMismatchedWeatherSnapshots(fixture: Awaited<ReturnType<typeof createCompleteFlightFixture>>) {
+  let found = false;
+  const snapshots = fixture.weatherSnapshots.map((snapshot) => {
+    if (typeof snapshot.payload !== "object" || snapshot.payload === null || Array.isArray(snapshot.payload)) return snapshot;
+    const payload = snapshot.payload as Record<string, JsonValue>;
+    const value = payload.surfaceToAloftInterpolation;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return snapshot;
+    const evidence = { ...(value as Record<string, JsonValue>) };
+    const metar = evidence.metar;
+    if (typeof metar !== "object" || metar === null || Array.isArray(metar)) return snapshot;
+    delete evidence.surfaceWeatherIcao;
+    evidence.airportIcao = "1C8";
+    evidence.metar = { ...(metar as Record<string, JsonValue>), icao: "KORD" };
+    found = true;
+    return { ...snapshot, payload: { ...payload, surfaceToAloftInterpolation: evidence } };
+  });
+  if (!found) throw new Error("Complete flight fixture did not include surface interpolation evidence.");
+  return snapshots;
+}
+
 describe("planner shell", () => {
   it("offers browser-local PDF printing only for a complete saved revision", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const weatherSnapshots = legacyMismatchedWeatherSnapshots(fixture);
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
+    renderPlanner(root, {
+      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
+      weatherEvidence: { getWeatherSnapshot: async (id) => weatherSnapshots.find((snapshot) => snapshot.id === id) },
+    });
+    await settle();
+    expect(root.textContent).not.toContain("Print / Save PDF");
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+    const panel = root.querySelector<HTMLElement>('[data-region="navlog"]');
+    const closed = panel?.querySelector<HTMLDetailsElement>("details");
+    expect(panel).not.toBeNull();
+    expect(closed?.open).toBe(false);
+    expect(panel?.querySelectorAll(".calculated-navlog tbody tr")).toHaveLength(5);
+    expect(panel?.querySelector<HTMLButtonElement>(".navlog-value")?.textContent).toMatch(/^\d/);
+    clickByLabel(root, "Print / Save PDF");
+    expect(print).toHaveBeenCalledOnce();
+    expect(document.body.classList.contains("printing-navlog")).toBe(true);
+    expect(document.querySelector(".print-sheet")).toBeNull();
+    expect(panel?.querySelector("details")).toBe(closed);
+    expect(panel?.textContent).not.toContain("Surface METAR Unavailable");
+    window.dispatchEvent(new Event("afterprint"));
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    expect(document.querySelector(".print-sheet")).toBeNull();
+    if (closed == null) throw new Error("Expected a navlog disclosure.");
+    closed.open = true;
+    clickByLabel(root, "Print / Save PDF");
+    expect(print).toHaveBeenCalledTimes(2);
+    expect(closed.open).toBe(true);
+    expect(document.body.classList.contains("printing-navlog")).toBe(true);
+    window.dispatchEvent(new Event("afterprint"));
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    print.mockRestore();
+  });
+
+  it("refuses to print a saved revision when its referenced weather evidence is missing", async () => {
     const fixture = await createCompleteFlightFixture();
     const persistence = new MemoryPersistence();
     await persistence.saveAircraftProfile(fixture.profile);
@@ -56,17 +126,39 @@ describe("planner shell", () => {
     const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
     renderPlanner(root, {
       airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
+      weatherEvidence: { getWeatherSnapshot: async () => undefined },
+    });
+    await settle();
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+
+    clickByLabel(root, "Print / Save PDF");
+
+    expect(print).not.toHaveBeenCalled();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("weather evidence");
+    print.mockRestore();
+  });
+
+  it("clears print mode and reports a browser print error", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, fixture.revision);
+    const root = document.createElement("div");
+    const print = vi.spyOn(window, "print").mockImplementation(() => { throw new Error("print unavailable"); });
+    renderPlanner(root, {
+      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
       weatherEvidence: { getWeatherSnapshot: async (id) => fixture.weatherSnapshots.find((snapshot) => snapshot.id === id) },
     });
     await settle();
-    expect(root.textContent).not.toContain("Print / Save PDF");
     clickByLabel(root, `Open ${fixture.family.title}`);
     await settle();
+
     clickByLabel(root, "Print / Save PDF");
+
     expect(print).toHaveBeenCalledOnce();
-    expect(document.querySelector(".print-sheet")?.textContent).toContain("Visual Flight Log");
-    window.dispatchEvent(new Event("afterprint"));
-    expect(document.querySelector(".print-sheet")).toBeNull();
+    expect(document.body.classList.contains("printing-navlog")).toBe(false);
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("print unavailable");
     print.mockRestore();
   });
 
@@ -100,9 +192,9 @@ describe("planner shell", () => {
     input(root, "departure-time").value = "2026-10-01T12:00";
     input(root, "taxi-fuel").value = "1.2";
     input(root, "reserve-fuel").value = "3.5";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
-    expect(root.textContent).toContain("Exact ICAO endpoints resolved from the configured aviation-data source.");
+    expect(root.textContent).toContain("Resolved airport endpoints: KORD and KJVL.");
     expect(input(root, "plan-title").value).toBe("Preserved study route");
     expect(input(root, "departure-time").value).toBe("2026-10-01T12:00");
     expect(input(root, "taxi-fuel").value).toBe("1.2");
@@ -113,10 +205,10 @@ describe("planner shell", () => {
     input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first.");
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints first.");
     input(root, "destination-icao").value = "KJVL";
     input(root, "destination-icao").dispatchEvent(new Event("input", { bubbles: true }));
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     clickByLabel(root, "Save new plan revision");
@@ -179,7 +271,7 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Opened current journal revision");
 
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -193,19 +285,19 @@ describe("planner shell", () => {
 
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1680");
 
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1808");
 
     input(root, "descent-target").value = "2500";
     input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
     input(root, "destination-icao").value = "KORD";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("2500");
   });
@@ -222,7 +314,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -230,7 +322,7 @@ describe("planner shell", () => {
     await settle();
 
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     expect(input(root, "descent-target").value).toBe("1808");
   });
@@ -247,7 +339,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KJVL";
     input(root, "destination-icao").value = "KORD";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "descent-target").value = "";
     input(root, "descent-target").dispatchEvent(new Event("input", { bubbles: true }));
@@ -290,11 +382,34 @@ describe("planner shell", () => {
 
     input(root, "departure-icao").value = "TOO-LONG";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
-    expect(root.textContent).toContain("FAA location identifiers such as 1C8 are not supported in v1.");
+    expect(root.textContent).toContain("Unavailable: Enter both exact three- or four-character FAA LID or ICAO airport codes.");
     expect(root.textContent).toContain("Resolve departure and destination before defining leg altitudes.");
+  });
+
+  it("resolves an FAA LID exactly and does not invent an ICAO prefix", async () => {
+    const root = document.createElement("div");
+    const local = createLocalStudyAirportLookup();
+    renderPlanner(root, {
+      airportLookup: {
+        lookupAirportCode: async (code) => code.toUpperCase() === "1C8"
+          ? { ...(await local.lookupAirportCode("KORD")), id: "airport-1c8", icao: "1C8", name: "FAA LID study airport" }
+          : local.lookupAirportCode(code),
+      },
+      persistence: new MemoryPersistence(),
+      ids: ids(),
+      clock,
+    });
+    await settle();
+
+    input(root, "departure-icao").value = "1c8";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve airport endpoints");
+    await settle();
+
+    expect(root.textContent).toContain("Resolved airport endpoints: 1C8 and KJVL.");
   });
 
   it("adds and removes a manually entered checkpoint only after coordinate validation", async () => {
@@ -320,7 +435,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     const addCheckpoint = async (name: string, latitude: string, longitude: string): Promise<void> => {
       input(root, "checkpoint-name").value = name;
@@ -387,7 +502,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -403,13 +518,13 @@ describe("planner shell", () => {
     input(root, "cruise-tas").dispatchEvent(new Event("input", { bubbles: true }));
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     expect(input(root, "cruise-tas").value).toBe("123");
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Save the aircraft profile version before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Save the pending aircraft profile version first.");
   });
 
   it("reports invalid checkpoint and incomplete-route errors without changing the editable draft", async () => {
@@ -436,7 +551,7 @@ describe("planner shell", () => {
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Resolve exact ICAO departure and destination first");
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints first.");
   });
 
   it("requires a UTC date/time before creating an immutable revision", async () => {
@@ -449,12 +564,12 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
 
     clickByLabel(root, "Save new plan revision");
     await settle();
-    expect(root.textContent).toContain("Enter a planned departure UTC date and time");
+    expect(root.textContent).toContain("Unavailable: Enter the planned departure UTC time first.");
   });
 
   it("blocks calculation after an unsaved route edit instead of silently using the prior revision", async () => {
@@ -469,7 +584,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-10-01T12:00";
     clickByLabel(root, "Save new plan revision");
@@ -481,7 +596,7 @@ describe("planner shell", () => {
     await settle();
 
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+    expect(root.textContent).toContain("Unavailable: Save the current route, aircraft, altitude, and weather edits as a new revision first.");
   });
 
   it("rejects invalid cruise altitudes before saving or calculating", async () => {
@@ -497,7 +612,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -509,11 +624,11 @@ describe("planner shell", () => {
     clickByLabel(root, "Calculate complete navlog");
     await settle();
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Correct each highlighted cruise altitude before calculating.");
+    expect(root.textContent).toContain("Unavailable: Correct the highlighted cruise altitude values first.");
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions).toHaveLength(1);
-    expect(root.textContent).toContain("Correct each highlighted cruise altitude before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Correct the highlighted cruise altitude values first.");
 
     altitude.value = "5500";
     altitude.dispatchEvent(new Event("change", { bubbles: true }));
@@ -548,7 +663,7 @@ describe("planner shell", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-10-01T12:00";
     clickByLabel(root, "Save new plan revision");
@@ -570,7 +685,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -587,7 +702,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Calculate complete navlog");
     await settle();
     expect(calculatePlan).not.toHaveBeenCalled();
-    expect(root.textContent).toContain("Save the current route, aircraft, altitude, and forecast edits as a new revision before calculating.");
+    expect(root.textContent).toContain("Unavailable: Save the current route, aircraft, altitude, and weather edits as a new revision first.");
   });
 
   it("clears profile-derived overrides when saving a changed aircraft profile version", async () => {
@@ -603,7 +718,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -692,7 +807,7 @@ describe("planner shell", () => {
     input(root, "destination-icao").value = "KJVL";
     input(root, "plan-title").value = "Snapshot route";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -751,7 +866,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-10-01T12:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -766,7 +881,7 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions).toHaveLength(1);
-    expect(root.textContent).toContain("Save and select an aircraft profile before saving a plan.");
+    expect(root.textContent).toContain("Unavailable: Save and select an aircraft profile first.");
   });
 
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {
@@ -781,7 +896,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-09-21T22:00";
     input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
@@ -795,6 +910,179 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2026-09-22T00:00:00.000Z");
+  });
+
+  it("preserves a saved forecast when only the surface weather source changes", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const calculatePlan = vi.fn() as unknown as BrowserPlanCalculator;
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+          surfaceWeatherIcao: "KORD",
+        },
+      },
+    };
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    input(root, "surface-weather-icao").value = "KJVL";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection).toEqual({
+      forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+      selectedAtUtc: "2026-09-21T12:00:00.000Z",
+      surfaceWeatherIcao: "KJVL",
+    });
+  });
+
+  it("preserves a saved forecast when only a leg altitude changes", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+        },
+      },
+    };
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    const altitude = input(root, "leg-altitude-1");
+    altitude.value = "5500";
+    altitude.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(altitude.value).toBe("5500");
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]')?.disabled).toBe(false);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(root.querySelector(".planner-feedback")?.textContent).toContain("Saved immutable revision");
+    expect(persistence.savedRevisions).toHaveLength(2);
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2030-09-21T12:00:00.000Z");
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[1]?.cruiseAltitudeFeetMsl).toBe(5500);
+  });
+
+  it("blocks saving a source on a new draft when no forecast is selected, including dispatched clicks", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve airport endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+    input(root, "surface-weather-icao").value = "KORD";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const save = root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]');
+    expect(save?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Load and select a published winds period before saving this surface-weather source.");
+    save?.dispatchEvent(new Event("click", { bubbles: true }));
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(0);
+  });
+
+  it("keeps the saved forecast when periods are loaded but none is selected", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+          surfaceWeatherIcao: "KORD",
+        },
+      },
+    };
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T11:00:00.000Z", validAt: "2030-09-21T12:00:00.000Z", useFrom: "2030-09-21T11:00:00.000Z", useUntil: "2030-09-21T13:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    expect(root.querySelector<HTMLSelectElement>("#selected-forecast-period")?.value).toBe("");
+    input(root, "plan-title").value = "Retitled study route";
+    input(root, "plan-title").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection).toEqual(revision.draftSnapshot.weatherSelection);
+  });
+
+  it("requires a replacement forecast after departure-time invalidation and accepts a valid selection", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+        },
+      },
+    };
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T12:00:00.000Z", validAt: "2030-09-21T13:00:00.000Z", useFrom: "2030-09-21T12:30:00.000Z", useUntil: "2030-09-21T14:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    input(root, "departure-time").value = "2030-09-21T13:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const save = root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]');
+    expect(save?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Load and select a new published winds period to replace the saved forecast; this editor cannot remove it.");
+    save?.dispatchEvent(new Event("click", { bubbles: true }));
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(1);
+
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    const selector = root.querySelector<HTMLSelectElement>("#selected-forecast-period");
+    if (selector === null) throw new Error("Forecast selector was not rendered.");
+    selector.value = "2030-09-21T13:00:00.000Z";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]')?.disabled).toBe(false);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2030-09-21T13:00:00.000Z");
   });
 
   it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
@@ -818,7 +1106,7 @@ describe("planner shell", () => {
     await settle();
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     input(root, "departure-time").value = "2026-09-21T22:00";
     clickByLabel(root, "Save new plan revision");
@@ -839,7 +1127,7 @@ describe("planner shell", () => {
     expect(root.textContent).toContain("Formula: wind-triangle");
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
-    expect(root.textContent).toContain("choose a forecast before refreshing weather");
+    expect(root.textContent).toContain("Unavailable: Load and select a published winds period first.");
     expect(refreshWeather).not.toHaveBeenCalled();
     clickByLabel(root, "Load available winds periods");
     await settle();
@@ -847,10 +1135,42 @@ describe("planner shell", () => {
     if (selector === null) throw new Error("Forecast selector was not rendered.");
     selector.value = "2026-09-22T00:00:00.000Z";
     selector.dispatchEvent(new Event("change", { bubbles: true }));
+    input(root, "surface-weather-icao").value = "KORD";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="refresh-weather"]')?.disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
     clickByLabel(root, "Refresh weather into new revision");
     await settle();
-    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z" }));
+    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", surfaceWeatherIcao: "KORD" }));
     expect(root.textContent).toContain("Weather refresh blocked: Fresh winds are unavailable.");
+  });
+
+  it("disables winds loading when an edited route endpoint has not been resolved", async () => {
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision = planRevision();
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    const discoverStations = vi.fn().mockResolvedValue({ forecasts: [] });
+    const winds = { discoverStations } as unknown as WindsTransportClient;
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]')?.disabled).toBe(false);
+    input(root, "departure-icao").value = "KXYZ";
+    input(root, "departure-icao").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const load = root.querySelector<HTMLButtonElement>('button[data-workflow-action="load-winds"]');
+    expect(load?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Resolve both route endpoints before loading winds periods.");
+    expect(root.querySelector("label[for='surface-weather-icao']")?.textContent).toContain("optional; required to use a surface-METAR anchor");
+    load?.dispatchEvent(new Event("click"));
+    await settle();
+    expect(discoverStations).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("Resolve the route endpoints before loading winds periods.");
   });
 
   it("freezes controls while a calculation owns the saved draft", async () => {
@@ -867,7 +1187,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -900,7 +1220,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();
@@ -926,7 +1246,7 @@ describe("planner shell", () => {
     input(root, "departure-icao").value = "KORD";
     input(root, "destination-icao").value = "KJVL";
     input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Resolve exact ICAO endpoints");
+    clickByLabel(root, "Resolve airport endpoints");
     await settle();
     clickByLabel(root, "Save new plan revision");
     await settle();

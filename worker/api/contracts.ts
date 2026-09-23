@@ -1,4 +1,6 @@
 export const ICAO_PATTERN = /^[A-Z0-9]{4}$/;
+/** Exact AirportDB identifiers: FAA LIDs and ICAO codes. No inferred prefix. */
+export const AIRPORT_CODE_PATTERN = /^[A-Z0-9]{3,4}$/;
 
 export interface ApiErrorPayload {
   error: string;
@@ -27,6 +29,7 @@ export interface AirportRunwayEnd { id: string; headingDegTrue: number; isClosed
 export interface AirportFrequency { type: string; description: string; frequencyMhz: string; }
 
 export interface AirportData {
+  /** Historical field name retained for the runway-picker contract; may be an FAA LID or ICAO code. */
   requestedIcao: string;
   icao: string;
   name: string;

@@ -150,15 +150,26 @@ export function selectPlanWeatherForecast(
   availablePeriods: readonly AvailableForecastValidPeriod[],
   selectedForecastValidTimeUtc: string,
   clock: UseCaseClock,
+  surfaceWeatherIcao?: string,
 ): PlanDraft {
   const selection = selectForecastValidTime(availablePeriods, selectedForecastValidTimeUtc, draft.departureTimeUtc);
   if (!selection.ok) throw new DraftUseCaseError(selection.error.message);
   const timestamp = clock.now().toISOString();
   return {
     ...draft,
-    weatherSelection: { forecastValidTimeUtc: selection.value.period.id, selectedAtUtc: timestamp },
+    weatherSelection: {
+      forecastValidTimeUtc: selection.value.period.id,
+      selectedAtUtc: timestamp,
+      ...(surfaceWeatherIcao === undefined ? {} : { surfaceWeatherIcao: normalizeSurfaceWeatherIcao(surfaceWeatherIcao) }),
+    },
     updatedAt: timestamp,
   };
+}
+
+function normalizeSurfaceWeatherIcao(value: string): string {
+  const normalized = value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(normalized)) throw new DraftUseCaseError("Surface-weather source must be an exact four-character ICAO airport code.");
+  return normalized;
 }
 
 export function applyCruiseTasOverride(

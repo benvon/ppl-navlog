@@ -2,7 +2,8 @@ import { coordinate } from "../domain/coordinates";
 import type { AirportRoutePoint } from "../domain/route";
 
 export interface AirportLookup {
-  lookupExactIcao(icao: string): Promise<AirportRoutePoint>;
+  /** Resolves an exact 3–4 character airport identifier; no prefix inference. */
+  lookupAirportCode(code: string): Promise<AirportRoutePoint>;
 }
 
 export class AirportLookupError extends Error {
@@ -23,8 +24,8 @@ export class StaticAirportLookup implements AirportLookup {
     this.airports = new Map(airports.map((airport) => [airport.icao, airport]));
   }
 
-  public async lookupExactIcao(icao: string): Promise<AirportRoutePoint> {
-    const normalized = normalizeIcao(icao);
+  public async lookupAirportCode(code: string): Promise<AirportRoutePoint> {
+    const normalized = normalizeAirportCode(code);
     const airport = this.airports.get(normalized);
     if (airport === undefined) {
       throw new AirportLookupError(`No local study airport is available for ${normalized}. Live airport lookup is not configured yet.`);
@@ -33,10 +34,10 @@ export class StaticAirportLookup implements AirportLookup {
   }
 }
 
-export function normalizeIcao(icao: string): string {
-  const normalized = icao.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new AirportLookupError("Enter a four-character ICAO identifier (for example KORD). FAA location identifiers such as 1C8 are not supported in v1.");
+export function normalizeAirportCode(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  if (!/^[A-Z0-9]{3,4}$/.test(normalized)) {
+    throw new AirportLookupError("Enter an exact three- or four-character airport code (for example 1C8 or KORD). The app does not infer missing prefixes.");
   }
   return normalized;
 }

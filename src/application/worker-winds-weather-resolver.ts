@@ -37,8 +37,9 @@ export const createWorkerWindsPlanWeatherResolver = (
     // A METAR anchor improves low-altitude interpolation, but it is optional:
     // winds entirely within the published FB envelope remain calculable when
     // the runway-picker METAR dependency is temporarily unavailable.
-    const metar = metarClient === undefined ? undefined : await metarClient.fetchMetar(departure.icao).catch(() => undefined);
-    const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, draft.weatherSelection.forecastValidTimeUtc, input, departure, metar));
+    const metarIcao = draft.weatherSelection.surfaceWeatherIcao;
+    const metar = metarIcao === undefined || metarClient === undefined ? undefined : await metarClient.fetchMetar(metarIcao).catch(() => undefined);
+    const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, draft.weatherSelection.forecastValidTimeUtc, input, departure, metarIcao, metar));
     const snapshot = weatherSnapshot(input.weatherSnapshotId, loaded);
     return {
       snapshotIds: [snapshot.id],
@@ -46,13 +47,27 @@ export const createWorkerWindsPlanWeatherResolver = (
       selectedForecastValidTimeUtc: loaded.forecastSelection.period.id,
       phaseWindResolver: createSampledPhaseWindResolver(loaded),
       loadedWindsData: loaded,
-      warnings: loaded.provenance.forecast.cache.status === "stale_on_error"
-        ? ["Winds forecast was served from stale cache because the upstream refresh failed. Verify current official weather before flight."]
-        : [],
+      warnings: weatherWarnings(metarIcao, metar, loaded),
       provenance: weatherProvenance(loaded),
     };
   },
 });
+
+const weatherWarnings = (
+  metarIcao: string | undefined,
+  metar: Awaited<ReturnType<MetarTransportClient["fetchMetar"]>> | undefined,
+  loaded: LoadedWindsData,
+): readonly string[] => [
+  ...(metarIcao !== undefined && metar === undefined
+    ? [`Selected surface METAR ${metarIcao} could not be loaded; calculation uses winds aloft only.`]
+    : []),
+  ...(metarIcao !== undefined && metar !== undefined && loaded.surfaceToAloftInterpolation?.status === "unavailable"
+    ? [`Selected surface METAR ${metarIcao} was not usable; calculation uses winds aloft only.`]
+    : []),
+  ...(loaded.provenance.forecast.cache.status === "stale_on_error"
+    ? ["Winds forecast was served from stale cache because the upstream refresh failed. Verify current official weather before flight."]
+    : []),
+];
 
 const selectionInput = (
   routeCoordinates: readonly Coordinate[],
@@ -60,13 +75,14 @@ const selectionInput = (
   selectedForecastValidTimeUtc: string,
   input: WorkerWindsPlanWeatherInput,
   departure: AirportRoutePoint,
+  selectedSurfaceWeatherIcao: string | undefined,
   metar?: Awaited<ReturnType<MetarTransportClient["fetchMetar"]>>,
 ): WorkerWindsSelectionInput => ({
   routeCoordinates,
   stationSelectionCoordinate: input.stationSelectionCoordinate,
   selectedForecastValidTimeUtc,
   departureTimeUtc,
-  ...(metar === undefined ? {} : { departureSurfaceWind: { airportIcao: departure.icao, fieldElevationFeetMsl: departure.elevationFeetMsl, metar } }),
+  ...(metar === undefined ? {} : { departureSurfaceWind: { airportIcao: departure.icao, surfaceWeatherIcao: selectedSurfaceWeatherIcao, fieldElevationFeetMsl: departure.elevationFeetMsl, metar } }),
 });
 
 const weatherSnapshot = (id: string, data: LoadedWindsData): WeatherReferenceSnapshot => ({

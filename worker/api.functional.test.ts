@@ -178,9 +178,9 @@ describe('Worker API functional contracts', () => {
   });
 
   it('returns browser-safe failures for invalid input, upstream failure, and rate limiting', async () => {
-    const invalid = await api('/api/airports/KJV', env({ RUNWAY_PICKER_API: runwayPicker([]) }));
+    const invalid = await api('/api/airports/KJ', env({ RUNWAY_PICKER_API: runwayPicker([]) }));
     expect(invalid.status).toBe(400);
-    await expect(invalid.json()).resolves.toEqual({ error: 'Invalid ICAO code. Expected exactly four alphanumeric characters.', code: 'invalid_request', requestId: FIXED_REQUEST_ID });
+    await expect(invalid.json()).resolves.toEqual({ error: 'Invalid airport code. Expected exactly three or four alphanumeric characters, such as 1C8 or KORD.', code: 'invalid_request', requestId: FIXED_REQUEST_ID });
 
     const unavailable = await api('/api/airports/KJVL', env({ RUNWAY_PICKER_API: { async fetch() { throw new Error('network detail must not escape'); } } }));
     expect(unavailable.status).toBe(503);

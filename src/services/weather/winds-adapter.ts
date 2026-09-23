@@ -28,8 +28,10 @@ export interface WorkerWindsSelectionInput {
 }
 
 export interface DepartureSurfaceWindInput {
-  /** Canonical identity and elevation from the departure AirportRoutePoint. */
+  /** Exact departure airport identifier and its field elevation. */
   readonly airportIcao: string;
+  /** Optional explicit nearby ICAO METAR source; defaults to the departure code when it is ICAO. */
+  readonly surfaceWeatherIcao?: string;
   /** Airport-data field elevation, not an elevation parsed from the METAR report. */
   readonly fieldElevationFeetMsl: number;
   readonly metar: MetarSuccessPayload;
@@ -51,6 +53,7 @@ export interface AppliedSurfaceToAloftInterpolation {
   readonly assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level";
   readonly statement: string;
   readonly airportIcao: string;
+  readonly surfaceWeatherIcao: string;
   readonly fieldElevationFeetMsl: number;
   readonly fieldElevationSource: "departure-airport-data";
   readonly metar: SurfaceMetarEvidence;
@@ -62,6 +65,7 @@ export interface AppliedSurfaceToAloftInterpolation {
 export interface UnavailableSurfaceToAloftInterpolation {
   readonly status: "unavailable";
   readonly airportIcao: string;
+  readonly surfaceWeatherIcao: string;
   readonly fieldElevationFeetMsl: number;
   readonly fieldElevationSource: "departure-airport-data";
   readonly metar: SurfaceMetarEvidence;
@@ -246,6 +250,7 @@ const unavailableSurfaceInterpolation = (
 ): UnavailableSurfaceToAloftInterpolation => ({
   status: "unavailable",
   airportIcao: input.airportIcao,
+  surfaceWeatherIcao: input.surfaceWeatherIcao ?? input.airportIcao,
   fieldElevationFeetMsl: input.fieldElevationFeetMsl,
   fieldElevationSource: "departure-airport-data",
   metar: metarEvidence(input.metar),
@@ -261,8 +266,9 @@ interface UsableSurfaceWind {
 }
 
 const validatedFieldElevation = (input: DepartureSurfaceWindInput): FeetMsl | UnavailableSurfaceToAloftInterpolation => {
-  if (input.metar.metar.icao !== input.airportIcao) {
-    return unavailableSurfaceInterpolation(input, "airport-identity-mismatch", "Surface-METAR interpolation was not used because the METAR airport identity does not match the departure airport.");
+  const surfaceWeatherIcao = input.surfaceWeatherIcao ?? input.airportIcao;
+  if (input.metar.metar.icao !== surfaceWeatherIcao) {
+    return unavailableSurfaceInterpolation(input, "airport-identity-mismatch", "Surface-METAR interpolation was not used because the METAR airport identity does not match the selected surface-weather source.");
   }
   const fieldElevation = feetMsl(input.fieldElevationFeetMsl);
   return fieldElevation.ok
@@ -348,8 +354,9 @@ const resolveSurfaceToAloftInterpolation = (
     evidence: {
       status: "applied",
       assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
-      statement: "Planning assumption: the departure METAR true wind is anchored at the field elevation supplied by departure-airport data (not by the METAR report) and vector-interpolated only to the first available FB winds-aloft level.",
+      statement: `Planning assumption: surface METAR ${input.surfaceWeatherIcao ?? input.airportIcao} true wind is anchored at departure airport ${input.airportIcao} field elevation ${input.fieldElevationFeetMsl} ft MSL supplied by airport data (not by the METAR report) and vector-interpolated only to the first available FB winds-aloft level.`,
       airportIcao: input.airportIcao,
+      surfaceWeatherIcao: input.surfaceWeatherIcao ?? input.airportIcao,
       fieldElevationFeetMsl: input.fieldElevationFeetMsl,
       fieldElevationSource: "departure-airport-data",
       metar: metarEvidence(input.metar),

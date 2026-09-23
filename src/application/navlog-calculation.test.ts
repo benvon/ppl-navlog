@@ -167,6 +167,7 @@ describe("navlog calculation", () => {
             assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level",
             statement: "METAR wind at KFIX field elevation 700 ft MSL is vector-interpolated to the first forecast level.",
             airportIcao: "KFIX",
+            surfaceWeatherIcao: "KFIX",
             fieldElevationFeetMsl: 700,
             fieldElevationSource: "departure-airport-data",
             metar: {
@@ -253,7 +254,7 @@ describe("navlog calculation", () => {
     const incompleteSurface = {
       ...windValue(),
       surfaceToAloftInterpolation: {
-        status: "applied", assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level", statement: "Fixture assumption.", airportIcao: "KFIX",
+        status: "applied", assumption: "metar-at-field-elevation-vector-interpolated-to-first-fb-level", statement: "Fixture assumption.", airportIcao: "KFIX", surfaceWeatherIcao: "KFIX",
         fieldElevationFeetMsl: 700, fieldElevationSource: "departure-airport-data", metar: { icao: "KFIX" }, directionTreatment: "fixed-true", firstAloftLevel: {}, trace: testTrace("fixture"),
       },
     } as ResolvedNavlogWind;
