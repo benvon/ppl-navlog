@@ -22,6 +22,18 @@ for (let attempt = 0; attempt < 6; attempt += 1) {
       throw new Error('Deployed static and API build identity do not match the release.');
     }
     if (api.status !== 'ok' || !api.requestId) throw new Error('API health payload invalid.');
+    const airportResponse = await get('/api/airports/1C8');
+    const airportPayload = await airportResponse.json();
+    const airport = airportPayload?.airport;
+    if (airport?.requestedIcao !== '1C8' || airport.icao !== '1C8' || typeof airport.name !== 'string' || airport.name.trim() === '') {
+      throw new Error('FAA LID airport identity is invalid.');
+    }
+    const latitude = airport.coordinates?.latitudeDeg;
+    const longitude = airport.coordinates?.longitudeDeg;
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180 || !Number.isFinite(airport.elevationFt)) {
+      throw new Error('FAA LID airport coordinates or field elevation are unavailable.');
+    }
+    if (airportPayload?.provenance?.adapter !== 'runway-picker') throw new Error('FAA LID airport provenance is not runway-picker.');
     console.log(`Development smoke passed: ${version} ${sha}`);
     process.exit(0);
   } catch (error) {
