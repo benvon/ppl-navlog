@@ -1,7 +1,7 @@
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
 import type { AircraftProfile, AircraftProfileInput, CompassDeviationEntry } from "../domain/aircraft";
-import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanFamily, PlanRevision, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
+import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanFamily, PlanRevision, PlanWeatherSelection, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
 import type { AirportLookup } from "../application/airport-lookup";
 import {
   applyCruiseTasOverride,
@@ -20,6 +20,7 @@ import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { WindsForecastAvailability } from "../../worker/api/contracts";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import type { BrowserWeatherRefresh } from "../application/browser-weather-refresh";
+import { selectForecastValidTime } from "../domain/weather-valid-time";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderRevisionHistory } from "./revision-history";
 import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
@@ -81,6 +82,21 @@ interface RouteFormValues {
   readonly departureIcao: string;
   readonly destinationIcao: string;
   readonly surfaceWeatherIcao: string;
+}
+
+type SaveWeatherDecision =
+  | { readonly kind: "replacement"; readonly forecastValidTimeUtc: string; readonly surfaceWeatherIcao?: string }
+  | { readonly kind: "inherited"; readonly selection: PlanWeatherSelection }
+  | { readonly kind: "no-weather" }
+  | { readonly kind: "blocked"; readonly reason: string };
+
+interface SaveWeatherDecisionInput {
+  readonly savedDraft?: PlanDraft;
+  readonly currentRoutePoints: readonly (RoutePoint | undefined)[];
+  readonly departureTimeUtc?: string;
+  readonly selectedForecastValidTimeUtc?: string;
+  readonly availablePeriods: readonly { readonly id: string; readonly validFromUtc: string; readonly validToUtc: string }[];
+  readonly surfaceWeatherIcao?: string;
 }
 
 type WorkflowAction = "resolve-airports" | "load-winds" | "save-draft" | "calculate" | "refresh-weather";
@@ -333,7 +349,7 @@ class Planner {
       this.state = {
         ...this.state,
         selectedForecastValidTimeUtc,
-        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, selectedForecastValidTimeUtc, this.state.routeForm.surfaceWeatherIcao),
+        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(selectedForecastValidTimeUtc ?? null), this.state.routeForm.surfaceWeatherIcao),
         calculationPreview: undefined,
       };
       this.feedback.textContent = selectedForecastValidTimeUtc === undefined
@@ -359,7 +375,7 @@ class Planner {
         pendingOperation: undefined,
         availableForecasts: discovery.forecasts,
         selectedForecastValidTimeUtc: undefined,
-        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, undefined, this.state.routeForm.surfaceWeatherIcao),
+        hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(null), this.state.routeForm.surfaceWeatherIcao),
         calculationPreview: undefined,
       };
       this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
@@ -647,7 +663,10 @@ class Planner {
       const profile = this.selectedProfile();
       if (profile === undefined) throw new Error("Save and select an aircraft profile before saving a plan.");
       const { draft, departure, destination } = this.draftForSave(form, profile);
-      const selectedDraft = this.draftWithSelectedForecast(draft);
+      const weatherDecision = this.saveWeatherDecision(this.state.selectedForecastValidTimeUtc, draft, inputValue(form, "surface-weather-icao"));
+      const unavailableReason = this.draftSavingUnavailableReason(weatherDecision);
+      if (unavailableReason !== undefined) throw new Error(unavailableReason);
+      const selectedDraft = this.draftWithSaveWeatherDecision(draft, weatherDecision);
       const saveTarget = this.journalSaveTarget();
       if (!this.beginInputTransaction("Saving new plan revision…")) return;
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, ...saveTarget);
@@ -689,16 +708,24 @@ class Planner {
     };
   }
 
-  private draftWithSelectedForecast(draft: PlanDraft): PlanDraft {
-    const selectedTime = this.state.selectedForecastValidTimeUtc;
-    if (selectedTime === undefined) return draft;
-    return selectPlanWeatherForecast(
-      draft,
-      this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
-      selectedTime,
-      this.dependencies.clock,
-      emptyToUndefined(this.state.routeForm.surfaceWeatherIcao),
-    );
+  private draftWithSaveWeatherDecision(draft: PlanDraft, decision: SaveWeatherDecision): PlanDraft {
+    switch (decision.kind) {
+      case "replacement": {
+        const selectedAtUtc = this.dependencies.clock.now().toISOString();
+        return {
+          ...draft,
+          updatedAt: selectedAtUtc,
+          weatherSelection: {
+            forecastValidTimeUtc: decision.forecastValidTimeUtc,
+            selectedAtUtc,
+            ...(decision.surfaceWeatherIcao === undefined ? {} : { surfaceWeatherIcao: decision.surfaceWeatherIcao }),
+          },
+        };
+      }
+      case "inherited": return { ...draft, weatherSelection: decision.selection };
+      case "no-weather": return draft;
+      case "blocked": throw new Error(decision.reason);
+    }
   }
 
   private journalSaveTarget(): [PlanRevision | undefined, string | undefined] {
@@ -741,6 +768,8 @@ class Planner {
 
   private async handleRefreshWeather(): Promise<void> {
     try {
+      const unavailableReason = this.weatherRefreshUnavailableReason();
+      if (unavailableReason !== undefined) throw new Error(unavailableReason);
       const refresh = this.dependencies.refreshWeather;
       const parent = this.state.currentRevision;
       const selectedTime = this.state.selectedForecastValidTimeUtc;
@@ -750,7 +779,7 @@ class Planner {
       if (selectedTime === undefined) throw new Error("Load published winds periods and choose a forecast before refreshing weather.");
       const selectedDraft = selectPlanWeatherForecast(
         parent.draftSnapshot,
-        this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil })),
+        this.availableForecastPeriods(),
         selectedTime,
         this.dependencies.clock,
         emptyToUndefined(this.state.routeForm.surfaceWeatherIcao),
@@ -896,14 +925,49 @@ class Planner {
     return undefined;
   }
 
-  private draftSavingUnavailableReason(): string | undefined {
+  private draftSavingUnavailableReason(weatherDecision: SaveWeatherDecision = this.saveWeatherDecision()): string | undefined {
     if (this.state.profileDraft !== undefined) return "Save the pending aircraft profile version first.";
     if (this.selectedProfile() === undefined) return "Save and select an aircraft profile first.";
     if (this.state.departure === undefined || this.state.destination === undefined) return "Resolve both route endpoints first.";
     if (this.state.invalidCruiseAltitudeIndexes.length > 0) return "Correct the highlighted cruise altitude values first.";
     if (this.state.routeForm.title.trim() === "") return "Enter a plan title first.";
     if (!isLocalUtcDateTime(this.state.routeForm.departureTime)) return "Enter the planned departure UTC time first.";
-    return this.draftNumbersUnavailableReason();
+    return this.draftNumbersUnavailableReason() ?? (weatherDecision.kind === "blocked" ? weatherDecision.reason : undefined);
+  }
+
+  private saveWeatherDecision(
+    selectedForecastValidTimeUtc: string | null | undefined = this.state.selectedForecastValidTimeUtc,
+    candidateDraft?: PlanDraft,
+    surfaceWeatherSource = this.state.routeForm.surfaceWeatherIcao,
+  ): SaveWeatherDecision {
+    return deriveSaveWeatherDecision({
+      savedDraft: this.state.draft,
+      currentRoutePoints: candidateDraft?.route.points ?? [this.state.departure, ...this.state.checkpoints, this.state.destination],
+      departureTimeUtc: candidateDraft?.departureTimeUtc
+        ?? (isLocalUtcDateTime(this.state.routeForm.departureTime) ? dateTimeLocalToUtc(this.state.routeForm.departureTime) : undefined),
+      selectedForecastValidTimeUtc: selectedForecastValidTimeUtc ?? undefined,
+      availablePeriods: this.availableForecastPeriods(),
+      surfaceWeatherIcao: normalizedOptionalIcao(surfaceWeatherSource),
+    });
+  }
+
+  private selectedForecastUnavailableReason(): string | undefined {
+    const selectedTime = this.state.selectedForecastValidTimeUtc;
+    if (selectedTime === undefined) return "Load and select a published winds period first.";
+    if (!isLocalUtcDateTime(this.state.routeForm.departureTime)) return "Enter the planned departure UTC time before selecting a winds period.";
+    const selected = selectForecastValidTime(this.availableForecastPeriods(), selectedTime, dateTimeLocalToUtc(this.state.routeForm.departureTime));
+    return selected.ok ? undefined : "Select an available published winds period that includes the planned departure time.";
+  }
+
+  private availableForecastPeriods(): readonly { readonly id: string; readonly validFromUtc: string; readonly validToUtc: string }[] {
+    return this.state.availableForecasts.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil }));
+  }
+
+  private effectiveForecastValidTimeUtc(selectedTime: string | null | undefined = this.state.selectedForecastValidTimeUtc): string | undefined {
+    const decision = this.saveWeatherDecision(selectedTime);
+    if (decision.kind === "replacement") return decision.forecastValidTimeUtc;
+    if (decision.kind === "inherited") return decision.selection.forecastValidTimeUtc;
+    return undefined;
   }
 
   private draftNumbersUnavailableReason(): string | undefined {
@@ -927,6 +991,8 @@ class Planner {
     if (this.currentRevisionIsHistorical()) return "Save the historical revision as a new current journal entry first.";
     if (this.state.hasUnsavedChanges || this.state.profileDraft !== undefined) return "Save or discard route, aircraft, or altitude edits first.";
     if (this.state.selectedForecastValidTimeUtc === undefined) return "Load and select a published winds period first.";
+    const forecastReason = this.selectedForecastUnavailableReason();
+    if (forecastReason !== undefined) return forecastReason;
     if (!isOptionalIcao(this.state.routeForm.surfaceWeatherIcao)) return "Surface-weather source must be an exact four-character ICAO code when supplied.";
     return undefined;
   }
@@ -990,7 +1056,7 @@ class Planner {
           ? {
             ...this.state,
             routeForm: { ...this.state.routeForm, [field]: input.value },
-            hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.state.selectedForecastValidTimeUtc, input.value),
+            hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(), input.value),
             calculationPreview: undefined,
           }
         : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
@@ -1265,6 +1331,62 @@ function weatherSelectionIsDirty(draft: PlanDraft | undefined, forecastValidTime
     forecastValidTimeUtc !== draft.weatherSelection?.forecastValidTimeUtc
     || normalizedOptionalIcao(surfaceWeatherIcao) !== normalizedOptionalIcao(draft.weatherSelection?.surfaceWeatherIcao ?? "")
   );
+}
+
+function deriveSaveWeatherDecision(input: SaveWeatherDecisionInput): SaveWeatherDecision {
+  if (input.selectedForecastValidTimeUtc !== undefined) {
+    return replacementWeatherDecision(input);
+  }
+  const inherited = inheritedWeatherDecision(input);
+  if (inherited !== undefined) return inherited;
+  if (input.surfaceWeatherIcao !== undefined) {
+    return { kind: "blocked", reason: "Load and select a published winds period before saving this surface-weather source." };
+  }
+  return { kind: "no-weather" };
+}
+
+function replacementWeatherDecision(input: SaveWeatherDecisionInput): SaveWeatherDecision {
+  if (input.departureTimeUtc === undefined || input.selectedForecastValidTimeUtc === undefined) {
+    return { kind: "blocked", reason: "Enter the planned departure UTC time before selecting a winds period." };
+  }
+  const selected = selectForecastValidTime(input.availablePeriods, input.selectedForecastValidTimeUtc, input.departureTimeUtc);
+  if (!selected.ok) return { kind: "blocked", reason: "Select an available published winds period that includes the planned departure time." };
+  return {
+    kind: "replacement",
+    forecastValidTimeUtc: selected.value.period.id,
+    ...(input.surfaceWeatherIcao === undefined ? {} : { surfaceWeatherIcao: input.surfaceWeatherIcao }),
+  };
+}
+
+function inheritedWeatherDecision(input: SaveWeatherDecisionInput): SaveWeatherDecision | undefined {
+  const savedWeather = input.savedDraft?.weatherSelection;
+  if (savedWeather === undefined) return undefined;
+  const routeMatches = input.currentRoutePoints.length === input.savedDraft?.route.points.length
+    && input.currentRoutePoints.every((point, index) => sameWeatherRoutePoint(point, input.savedDraft?.route.points[index]));
+  if (input.departureTimeUtc !== input.savedDraft?.departureTimeUtc || !routeMatches) {
+    return { kind: "blocked", reason: "Load and select a new published winds period to replace the saved forecast; this editor cannot remove it." };
+  }
+  const selection = { ...savedWeather };
+  delete selection.surfaceWeatherIcao;
+  return {
+    kind: "inherited",
+    selection: {
+      ...selection,
+      ...(input.surfaceWeatherIcao === undefined ? {} : { surfaceWeatherIcao: input.surfaceWeatherIcao }),
+    },
+  };
+}
+
+function sameWeatherRoutePoint(current: RoutePoint | undefined, saved: RoutePoint | undefined): boolean {
+  return current !== undefined
+    && saved !== undefined
+    && JSON.stringify(weatherRoutePointFields(current)) === JSON.stringify(weatherRoutePointFields(saved));
+}
+
+function weatherRoutePointFields(point: RoutePoint): readonly (string | number)[] {
+  return point.kind === "airport"
+    ? [point.kind, point.icao, point.name, point.elevationFeetMsl, point.coordinate.latitude, point.coordinate.longitude]
+    : [point.kind, point.name, point.coordinate.latitude, point.coordinate.longitude];
 }
 
 function isLocalUtcDateTime(value: string): boolean {

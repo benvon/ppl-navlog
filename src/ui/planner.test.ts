@@ -828,6 +828,179 @@ describe("planner shell", () => {
     expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2026-09-22T00:00:00.000Z");
   });
 
+  it("preserves a saved forecast when only the surface weather source changes", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const calculatePlan = vi.fn() as unknown as BrowserPlanCalculator;
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+          surfaceWeatherIcao: "KORD",
+        },
+      },
+    };
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    input(root, "surface-weather-icao").value = "KJVL";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection).toEqual({
+      forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+      selectedAtUtc: "2026-09-21T12:00:00.000Z",
+      surfaceWeatherIcao: "KJVL",
+    });
+  });
+
+  it("preserves a saved forecast when only a leg altitude changes", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+        },
+      },
+    };
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+
+    const altitude = input(root, "leg-altitude-1");
+    altitude.value = "5500";
+    altitude.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(altitude.value).toBe("5500");
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]')?.disabled).toBe(false);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(root.querySelector(".planner-feedback")?.textContent).toContain("Saved immutable revision");
+    expect(persistence.savedRevisions).toHaveLength(2);
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2030-09-21T12:00:00.000Z");
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.route.legs[1]?.cruiseAltitudeFeetMsl).toBe(5500);
+  });
+
+  it("blocks saving a source on a new draft when no forecast is selected, including dispatched clicks", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
+    if (profileForm === null) throw new Error("Profile form was not rendered.");
+    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve airport endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+    input(root, "surface-weather-icao").value = "KORD";
+    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const save = root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]');
+    expect(save?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Load and select a published winds period before saving this surface-weather source.");
+    save?.dispatchEvent(new Event("click", { bubbles: true }));
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(0);
+  });
+
+  it("keeps the saved forecast when periods are loaded but none is selected", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+          surfaceWeatherIcao: "KORD",
+        },
+      },
+    };
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T11:00:00.000Z", validAt: "2030-09-21T12:00:00.000Z", useFrom: "2030-09-21T11:00:00.000Z", useUntil: "2030-09-21T13:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    expect(root.querySelector<HTMLSelectElement>("#selected-forecast-period")?.value).toBe("");
+    input(root, "plan-title").value = "Retitled study route";
+    input(root, "plan-title").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection).toEqual(revision.draftSnapshot.weatherSelection);
+  });
+
+  it("requires a replacement forecast after departure-time invalidation and accepts a valid selection", async () => {
+    const root = document.createElement("div");
+    const persistence = new MemoryPersistence();
+    const family = planFamily();
+    const revision: PlanRevision = {
+      ...planRevision(),
+      draftSnapshot: {
+        ...planRevision().draftSnapshot,
+        weatherSelection: {
+          forecastValidTimeUtc: "2030-09-21T12:00:00.000Z",
+          selectedAtUtc: "2026-09-21T12:00:00.000Z",
+        },
+      },
+    };
+    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T12:00:00.000Z", validAt: "2030-09-21T13:00:00.000Z", useFrom: "2030-09-21T12:30:00.000Z", useUntil: "2030-09-21T14:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    await persistence.saveAircraftProfile(aircraftProfile());
+    await persistence.savePlanRevision(family, revision);
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
+    await settle();
+    clickByLabel(root, `Open ${family.title}`);
+    await settle();
+    input(root, "departure-time").value = "2030-09-21T13:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+
+    const save = root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]');
+    expect(save?.disabled).toBe(true);
+    expect(root.textContent).toContain("Unavailable: Load and select a new published winds period to replace the saved forecast; this editor cannot remove it.");
+    save?.dispatchEvent(new Event("click", { bubbles: true }));
+    await settle();
+    expect(persistence.savedRevisions).toHaveLength(1);
+
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+    const selector = root.querySelector<HTMLSelectElement>("#selected-forecast-period");
+    if (selector === null) throw new Error("Forecast selector was not rendered.");
+    selector.value = "2030-09-21T13:00:00.000Z";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="save-draft"]')?.disabled).toBe(false);
+    clickByLabel(root, "Save new plan revision");
+    await settle();
+    expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2030-09-21T13:00:00.000Z");
+  });
+
   it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
