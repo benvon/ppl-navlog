@@ -178,6 +178,17 @@ describe('Worker API functional contracts', () => {
     expect(awcRequests.every((request) => new URL(request.url).origin === 'https://aviationweather.gov')).toBe(true);
   });
 
+  it('serves a validated aloft point answer with the request id and no station discovery payload', async () => {
+    const awcRequests: Request[] = [];
+    vi.stubGlobal('fetch', aviationWeatherFetch(awcRequests));
+    const response = await api('/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z', env({ WINDS_CACHE: memoryCache() }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ query: { latitudeDeg: 35.0402, longitudeDeg: -106.609, altitudeFeetMsl: 9000 }, forecastCycle: '06', windSpeedKt: 0, requestId: FIXED_REQUEST_ID });
+    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
+    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
+  });
+
   it('returns browser-safe failures for invalid input, upstream failure, and rate limiting', async () => {
     const invalid = await api('/api/airports/KJ', env({ RUNWAY_PICKER_API: runwayPicker([]) }));
     expect(invalid.status).toBe(400);

@@ -30,6 +30,11 @@ export async function handleApiRequest(request: Request, env: ApiEnvironment): P
       const payload: WindsForecastSuccessPayload = { forecast, provenance: sourceProvenance, requestId };
       return jsonResponse(payload, 200, requestId);
     }
+    if (route.kind === 'winds-point') {
+      if (!env.windsData) throw new ApiError('Winds data service is not configured.', 503, 'service_unavailable');
+      const answer = await env.windsData.getWindsPoint({ latitudeDeg: route.latitudeDeg, longitudeDeg: route.longitudeDeg, altitudeFeetMsl: route.altitudeFeetMsl, plannedUtc: route.plannedUtc });
+      return jsonResponse({ ...answer, requestId }, 200, requestId);
+    }
     if (!env.aviationData) throw new ApiError('Aviation data service is not configured.', 503, 'service_unavailable');
     if (route.kind === 'airport') {
       const { airport, cache } = await env.aviationData.getAirport(route.icao);
