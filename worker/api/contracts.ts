@@ -79,7 +79,7 @@ export interface AloftPointAnswer {
   query: AloftPointQuery;
   windFromDegTrue: number | null;
   windSpeedKt: number;
-  temperatureC: number;
+  temperatureC: number | null;
   issuedAt: string;
   useFrom: string;
   useUntil: string;
