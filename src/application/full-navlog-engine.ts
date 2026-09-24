@@ -4,12 +4,13 @@ import type { RouteGeometryLeg } from "../domain/phase-geometry";
 import type { VerticalPhasePerformance } from "../domain/phase-performance";
 import type { JsonValue } from "../domain/route";
 import { gallonsPerHour, feetMsl, positiveKnots } from "../domain/units";
-import { createSampledPhaseWindResolver, resolveLoadedEffectiveWindForSubleg, type LoadedWindsData } from "../services/weather/winds-adapter";
+import { resolveLoadedEffectiveWindForSubleg, type LoadedWindsData } from "../services/weather/winds-adapter";
 import { isJsonValue } from "../services/storage/validation";
 import type { CompletePlanCalculationEngine, CompletePlanRouteLeg, CompletePlanWeather } from "./complete-plan";
 import { calculateNavlog, toNavlogCalculationSnapshot, type NavlogWindResolver } from "./navlog-calculation";
 import { allocateRoutePhases, type RoutePhaseAllocationInput, type RoutePhaseAllocationResult } from "./phase-allocation";
 import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "./phase-calculation-engine";
+import { createWaypointNavlogWindResolver } from "./route-weather-sampling";
 
 /**
  * The complete calculation engine. It composes only selected immutable weather
@@ -18,11 +19,12 @@ import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "
  */
 export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngine => ({
   calculate: async ({ draft, aircraftProfile, routeLegs, weather }) => {
+    const routeSamples = weather.routeWeatherSamples;
     const loadedWinds = weather.loadedWindsData;
-    if (loadedWinds === undefined) {
-      throw new WeatherPhaseResolutionError("Complete navlog calculation requires selected loaded winds data for every generated subleg.");
+    if (routeSamples === undefined && loadedWinds === undefined) {
+      throw new WeatherPhaseResolutionError("Complete navlog calculation requires immutable route waypoint answers or legacy loaded winds data.");
     }
-    const allocationInput = allocationInputFor(draft.descentTargetAltitudeFeetMsl.effectiveValue, aircraftProfile, routeLegs, loadedWinds);
+    const allocationInput = allocationInputFor(draft.descentTargetAltitudeFeetMsl.effectiveValue, aircraftProfile, routeLegs, weather);
     const allocation = allocateRoutePhases(requireValue(allocationInput));
     const allocatedPlan = requireValue(allocation);
 
@@ -39,7 +41,9 @@ export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngi
       })),
       aircraftProfile,
       fuelInputs: draft.fuelInputs,
-      windResolver: navlogWindResolver(loadedWinds),
+      windResolver: routeSamples !== undefined
+        ? createWaypointNavlogWindResolver(routeLegs, routeSamples, weather, aircraftProfile)
+        : navlogWindResolver(loadedWinds!),
     });
     const calculatedNavlog = requireValue(navlog);
     const navlogSnapshot = requireValue(toNavlogCalculationSnapshot(calculatedNavlog));
@@ -52,7 +56,7 @@ const allocationInputFor = (
   descentTargetAltitudeFeetMsl: number,
   profile: AircraftProfile,
   routeLegs: readonly CompletePlanRouteLeg[],
-  loadedWinds: LoadedWindsData,
+  weather: CompletePlanWeather,
 ): DomainResult<RoutePhaseAllocationInput> => {
   const first = routeLegs[0];
   const final = routeLegs[routeLegs.length - 1];
@@ -76,7 +80,7 @@ const allocationInputFor = (
     destinationAltitude: destinationAltitude.value,
     climbPerformance: climbPerformance.value,
     descentPerformance: descentPerformance.value,
-    windResolver: createSampledPhaseWindResolver(loadedWinds),
+    windResolver: weather.phaseWindResolver,
   });
 };
 

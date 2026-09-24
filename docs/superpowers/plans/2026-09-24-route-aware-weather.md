@@ -4,7 +4,7 @@
 
 **Goal:** Calculate a current navlog with location- and time-specific aloft winds, departure METAR, destination TAF, and inspectable weather math.
 
-**Architecture:** The Worker owns aloft product selection, station matching, and point interpolation, and exposes a separate bounded TAF read. The browser gathers a finite set of weather samples for a proposed route/time solution, then runs the existing synchronous phase and navlog engines against that immutable in-memory set; bounded iterations repeat the gather/calculate cycle until geometry, timing, and forecast choices stabilize. Pilot inputs remain the only durable plan data.
+**Architecture:** The Worker owns aloft product selection, station matching, and point interpolation, and exposes a separate bounded TAF read. The browser requests exactly one winds-aloft point per pilot waypoint in route order. Each corrected leg ETA determines the next point request before the existing phase and navlog engines assemble the full route once against those immutable answers. It validates final waypoint and leg coverage and checks that the same fetched TAF selects the same group at final arrival. Pilot inputs remain the only durable plan data.
 
 **Tech Stack:** TypeScript, Cloudflare Worker, IndexedDB, Vitest, Vite, `mise` with repository Node 22.
 
@@ -14,7 +14,7 @@
 
 - The browser must not select aloft stations, forecast periods, or geographic interpolation methods.
 - `GET /api/weather/winds/point` takes one coordinate, altitude MSL, and planned UTC; it never retrieves METAR or TAF.
-- Departure uses the selected METAR. Destination uses the selected TAF at arrival UTC, including applicable conditional groups and worst-case groundspeed among overlapping winds. No runway selection or crosswind calculation.
+- Departure uses the selected METAR. Destination selects the TAF group at the progressive carried arrival UTC after all leg ETAs, then confirms final navlog arrival still selects that group, including applicable conditional groups and worst-case groundspeed among overlapping winds. No runway selection or crosswind calculation.
 - The navlog shows values and current-weather validity; the inspector shows sources and interpolation math; a future PDF contains values only.
 - Weather payloads, point answers, and calculated results are session-only. Existing `surfaceWeatherIcao` maps only to departure; destination starts unset.
 - A failed Update plan retains submitted inputs, retains its error until success, and clears any earlier current result.
@@ -28,7 +28,7 @@
 - Two station-catalog entries sharing an ID with different coordinates must fail; Task 1 tests pin ambiguous identity behavior.
 - A point just outside a use window or published altitude envelope must fail instead of borrowing a nearby period or level; Task 2 tests pin boundary behavior.
 - A valid regional product just above 512 KiB must parse and cache within the measured budget; Task 2 tests pin the large-source behavior.
-- An arrival time that moves into another TAF group during iteration must recompute the chosen wind; Task 5 tests pin timing stability.
+- An arrival time that moves into another TAF group after the one calculation pass blocks the update; Task 5 tests pin timing stability.
 - An edit or failed update must make earlier inspector and navlog evidence unavailable even if the old result object remains in memory; Task 6 tests pin visible-state behavior.
 
 ## File and Interface Map
@@ -44,7 +44,7 @@ export interface TafWindGroup { kind: "prevailing" | "FM" | "TEMPO" | "PROB"; fr
 export interface TafAnswer { stationIcao: string; issuedAt: string; validFrom: string; validUntil: string; rawTaf: string; groups: TafWindGroup[]; requestId: string }
 ```
 
-`worker/api/winds.ts` owns product loading, catalog matching, and aloft resolution; `worker/api/taf.ts` owns the TAF upstream adapter and normalization; `worker/api/request.ts` and `handlers.ts` expose both routes. `src/services/weather/winds-client.ts` validates both response contracts. `src/application/route-weather-sampling.ts` owns finite route samples and time/geometry convergence. `src/application/arrival-taf-wind.ts` owns conditional-group selection. `src/application/full-navlog-engine.ts` consumes immutable samples through the existing synchronous resolver. `src/ui/pilot-intent-planner.ts` owns the two endpoint source fields and current-result lifetime; `src/ui/calculation-inspector.ts` renders the retained math. Documentation updates belong with the task that changes the behavior.
+`worker/api/winds.ts` owns product loading, catalog matching, and aloft resolution; `worker/api/taf.ts` owns the TAF upstream adapter and normalization; `worker/api/request.ts` and `handlers.ts` expose both routes. `src/services/weather/winds-client.ts` validates both response contracts. `src/application/route-weather-sampling.ts` owns sequential per-waypoint fetches, progressive leg timing, and final timing validation. `src/application/arrival-taf-wind.ts` owns conditional-group selection. `src/application/full-navlog-engine.ts` consumes immutable samples through the existing synchronous resolver. `src/ui/pilot-intent-planner.ts` owns the two endpoint source fields and current-result lifetime; `src/ui/calculation-inspector.ts` renders the retained math. Documentation updates belong with the task that changes the behavior.
 
 ## Execution Batches and Review Gates
 
@@ -129,25 +129,17 @@ expect(opened.rawFields['departure-icao']).toBe('1C8');
 - [ ] **Step 4: Run** focused tests, typecheck, and `git diff --check`; commit `feat(weather): separate endpoint source inputs`.
 - [ ] **Step 5: Architect review.** Inspect old-plan migration and raw-text preservation independently; send defects back to this agent.
 
-### Task 5: Bounded route sampling and time convergence
+### Task 5: One point query per route waypoint and final timing validation
 
-**Files:** Create `src/application/route-weather-sampling.ts`, `src/application/route-weather-sampling.test.ts`; modify `src/application/full-navlog-engine.ts`, `src/application/full-navlog-engine.test.ts`, `src/application/phase-allocation.ts`, `src/application/complete-plan.ts`, and their focused tests. Retire single-route loaded-winds use only after the new path passes.
+**Files:** Create `src/application/route-weather-sampling.ts`, `src/application/route-weather-sampling.test.ts`; modify `src/application/full-navlog-engine.ts`, `src/application/full-navlog-engine.test.ts`, `src/application/complete-plan.ts`, and their focused tests. Update the route-calculation design/spec and `docs/weather-coverage-fixtures.md`. Preserve the legacy loaded-winds path until Task 6 replaces planner orchestration.
 
-**Interfaces:** Consumes `AloftPointAnswer`, `TafAnswer`, and endpoint METAR. Produces `resolveRouteWeather(draft: PlanDraft, profile: AircraftProfile, pointClient: { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }, endpoints: { departureMetar: MetarSuccessPayload; destinationTaf: TafAnswer }): Promise<RouteWeatherSolution>`, where `RouteWeatherSolution` has `weather: CompletePlanWeather`, `sampledPoints: readonly AloftPointAnswer[]`, and `iterations: number`. The weather contains immutable point answers indexed by route distance/UTC and a synchronous `phaseWindResolver`; the navlog resolver retrieves only from that fixed collection.
+**Interfaces:** Consumes `AloftPointAnswer`, `TafAnswer`, and endpoint METAR. Produces `resolveRouteWeather(draft: PlanDraft, profile: AircraftProfile, pointClient: { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }, endpoints: { departureMetar: MetarSuccessPayload; destinationTaf: TafAnswer }): Promise<RouteWeatherSolution>`, where `RouteWeatherSolution` contains `weather: CompletePlanWeather`, exactly one `sampledPoints` answer per pilot route waypoint, and `iterations: 1`. The weather retains immutable waypoint answers indexed by route distance and progressive query UTC, a synchronous vector-interpolating `phaseWindResolver`, and a post-calculation validator for waypoint period, continuous adjacent-leg coverage, and arrival TAF-group stability.
 
-- [ ] **Step 1: Write red route tests.** Cover different winds at same altitude, an interior long-leg shift, generated climb/descent and transition points, a forecast use-window crossing, an unsupported point, a request cap, and arrival time moving into another TAF group. Compare row groundspeed/ETE/fuel, not just the sample array.
-- [ ] **Step 2: Write red convergence tests.** The algorithm must terminate within fixed iterations; timing and geometry must meet explicit tolerances and forecast/TAF choices must stabilize. A two-state oscillation returns `weather-unavailable` instead of the last calculated candidate.
-
-```ts
-const result = await resolveRouteWeather(draft, profile, pointClient, endpoints);
-expect(result.sampledPoints.length).toBeGreaterThan(draft.route.points.length);
-expect(result.iterations).toBeLessThanOrEqual(8);
-```
-
-- [ ] **Step 3: Run** `mise exec -- npm test -- src/application/route-weather-sampling.test.ts src/application/full-navlog-engine.test.ts`; expect new tests to fail.
-- [ ] **Step 4: Implement** deterministic great-circle sample placement, bounded fetch concurrency/request count, vector-combined subleg wind, and whole-route fixed-point iteration. Reuse the existing phase allocation and wind-triangle math, but change their wind input seam from one `LoadedWindsData` to immutable route samples. Use the arrival TAF only on the terminal/pattern segment and departure METAR only for the departure surface anchor; preserve the pilot's descent target. Include source/method math in row evidence.
-- [ ] **Step 5: Run** focused application tests, typecheck, lint, boundary checks, and `git diff --check`; commit `feat(weather): calculate with route samples`.
-- [ ] **Step 6: Architect review.** Recompute at least one long route and forecast-window crossing by hand from fixtures; inspect convergence/failure behavior; send defects back to this agent.
+- [ ] **Step 1: Write red tests.** Assert exactly one point API call per route waypoint and no interior or generated-boundary calls; departure and destination are queried at the adjacent aloft altitude while endpoint surface forecasts remain anchors. Cover distinct same-altitude waypoint winds, vector interpolation along a leg and at generated boundaries, and resulting row groundspeed/ETE/fuel. Add an answer whose period covers its provisional ETA but expires before corrected leg arrival and expect `weather-unavailable` without querying later waypoints. Also cover final row timing outside a period and a gap between adjacent report windows. Add arrival time moving into a different TAF group and expect `weather-unavailable`. Assert unsupported waypoint reports and more than 27 route points fail closed before returning a navlog. Use deferred fake responses to prove no next waypoint request starts before the current answer is received and corrected; changing the preceding leg wind must change the next query UTC.
+- [ ] **Step 2: Run** `mise exec -- npm test -- src/application/route-weather-sampling.test.ts src/application/full-navlog-engine.test.ts`; expect new assertions to fail.
+- [ ] **Step 3: Implement** deterministic geometry/profile and altitude selection. Start at planned departure UTC, fetch the first waypoint once, then for each leg estimate a provisional next-waypoint ETA using the current waypoint wind, fetch that next waypoint once at the provisional ETA, calculate corrected leg timing from both endpoint vectors, and carry the corrected arrival UTC into the following leg. Use those immutable answers to vector-interpolate every subleg and phase boundary. Use profile/per-leg TAS and fuel-flow overrides. After the final leg, select the destination TAF at the carried arrival UTC, then validate that final navlog arrival selects the same TAF group. After calculation, validate every waypoint's final UTC against its returned issue/use window and require adjacent answer windows jointly to cover the whole calculated leg interval without a gap; otherwise throw a weather-unavailable error. Do not retry/refetch. Include complete source and interpolation math in each row's evidence.
+- [ ] **Step 4: Run** focused application tests, typecheck, lint, boundary checks, and `git diff --check`; commit `feat(weather): calculate with waypoint weather`.
+- [ ] **Step 5: Architect review.** Independently verify one short and one long route, exact API call counts, calculation row changes, and the fail-closed period-shift case; send any correction to this agent.
 
 ### Task 6: Planner orchestration and inspector
 
