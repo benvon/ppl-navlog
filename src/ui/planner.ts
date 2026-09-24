@@ -55,8 +55,9 @@ interface PlannerState {
   readonly invalidCruiseAltitudeIndexes: readonly number[];
   readonly draft?: PlanDraft;
   readonly currentRevision?: PlanRevision;
+  /** The explicitly chosen saved draft leg being edited; never inferred. */
+  readonly selectedTasLegId?: string;
   readonly unlockedLegId?: string;
-  readonly inspectedLegId?: string;
   readonly inspectedCalculation?: NavlogInspectionSelection;
   readonly availableForecasts: readonly WindsForecastAvailability[];
   readonly selectedForecastValidTimeUtc?: string;
@@ -176,6 +177,7 @@ class Planner {
         ...this.state,
         selectedProfileId: select.value === "" ? null : select.value,
         profileDraft: undefined,
+        inspectedCalculation: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
@@ -195,7 +197,7 @@ class Planner {
     const form = this.createRouteForm();
     const saveButton = workflowButton("Save new plan revision", "button", "save-draft", this.workflowUnavailableReason("save-draft"));
     saveButton.addEventListener("click", () => void this.handleSaveDraft(form));
-    section.append(this.renderSavedPlans(), form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderForecastPanel(), saveButton, actionStatus("save-draft", this.workflowUnavailableReason("save-draft")));
+    section.append(this.renderSavedPlans(), form, this.renderCheckpointPanel(), this.renderLegAltitudePanel(), this.renderTasEditor(), this.renderForecastPanel(), saveButton, actionStatus("save-draft", this.workflowUnavailableReason("save-draft")));
     if (this.dependencies.calculatePlan !== undefined) {
       const calculateButton = workflowButton("Calculate complete navlog", "button", "calculate", this.workflowUnavailableReason("calculate"));
       calculateButton.addEventListener("click", () => void this.handleCalculatePlan());
@@ -255,6 +257,7 @@ class Planner {
     form.className = "route-form";
     const resolveButton = workflowButton("Resolve airport endpoints", "button", "resolve-airports", this.workflowUnavailableReason("resolve-airports"));
     form.append(...routeBasicFields(this.state.routeForm), ...routeAirportFields(this.state.routeForm), resolveButton, actionStatus("resolve-airports", this.workflowUnavailableReason("resolve-airports")));
+    form.append(text("p", "When a selected METAR is fresh and usable, its wind is anchored at the departure field elevation; otherwise the calculation uses winds aloft only. Station proximity is not verified. Entering a destination station here still treats it as a departure source, not an arrival source. The current calculation uses one wind profile across the route. Route-aware weather is planned; check arrival weather separately."));
     form.addEventListener("input", (event) => this.syncRouteFormInput(event));
     resolveButton?.addEventListener("click", () => void this.handleResolveAirports(form));
     return form;
@@ -321,6 +324,65 @@ class Planner {
     return wrapper;
   }
 
+  private renderTasEditor(): HTMLElement {
+    const section = document.createElement("section");
+    section.className = "tas-editor";
+    section.append(text("h3", "Per-leg cruise TAS"));
+    const draft = this.state.draft;
+    const profile = this.effectiveProfile();
+    if (draft === undefined || profile === undefined) {
+      section.append(text("p", "Save a route draft and select an aircraft profile before editing a leg's cruise TAS."));
+      return section;
+    }
+    let selectedLeg = draft.route.legs.find((leg) => leg.id === this.state.selectedTasLegId);
+    if (this.state.selectedTasLegId !== undefined && selectedLeg === undefined) {
+      this.state = { ...this.state, selectedTasLegId: undefined, unlockedLegId: undefined };
+      selectedLeg = undefined;
+    }
+    if (selectedLeg !== undefined) {
+      const labels = navlogLabels(draft.route.points, profile, selectedLeg);
+      section.append(text("p", `Selected draft leg: ${labels.from} → ${labels.to}.`));
+      const override = selectedLeg.performanceOverrides?.cruiseTasKnots;
+      section.append(text("p", `Cruise TAS aircraft default: ${profile.cruiseTasKnots} kt from ${profile.name}.`));
+      if (override !== undefined) {
+        section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. Preserved aircraft default: ${override.computedValue} kt.`));
+        const restore = button("Restore aircraft default", "button");
+        restore.addEventListener("click", () => {
+          this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, selectedLeg.id, this.dependencies.clock), inspectedCalculation: undefined, unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
+          this.feedback.textContent = "Restored the aircraft TAS default for this leg. Save a new revision before calculating.";
+          this.render();
+        });
+        section.append(restore);
+      } else if (this.state.unlockedLegId !== selectedLeg.id) {
+        const unlock = button("Override TAS for this leg", "button");
+        unlock.addEventListener("click", () => {
+          this.state = { ...this.state, unlockedLegId: selectedLeg.id };
+          this.feedback.textContent = "Opened the deliberate TAS override editor for this leg.";
+          this.render();
+        });
+        section.append(unlock);
+      } else {
+        section.append(this.renderOverrideForm(draft, profile, selectedLeg.id));
+      }
+    }
+    const list = document.createElement("ul");
+    draft.route.legs.forEach((leg) => {
+      const labels = navlogLabels(draft.route.points, profile, leg);
+      const item = document.createElement("li");
+      item.append(`${labels.from} → ${labels.to} `);
+      const edit = button("Edit TAS", "button");
+      edit.addEventListener("click", () => {
+        this.state = { ...this.state, selectedTasLegId: leg.id, unlockedLegId: undefined };
+        this.feedback.textContent = `Selected ${labels.from} to ${labels.to} for TAS editing.`;
+        this.render();
+      });
+      item.append(edit);
+      list.append(item);
+    });
+    section.append(list);
+    return section;
+  }
+
   private renderForecastPanel(): HTMLElement {
     const section = document.createElement("section");
     section.className = "forecast-selection";
@@ -348,12 +410,14 @@ class Planner {
       this.state = {
         ...this.state,
         selectedForecastValidTimeUtc,
+        inspectedCalculation: undefined,
         hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(selectedForecastValidTimeUtc ?? null), this.state.routeForm.surfaceWeatherIcao),
         calculationPreview: undefined,
       };
       this.feedback.textContent = selectedForecastValidTimeUtc === undefined
         ? "No winds period selected. Select a published period before saving it into a plan revision."
         : `Selected winds period ${selectedForecastValidTimeUtc}. Save a new plan revision to attach it to the route.`;
+      this.refreshCalculationInspector();
       this.refreshWorkflowAvailability();
     });
     label.append(select);
@@ -412,13 +476,17 @@ class Planner {
       }
     }
     const profile = this.effectiveProfile();
+    section.append(text("p", "Draft route only. Course, heading, wind, distance, time, and fuel are available after you save the route and choose Calculate complete navlog. A dash means not yet calculated."));
     const table = document.createElement("table");
     table.append(createNavlogHeader());
     const body = document.createElement("tbody");
     const points = routePoints(this.state);
     this.state.draft?.route.legs.forEach((leg) => this.appendNavlogRow(body, points, profile, leg));
     table.append(body);
-    section.append(table);
+    const scroll = document.createElement("div");
+    scroll.className = "navlog-table-scroll draft-navlog";
+    scroll.append(table);
+    section.append(scroll);
     if (this.state.draft === undefined) section.append(text("p", "Save a route draft to populate the table."));
     return section;
   }
@@ -463,49 +531,14 @@ class Planner {
     const labels = navlogLabels(points, profile, leg);
     const row = document.createElement("tr");
     row.append(cell(labels.from), cell(labels.to), cell(labels.altitude), cell(labels.tas), cell(labels.fuelFlow));
-    const inspect = button("Inspect", "button");
-    inspect.addEventListener("click", () => {
-      this.state = { ...this.state, inspectedLegId: leg.id };
-      this.render();
-    });
-    row.append(cell(inspect));
+    for (let index = 0; index < 8; index += 1) row.append(cell("—"));
+    row.append(cell("—"));
     body.append(row);
   }
 
   private renderInspector(): HTMLElement {
-    const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source. Per-leg aircraft defaults and overrides are controlled separately below.");
+    const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source.");
     section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
-    const draft = this.state.draft;
-    const profile = this.effectiveProfile();
-    const leg = draft?.route.legs.find((candidate) => candidate.id === this.state.inspectedLegId) ?? draft?.route.legs[0];
-    if (draft === undefined || profile === undefined || leg === undefined) {
-      section.append(text("p", "Select an aircraft profile and save a route draft to inspect its performance defaults."));
-      return section;
-    }
-    const override = leg.performanceOverrides?.cruiseTasKnots;
-    section.append(text("p", `Cruise TAS aircraft default: ${profile.cruiseTasKnots} kt from ${profile.name}.`));
-    if (override !== undefined) {
-      section.append(text("p", `OVERRIDDEN effective TAS: ${override.effectiveValue} kt. Preserved aircraft default: ${override.computedValue} kt.`));
-      const restore = button("Restore aircraft default", "button");
-      restore.addEventListener("click", () => {
-        this.state = { ...this.state, draft: restoreCruiseTasDefault(draft, leg.id, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
-        this.feedback.textContent = "Restored the aircraft TAS default for this leg. Save a new revision before calculating.";
-        this.render();
-      });
-      section.append(restore);
-      return section;
-    }
-    if (this.state.unlockedLegId !== leg.id) {
-      const unlock = button("Override TAS for this leg", "button");
-      unlock.addEventListener("click", () => {
-        this.state = { ...this.state, unlockedLegId: leg.id };
-        this.feedback.textContent = "Opened the deliberate TAS override editor for this leg.";
-        this.render();
-      });
-      section.append(unlock);
-      return section;
-    }
-    section.append(this.renderOverrideForm(draft, profile, leg.id));
     return section;
   }
 
@@ -514,12 +547,23 @@ class Planner {
     this.content.querySelectorAll<HTMLButtonElement>(".navlog-value").forEach((control) => {
       control.setAttribute("aria-pressed", String(control.dataset.rowIndex === String(selection.rowIndex) && control.dataset.inspectField === selection.field));
     });
+    const inspector = this.refreshCalculationInspector();
+    if (inspector === undefined) return;
+    inspector.querySelector<HTMLElement>(".calculation-inspector h3")?.focus();
+    inspector.scrollIntoView?.({ block: "nearest" });
+  }
+
+  private refreshCalculationInspector(): HTMLElement | undefined {
+    const selection = this.state.inspectedCalculation;
+    this.content.querySelectorAll<HTMLButtonElement>(".navlog-value").forEach((control) => {
+      control.setAttribute("aria-pressed", String(selection !== undefined && control.dataset.rowIndex === String(selection.rowIndex) && control.dataset.inspectField === selection.field));
+    });
     const current = this.content.querySelector<HTMLElement>('[data-region="inspector"]');
-    if (current === null) return;
+    if (current === null) return undefined;
     const inspector = this.renderInspector();
     inspector.dataset.region = "inspector";
     current.replaceWith(inspector);
-    inspector.querySelector<HTMLElement>(".calculation-inspector h3")?.focus();
+    return inspector;
   }
 
   private renderOverrideForm(draft: PlanDraft, profile: AircraftProfile, legId: string): HTMLFormElement {
@@ -546,7 +590,7 @@ class Planner {
       const value = inputValue(form, "override-tas");
       const reason = inputValue(form, "override-reason");
       try {
-        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
+        this.state = { ...this.state, draft: applyCruiseTasOverride(draft, profile, legId, Number(value), reason, this.dependencies.clock), inspectedCalculation: undefined, unlockedLegId: undefined, hasUnsavedChanges: true, calculationPreview: undefined };
         this.feedback.textContent = "Cruise TAS override applied and flagged in the route table.";
         this.render();
       } catch (error) {
@@ -568,6 +612,7 @@ class Planner {
         profiles: [...this.state.profiles, profile],
         selectedProfileId: profile.id,
         profileDraft: undefined,
+        inspectedCalculation: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
@@ -605,6 +650,9 @@ class Planner {
         },
         cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 1),
         invalidCruiseAltitudeIndexes: [],
+        inspectedCalculation: undefined,
+        selectedTasLegId: undefined,
+        unlockedLegId: undefined,
         availableForecasts: [],
         selectedForecastValidTimeUtc: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
@@ -630,7 +678,7 @@ class Planner {
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -641,7 +689,7 @@ class Planner {
   private removeCheckpoint(id: string): void {
     const removed = this.state.checkpoints.find((checkpoint) => checkpoint.id === id);
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+    this.state = { ...this.state, checkpoints, selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
     this.feedback.textContent = removed === undefined ? "Checkpoint was already absent." : `Removed checkpoint ${removed.name}.`;
     this.render();
   }
@@ -653,17 +701,20 @@ class Planner {
       this.state = {
         ...this.state,
         invalidCruiseAltitudeIndexes: [...new Set([...this.state.invalidCruiseAltitudeIndexes, index])],
+        inspectedCalculation: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
         calculationPreview: undefined,
       };
       this.feedback.textContent = "Cruise altitude must be a positive feet-MSL value.";
+      this.refreshCalculationInspector();
       this.refreshWorkflowAvailability();
       return;
     }
     input.setAttribute("aria-invalid", "false");
     const cruiseAltitudes = [...expandAltitudes(this.state.cruiseAltitudes, index + 1)];
     cruiseAltitudes[index] = value;
-    this.state = { ...this.state, cruiseAltitudes, invalidCruiseAltitudeIndexes: this.state.invalidCruiseAltitudeIndexes.filter((invalidIndex) => invalidIndex !== index), hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.state = { ...this.state, cruiseAltitudes, invalidCruiseAltitudeIndexes: this.state.invalidCruiseAltitudeIndexes.filter((invalidIndex) => invalidIndex !== index), inspectedCalculation: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.refreshCalculationInspector();
     this.refreshWorkflowAvailability();
   }
 
@@ -681,7 +732,7 @@ class Planner {
       const saveTarget = this.journalSaveTarget();
       if (!this.beginInputTransaction("Saving new plan revision…")) return;
       const saved = await saveDraftRevision(this.dependencies.persistence, selectedDraft, profile, this.dependencies.ids, this.dependencies.clock, ...saveTarget);
-      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: saved.revision.draftSnapshot, currentRevision: saved.revision, weatherSnapshots: [], calculationPreview: undefined, inspectedCalculation: undefined, selectedTasLegId: undefined, unlockedLegId: undefined, routeForm: routeFormFromDraft(saved.revision.draftSnapshot, departure.icao, destination.icao), hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(saved.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -761,12 +812,12 @@ class Planner {
       const result = await calculatePlan(draft, profile, this.state.currentRevision);
       if (result.status === "blocked") {
         this.feedback.textContent = `Navlog blocked: ${result.message}`;
-        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot, inspectedCalculation: undefined };
         this.render();
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, selectedTasLegId: undefined, unlockedLegId: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -799,12 +850,12 @@ class Planner {
       const result = await refresh(parent, selectedDraft.weatherSelection);
       if (result.status === "blocked") {
         this.feedback.textContent = `Weather refresh blocked: ${result.message}`;
-        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot };
+        this.state = { ...this.state, pendingOperation: undefined, calculationPreview: result.calculationSnapshot, inspectedCalculation: undefined };
         this.render();
         return;
       }
       const weatherSnapshots = await this.loadWeatherEvidence(result.revision);
-      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+      this.state = { ...this.state, draft: result.revision.draftSnapshot, currentRevision: result.revision, weatherSnapshots, calculationPreview: undefined, inspectedCalculation: undefined, selectedTasLegId: undefined, unlockedLegId: undefined, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
       await this.refreshRevisionHistory(result.revision.planId);
       await this.refreshSavedPlans();
       this.state = { ...this.state, pendingOperation: undefined };
@@ -865,6 +916,8 @@ class Planner {
         draft: reopened.draftSnapshot,
         currentRevision: reopened,
         inspectedCalculation: undefined,
+        selectedTasLegId: undefined,
+        unlockedLegId: undefined,
         revisions,
         weatherSnapshots,
         calculationPreview: undefined,
@@ -1046,7 +1099,8 @@ class Planner {
   private syncProfileFormInput(event: Event): void {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || !isProfileField(input.name)) return;
-    this.state = { ...this.state, profileDraft: { ...this.state.profileDraft, [input.name]: input.value } };
+    this.state = { ...this.state, profileDraft: { ...this.state.profileDraft, [input.name]: input.value }, inspectedCalculation: undefined };
+    this.refreshCalculationInspector();
     this.refreshWorkflowAvailability();
   }
 
@@ -1056,21 +1110,23 @@ class Planner {
     const field = routeFormField(input.name);
     if (field === undefined) return;
     this.state = field === "departureTime"
-      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
       : field === "descentTarget"
-        ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, descentTargetIsManual: input.value.trim() !== "", hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
+        ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, descentTargetIsManual: input.value.trim() !== "", hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
       : field === "departureIcao"
-          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
       : field === "destinationIcao"
-            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
         : field === "surfaceWeatherIcao"
           ? {
             ...this.state,
             routeForm: { ...this.state.routeForm, [field]: input.value },
+            inspectedCalculation: undefined,
             hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(), input.value),
             calculationPreview: undefined,
           }
-        : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+        : { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined };
+    this.refreshCalculationInspector();
     this.refreshWorkflowAvailability();
   }
 }
@@ -1224,7 +1280,7 @@ function navlogLabels(points: readonly RoutePoint[], profile: AircraftProfile | 
 function createNavlogHeader(): HTMLTableSectionElement {
   const header = document.createElement("thead");
   const row = document.createElement("tr");
-  ["From", "To", "Altitude", "Cruise TAS", "Fuel flow", "Explanation"].forEach((label) => {
+  ["From", "To", "Altitude", "Cruise TAS", "Fuel flow", "Course", "Wind", "WCA°", "Heading", "NM", "GS kt", "ETE min", "Fuel gal", "Explanation"].forEach((label) => {
     const cell = document.createElement("th");
     cell.scope = "col";
     cell.textContent = label;
@@ -1271,7 +1327,7 @@ function routeAirportFields(values: RouteFormValues): readonly HTMLLabelElement[
   return [
     labeledInput("departure-icao", "Departure airport code (FAA LID or ICAO)", values.departureIcao, "text"),
     labeledInput("destination-icao", "Destination airport code (FAA LID or ICAO)", values.destinationIcao, "text"),
-    labeledInput("surface-weather-icao", "Surface-weather source ICAO (optional; required to use a surface-METAR anchor)", values.surfaceWeatherIcao, "text"),
+    labeledInput("surface-weather-icao", "Surface METAR source ICAO (optional; if usable, anchors wind at departure field elevation)", values.surfaceWeatherIcao, "text"),
   ];
 }
 
