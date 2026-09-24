@@ -6,7 +6,7 @@ The Worker serves a prebuilt static artifact and exposes `GET /api/health`. Its 
 
 CI runs type checking, linting, architecture checks, test coverage, build artifact verification, secret scanning, workflow validation, dependency auditing, and CodeQL. Pull requests never receive Cloudflare credentials or deploy. After a validated merge to `main`, the development job downloads the exact CI artifact, verifies its build identity, deploys to `navlog.benvon.dev`, smoke-tests static/API identity and a live FAA LID lookup through the `runway-picker` binding, and only then creates an RC tag and GitHub prerelease. If the live lookup fails, the deployment remains unpromoted for investigation. See `docs/github-ci-cd-setup.md` for required GitHub settings and known limits. Production deployment requires a later protected workflow, release artifact tied to the deployed SHA, documented rollback, and smoke checks.
 
-Worker observability must be aggregate-only: request counts, latency, status/error code, upstream identity, cache status, and request ID are allowed. Do not log complete navlogs, imported payloads, provider tokens, or browser-local profile data.
+Worker observability must be aggregate-only: request counts, latency, status/error code, upstream identity, cache status, and request ID are allowed. Do not log complete navlogs, provider tokens, or browser-local profile data.
 
 ## Aviation Weather Center operating limits
 

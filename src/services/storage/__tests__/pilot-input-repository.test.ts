@@ -11,7 +11,7 @@ const now = () => new Date("2026-09-24T12:00:00.000Z");
 function repo(): IndexedDbPilotInputRepository {
   const databaseName = `pilot-input-test-${serial += 1}`;
   names.push(databaseName);
-  const result = new IndexedDbPilotInputRepository({ databaseName, indexedDbFactory: indexedDB, now, nextId: () => `import-${serial += 1}` });
+  const result = new IndexedDbPilotInputRepository({ databaseName, indexedDbFactory: indexedDB, now });
   repos.push(result);
   return result;
 }
@@ -66,23 +66,4 @@ describe("input-only pilot repository", () => {
     expect(await store.getPlan("plan-one")).toBeUndefined();
   });
 
-  it("imports recovery as a new input-only plan and rejects malformed data before writes", async () => {
-    const source = repo(); await source.initialize(); await source.submitInputs(plan());
-    const recovery = await source.exportRecovery("plan-one");
-    expect(recovery).not.toContain("submissions");
-    const destination = repo(); await destination.initialize();
-    const id = await destination.importRecovery(recovery);
-    const imported = await destination.getPlan(id);
-    expect(imported?.submissions).toEqual([]);
-    expect(imported?.rawFields["departure-icao"]).toBe("1C8");
-    expect(imported?.rawFields["surface-weather-icao"]).toBe("KORD");
-    await expect(destination.importRecovery(JSON.stringify({ format: "ppl-navlog/pilot-input-recovery", version: 1, plan: {}, profile: {} }))).rejects.toThrow();
-    const inputOnly = JSON.parse(recovery) as Record<string, unknown>;
-    await expect(destination.importRecovery(JSON.stringify({ ...inputOnly, plan: { ...(inputOnly.plan as object), calculationSnapshot: { result: "stale" } } }))).rejects.toThrow("non-input recovery fields");
-    await expect(destination.importRecovery(JSON.stringify({ ...inputOnly, weather: { metar: "stale" } }))).rejects.toThrow("unsupported recovery fields");
-    const sourcePlan = inputOnly.plan as { checkpoints: readonly object[] };
-    await expect(destination.importRecovery(JSON.stringify({ ...inputOnly, plan: { ...sourcePlan, checkpoints: [{ name: "CP", coordinateText: "41, -88", weather: { metar: "stale" } }] } }))).rejects.toThrow("unsupported fields");
-    await expect(destination.importRecovery(JSON.stringify({ ...inputOnly, profile: { ...(inputOnly.profile as object), calculationSnapshot: { result: "stale" } } }))).rejects.toThrow("unsupported fields");
-    expect((await destination.listPlans())).toHaveLength(1);
-  });
 });

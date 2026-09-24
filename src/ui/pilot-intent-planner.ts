@@ -116,7 +116,7 @@ class PilotIntentPlanner {
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update()); form.append(update);
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : ""; form.append(feedback);
-    shell.append(this.renderProfileEditor(), form, this.renderRecoveryControls());
+    shell.append(this.renderProfileEditor(), form);
     if (this.result !== undefined) {
       const output = document.createElement("section"); output.dataset.currentResult = "true";
       const navlog = renderCalculatedNavlog(this.result, { selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
@@ -205,57 +205,6 @@ class PilotIntentPlanner {
       input.addEventListener("blur", () => { this.fields[`profile-${input.name}`] = input.value; void this.persist(); });
     });
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; form.append(save); section.append(form); return section;
-  }
-  private renderRecoveryControls(): HTMLElement {
-    const section = document.createElement("section"); section.append(this.el("h3", "Plan recovery"));
-    if (this.current) {
-      const exportButton = document.createElement("button"); exportButton.type = "button"; exportButton.textContent = "Download current plan recovery";
-      exportButton.addEventListener("click", async () => {
-        let url: string | undefined;
-        try {
-          const plan = this.current;
-          if (!plan) throw new Error("Open a plan before exporting recovery data.");
-          const data = await this.dependencies.repository.exportRecovery(plan.id);
-          url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = "ppl-navlog-recovery.json";
-          link.click();
-          this.setStatus("Recovery file downloaded.");
-        } catch (error) {
-          this.fail(error);
-        } finally {
-          if (url) URL.revokeObjectURL(url);
-        }
-      });
-      section.append(exportButton);
-    }
-    const label = document.createElement("label"); label.append("Import recovery JSON "); const file = document.createElement("input"); file.type = "file"; file.accept = ".json,application/json";
-    file.addEventListener("change", async () => {
-      const selected = file.files?.[0];
-      if (!selected) return;
-      try {
-        if (selected.size > 1024 * 1024) {
-          throw new Error("Recovery file exceeds the 1 MiB limit; nothing was imported.");
-        }
-        const id = await this.dependencies.repository.importRecovery(await selected.text());
-        [this.plans, this.profiles] = await Promise.all([
-          this.dependencies.repository.listPlans(),
-          this.dependencies.repository.listProfiles(),
-        ]);
-        const imported = await this.dependencies.repository.getPlan(id);
-        if (!imported) throw new Error("Imported plan could not be reopened.");
-        this.open(imported);
-        this.setStatus("Inputs imported. Update plan to fetch current context and calculate.");
-      } catch (error) {
-        this.fail(error);
-      } finally {
-        file.value = "";
-      }
-    });
-    label.append(file);
-    section.append(label);
-    return section;
   }
   private async saveProfile(form: HTMLFormElement): Promise<void> {
     try {
@@ -666,6 +615,7 @@ function requireFreshCurrentWeather(cache: { readonly status: string; readonly f
 }
 
 function requiredFieldsError(fields: Readonly<Record<string, string>>): string | undefined {
+  if ((fields["plan-title"] ?? "").trim().length > 120) return "Plan title must be 120 characters or fewer.";
   return ["plan-title", "departure-time", "departure-icao", "destination-icao", "selected-forecast-period"]
     .some((key) => (fields[key] ?? "").trim() === "") ? "Enter a title, departure time, both airports, and choose a published forecast period." : undefined;
 }
@@ -737,7 +687,11 @@ function simpleFieldError(name: string, fields: Readonly<Record<string, string>>
     ?? (name === "surface-weather-icao" ? metarError(value) : undefined)
     ?? (name === "selected-forecast-period" && !value.trim() ? "Load and select a published forecast period." : undefined);
 }
-function titleFieldError(name: string, value: string): string | undefined { return name === "plan-title" && !value.trim() ? "Enter a plan title." : undefined; }
+function titleFieldError(name: string, value: string): string | undefined {
+  if (name !== "plan-title") return undefined;
+  if (!value.trim()) return "Enter a plan title.";
+  return value.trim().length > 120 ? "Plan title must be 120 characters or fewer." : undefined;
+}
 function departureTimeFieldError(name: string, value: string): string | undefined { return name === "departure-time" ? departureTimeError(value) : undefined; }
 function fuelFieldError(name: string, value: string): string | undefined { return (name === "taxi-fuel" || name === "reserve-fuel") && (value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) < 0) ? "Enter a nonnegative number." : undefined; }
 function descentTargetFieldError(name: string, value: string): string | undefined { return name === "descent-target" ? descentTargetError(value) : undefined; }

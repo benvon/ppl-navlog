@@ -2,8 +2,7 @@ import { indexedDB } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
 import { ImmutableRevisionError } from "../contracts";
 import { IndexedDbNavlogRepository } from "../indexed-db-repository";
-import { parsePlanRecoveryArchive } from "../json-transfer";
-import { aircraftProfile, planFamily, planRecoveryArchive, planRevision, weatherSnapshot } from "./fixtures";
+import { aircraftProfile, planFamily, planRevision, weatherSnapshot } from "./fixtures";
 
 const now = () => new Date("2027-01-01T00:00:00.000Z");
 let sequence = 0;
@@ -13,7 +12,7 @@ const databaseNames: string[] = [];
 function repository(): IndexedDbNavlogRepository {
   const databaseName = `ppl-navlog-test-${sequence += 1}`;
   databaseNames.push(databaseName);
-  const created = new IndexedDbNavlogRepository({ databaseName, indexedDbFactory: indexedDB, now, nextId: () => `recovered-${sequence += 1}` });
+  const created = new IndexedDbNavlogRepository({ databaseName, indexedDbFactory: indexedDB, now });
   repositories.push(created);
   return created;
 }
@@ -27,7 +26,7 @@ afterEach(async () => {
   })));
 });
 
-describe("IndexedDbNavlogRepository journal and recovery snapshots", () => {
+describe("IndexedDbNavlogRepository journal", () => {
   it("stores defensive profile copies", async () => {
     const store = repository();
     const profile = aircraftProfile();
@@ -74,30 +73,4 @@ describe("IndexedDbNavlogRepository journal and recovery snapshots", () => {
     expect(await store.getWeatherSnapshot("weather-1")).toBeUndefined();
   });
 
-  it("exports only the current revision's route and selected aircraft", async () => {
-    const store = repository();
-    const archive = planRecoveryArchive();
-    const source = planRevision();
-    await store.saveAircraftProfile(archive.aircraftProfile);
-    await store.saveWeatherSnapshot(weatherSnapshot());
-    await store.savePlanRevision(planFamily(), source);
-    const anotherProfile = { ...aircraftProfile(), id: "aircraft-2" };
-    await store.saveAircraftProfile(anotherProfile);
-    const exported = parsePlanRecoveryArchive(await store.exportPlanRecoveryArchive(source.planId, archive.exportedAt), now());
-
-    expect(exported).toEqual(archive);
-  });
-
-  it("imports a recovery snapshot as a fresh plan and discards stale weather and calculations", async () => {
-    const source = planRecoveryArchive();
-    const store = repository();
-    const result = await store.importPlanRecoveryArchive(JSON.stringify(source));
-    const revision = await store.getPlanRevision((await store.listPlanFamilies())[0]!.latestRevisionId!);
-
-    expect(result).toMatchObject({ aircraftProfiles: 1, planFamilies: 1, planRevisions: 1, weatherSnapshots: 0 });
-    expect(revision).toMatchObject({ planId: result.recoveredPlanId, revisionNumber: 1, reason: "import", weatherSnapshotIds: [] });
-    expect(revision?.calculationSnapshot).toBeUndefined();
-    expect(revision?.draftSnapshot.weatherSelection).toBeUndefined();
-    expect(revision?.draftSnapshot.selectedAircraftProfileId).not.toBe(source.aircraftProfile.id);
-  });
 });

@@ -2,7 +2,7 @@
 
 ## Intent
 
-This note was written for the former revision-based planner. Under issue #7, the inspector reads the successful calculated result held in the current session; it does not read a saved revision. Any pilot edit, failed update, plan open, import, or reload leaves no current result to inspect. Its revision-history and persistence-schema constraints below are superseded by the [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md).
+This note was written for the former revision-based planner. Under issue #7, the inspector reads the successful calculated result held in the current session; it does not read a saved revision. Any pilot edit, failed update, plan open, or reload leaves no current result to inspect. Its revision-history and persistence-schema constraints below are superseded by the [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md).
 
 The Calculation Inspector is a read-only explanation of a selected calculated navlog value: how the saved revision arrived at that number. It must not silently select a leg or contain draft editing controls. Draft cruise TAS overrides belong to the route editor and require an explicit leg choice.
 

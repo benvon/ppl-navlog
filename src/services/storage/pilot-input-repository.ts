@@ -4,7 +4,7 @@ import { StorageValidationError, validateAircraftProfile } from "./validation";
 export const PILOT_INPUT_DATABASE_NAME = "ppl-navlog-pilot-input-v2";
 export const PILOT_INPUT_DATABASE_VERSION = 1;
 export const MAX_SUBMISSIONS_PER_PLAN = 20;
-export const MAX_RECOVERY_BYTES = 1024 * 1024;
+const MAX_PLAN_BYTES = 1024 * 1024;
 
 export interface PilotInputPlan {
   readonly id: string;
@@ -43,34 +43,28 @@ export interface PilotInputRepository {
   submitInputs(plan: PilotInputPlan): Promise<void>;
   saveProfile(profile: AircraftProfile): Promise<void>;
   listProfiles(): Promise<readonly AircraftProfile[]>;
-  exportRecovery(planId: string): Promise<string>;
-  importRecovery(json: string): Promise<string>;
 }
 
 export interface PilotInputRepositoryOptions {
   readonly databaseName?: string;
   readonly indexedDbFactory?: IDBFactory;
   readonly now?: () => Date;
-  readonly nextId?: () => string;
 }
 
 const PLAN_STORE = "pilotInputs";
 const PROFILE_STORE = "aircraftProfiles";
-const FORMAT = "ppl-navlog/pilot-input-recovery";
 
 /** Input-only persistence in a separate database; calculated and external records are excluded. */
 export class IndexedDbPilotInputRepository implements PilotInputRepository {
   private readonly databaseName: string;
   private readonly factory: IDBFactory | undefined;
   private readonly now: () => Date;
-  private readonly nextId: () => string;
   private databasePromise: Promise<IDBDatabase> | undefined;
 
   public constructor(options: PilotInputRepositoryOptions = {}) {
     this.databaseName = options.databaseName ?? PILOT_INPUT_DATABASE_NAME;
     this.factory = options.indexedDbFactory ?? globalThis.indexedDB;
     this.now = options.now ?? (() => new Date());
-    this.nextId = options.nextId ?? (() => crypto.randomUUID());
   }
 
   public async initialize(): Promise<void> {
@@ -142,34 +136,6 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     await done(tx);
     rows.forEach((row) => validateProfile(row, this.now()));
     return structuredClone(rows as AircraftProfile[]);
-  }
-
-  public async exportRecovery(planId: string): Promise<string> {
-    const plan = await this.getPlan(planId);
-    if (!plan) throw invalid("$.planId", "does not identify a saved plan");
-    const profile = plan.profileSnapshot ?? (plan.selectedProfileId ? (await this.listProfiles()).find((item) => item.id === plan.selectedProfileId) : undefined);
-    if (!profile) throw invalid("$.selectedProfileId", "required aircraft profile is unavailable");
-    return bounded(JSON.stringify({ format: FORMAT, version: 1, plan: stripHistory(plan), profile }));
-  }
-
-  public async importRecovery(json: string): Promise<string> {
-    if (new TextEncoder().encode(json).byteLength > MAX_RECOVERY_BYTES) throw invalid("$", "recovery data exceeds size limit");
-    let value: unknown;
-    try { value = JSON.parse(json) as unknown; } catch { throw invalid("$", "must be valid JSON"); }
-    if (!isRecord(value) || value.format !== FORMAT || value.version !== 1 || !isRecord(value.plan)) throw invalid("$", "unsupported recovery document");
-    if (Object.keys(value).some((key) => !["format", "version", "plan", "profile"].includes(key))) throw invalid("$", "contains unsupported recovery fields");
-    if (Object.keys(value.plan).some((key) => !["title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt"].includes(key))) throw invalid("$.plan", "contains non-input recovery fields");
-    validateProfile(value.profile, this.now());
-    const timestamp = this.now().toISOString();
-    const id = this.nextId();
-    const profile: AircraftProfile = { ...(value.profile as unknown as AircraftProfile), id: this.nextId(), createdAt: timestamp, updatedAt: timestamp };
-    const input = validatePlan({ ...value.plan, id, selectedProfileId: profile.id, profileSnapshot: profile, updatedAt: timestamp, submissions: [] });
-    const db = await this.database();
-    const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
-    tx.objectStore(PROFILE_STORE).add(profile);
-    tx.objectStore(PLAN_STORE).add(input);
-    await done(tx);
-    return id;
   }
 
   private database(): Promise<IDBDatabase> {
@@ -271,7 +237,7 @@ function validatePlanProfile(value: Record<string, unknown>): void {
 
 function validateDocumentSize(value: Record<string, unknown>): void {
   try {
-    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_RECOVERY_BYTES) throw invalid("$", "plan exceeds size limit");
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_PLAN_BYTES) throw invalid("$", "plan exceeds size limit");
   } catch (error) {
     if (error instanceof StorageValidationError) throw error;
     throw invalid("$", "must be serializable JSON");
@@ -304,18 +270,6 @@ function validateSnapshot(value: unknown): void {
   validatePlan({ ...value, id: "snapshot", updatedAt: "2026-01-01T00:00:00.000Z", submissions: [] });
 }
 
-function stripHistory(plan: PilotInputPlan): Omit<PilotInputPlan, "id" | "submissions" | "profileSnapshot"> {
-  return {
-    title: plan.title,
-    rawFields: plan.rawFields,
-    selectedProfileId: plan.selectedProfileId,
-    checkpoints: plan.checkpoints,
-    cruiseAltitudeTexts: plan.cruiseAltitudeTexts,
-    overrideReasons: plan.overrideReasons,
-    updatedAt: plan.updatedAt,
-  };
-}
-function bounded(json: string): string { if (new TextEncoder().encode(json).byteLength > MAX_RECOVERY_BYTES) throw invalid("$", "recovery data exceeds size limit"); return json; }
 function invalid(path: string, message: string): StorageValidationError { return new StorageValidationError([{ path, message }]); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function validUtc(value: string): boolean { return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(value) && !Number.isNaN(Date.parse(value)); }

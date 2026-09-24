@@ -2,7 +2,6 @@ import type { AircraftProfile } from "../../../domain/aircraft";
 import { coordinate as makeCoordinate } from "../../../domain/coordinates";
 import type { PlanningValue } from "../../../domain/planning-value";
 import type { PlanDraft, PlanFamily, PlanRevision, RouteDefinition, WeatherReferenceSnapshot } from "../../../domain/route";
-import type { PlanRecoveryArchive } from "../contracts";
 
 export const timestamp = "2026-09-21T12:00:00.000Z";
 
@@ -116,12 +115,4 @@ export const planRevision = (): PlanRevision => ({
   weatherSnapshotIds: ["weather-1"],
   calculationSnapshot: { version: "not-calculated" },
   warnings: [],
-});
-
-export const planRecoveryArchive = (): PlanRecoveryArchive => ({
-  format: "ppl-navlog/plan-recovery",
-  formatVersion: 1,
-  exportedAt: timestamp,
-  draft: planDraft(),
-  aircraftProfile: aircraftProfile(),
 });

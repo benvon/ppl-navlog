@@ -14,12 +14,9 @@ class MemoryInputs implements PilotInputRepository {
   failSave = false;
   failSubmit = false;
   failInitialize = false;
-  failImportedPlanReadback = false;
-  importedPlan?: PilotInputPlan;
   async initialize(): Promise<void> { if (this.failInitialize) throw new Error("storage initialization failed"); }
   async listPlans(): Promise<readonly PilotInputPlan[]> { return this.plans; }
   async getPlan(id: string): Promise<PilotInputPlan | undefined> {
-    if (this.failImportedPlanReadback && this.importedPlan?.id === id) return undefined;
     return this.plans.find((p) => p.id === id);
   }
   async saveWorkingCopy(plan: PilotInputPlan): Promise<void> {
@@ -33,12 +30,6 @@ class MemoryInputs implements PilotInputRepository {
   }
   async saveProfile(profile: AircraftProfile): Promise<void> { this.profiles.push(profile); }
   async listProfiles(): Promise<readonly AircraftProfile[]> { return this.profiles; }
-  async exportRecovery(_planId: string): Promise<string> { return "{}"; }
-  async importRecovery(_json: string): Promise<string> {
-    if (!this.importedPlan) throw new Error("no imported fixture");
-    this.replace(this.plans, this.importedPlan);
-    return this.importedPlan.id;
-  }
   private replace(collection: PilotInputPlan[], plan: PilotInputPlan): void {
     const index = collection.findIndex((item) => item.id === plan.id);
     if (index < 0) collection.push(plan);
@@ -189,6 +180,36 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(true);
     await choosePublishedPeriod(root);
     expect(button(root, "Update plan").disabled).toBe(false);
+  });
+
+  it("rejects titles over 120 trimmed characters before submission and accepts 120", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const weather = winds();
+    const fetchForecast = vi.spyOn(weather, "fetchForecast");
+    const fetchMetar = vi.spyOn(weather, "fetchMetar");
+    const root = await mount(repository, weather);
+    await makeLocallyValid(root);
+    await choosePublishedPeriod(root);
+
+    edit(root, "plan-title", `  ${"a".repeat(121)}  `);
+    const title = input(root, "plan-title");
+    expect(title.getAttribute("aria-invalid")).toBe("true");
+    expect(root.querySelector(`#${title.name}-error`)?.textContent).toBe("Plan title must be 120 characters or fewer.");
+    expect(button(root, "Update plan").disabled).toBe(true);
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(0);
+    expect(fetchForecast).not.toHaveBeenCalled();
+    expect(fetchMetar).not.toHaveBeenCalled();
+
+    edit(root, "plan-title", `  ${"a".repeat(120)}  `);
+    expect(title.getAttribute("aria-invalid")).toBe("false");
+    expect(button(root, "Update plan").disabled).toBe(false);
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(fetchForecast).toHaveBeenCalled();
+    expect(repository.submissions[0]?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
   });
 
   it("persists an intentionally cleared aircraft profile selection", async () => {
@@ -515,48 +536,6 @@ describe("pilot intent planner", () => {
     expect(root.querySelector(".calculated-navlog")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated using current airport and weather context.");
     print.mockRestore();
-  });
-
-  it("imports current raw inputs with no calculated result", async () => {
-    const repository = new MemoryInputs();
-    const root = await mount(repository);
-    repository.importedPlan = {
-      id: "recovered-plan", title: "Recovered", rawFields: { "plan-title": "Recovered", "departure-icao": "1C8", "surface-weather-icao": "KORD", "selected-forecast-period": "" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
-    };
-    const fileInput = root.querySelector<HTMLInputElement>("input[type=file]")!;
-    Object.defineProperty(fileInput, "files", { configurable: true, value: [{ size: 8, text: async () => "recovery-json" }] });
-    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(input(root, "departure-icao").value).toBe("1C8");
-    expect(input(root, "surface-weather-icao").value).toBe("KORD");
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Inputs imported. Update plan to fetch current context and calculate.");
-
-    const existingCount = repository.plans.length;
-    Object.defineProperty(fileInput, "files", { configurable: true, value: [{ size: 1024 * 1024 + 1, text: async () => "too large" }] });
-    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(repository.plans).toHaveLength(existingCount);
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Recovery file exceeds the 1 MiB limit; nothing was imported.");
-  });
-
-  it("surfaces an error when an imported plan cannot be reopened", async () => {
-    const repository = new MemoryInputs();
-    const root = await mount(repository);
-    repository.importedPlan = {
-      id: "unreadable-import", title: "Unreadable", rawFields: { "plan-title": "Unreadable" }, checkpoints: [],
-      cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
-    };
-    repository.failImportedPlanReadback = true;
-    const fileInput = root.querySelector<HTMLInputElement>("input[type=file]")!;
-    Object.defineProperty(fileInput, "files", { configurable: true, value: [{ size: 8, text: async () => "recovery-json" }] });
-    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(repository.plans).toHaveLength(1);
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Imported plan could not be reopened.");
-    expect(input(root, "plan-title").value).toBe("New study route");
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
   });
 
   it("disables plan navigation during an update and clears the result when another plan is opened", async () => {

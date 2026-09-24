@@ -83,7 +83,7 @@ export interface PlanFamily {
   readonly latestRevisionNumber?: number;
 }
 
-export type RevisionReason = "initial-save" | "input-change" | "weather-refresh" | "recalculation" | "import";
+export type RevisionReason = "initial-save" | "input-change" | "weather-refresh" | "recalculation";
 
 /**
  * A JSON-safe placeholder for calculated data owned by flight-math/application

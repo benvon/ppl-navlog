@@ -24,7 +24,6 @@ import type { BrowserWeatherRefresh } from "../application/browser-weather-refre
 import { selectForecastValidTime } from "../domain/weather-valid-time";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderRevisionHistory } from "./revision-history";
-import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
 import { renderWorkspaceLayout } from "./workspace-layout";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import { routeCoordinatesDistanceMidpoint } from "../application/weather-station-reference";
@@ -38,7 +37,6 @@ export interface PlannerDependencies {
   readonly calculatePlan?: BrowserPlanCalculator;
   readonly refreshWeather?: BrowserWeatherRefresh;
   readonly weatherEvidence?: { getWeatherSnapshot(id: string): Promise<WeatherReferenceSnapshot | undefined> };
-  readonly portability?: PlanPortabilityRepository;
 }
 
 interface PlannerState {
@@ -218,17 +216,6 @@ class Planner {
       selectedRevisionId: this.state.currentRevision?.id,
       onSelect: (id) => void this.openRevision(id),
     }));
-    if (this.dependencies.portability !== undefined) section.append(renderPlanPortability(
-      this.dependencies.portability,
-      this.state.currentRevision?.planId,
-      (message) => { this.feedback.textContent = message; },
-      async () => {
-        const [profiles, families] = await Promise.all([this.dependencies.persistence.listAircraftProfiles(), this.dependencies.persistence.listPlanFamilies()]);
-        this.state = { ...this.state, profiles, families };
-        if (this.state.draft !== undefined) await this.refreshRevisionHistory(this.state.draft.planId);
-        this.render();
-      },
-    ));
     return section;
   }
 
