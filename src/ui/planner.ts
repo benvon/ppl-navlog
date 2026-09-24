@@ -1,4 +1,5 @@
 import { coordinate } from "../domain/coordinates";
+import { selectNearestWindsStation } from "../domain/weather-stations";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
 import type { AircraftProfile, AircraftProfileInput, CompassDeviationEntry } from "../domain/aircraft";
 import type { AirportRoutePoint, CheckpointRoutePoint, JsonValue, PlanDraft, PlanFamily, PlanRevision, PlanWeatherSelection, RoutePoint, UserRouteLeg, WeatherReferenceSnapshot } from "../domain/route";
@@ -17,7 +18,7 @@ import {
   type UseCaseIds,
 } from "../application/plan-use-cases";
 import type { WindsTransportClient } from "../services/weather/winds-client";
-import type { WindsForecastAvailability } from "../../worker/api/contracts";
+import type { WindsForecastAvailability, WindsForecastCycle } from "../../worker/api/contracts";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import type { BrowserWeatherRefresh } from "../application/browser-weather-refresh";
 import { selectForecastValidTime } from "../domain/weather-valid-time";
@@ -26,6 +27,7 @@ import { renderRevisionHistory } from "./revision-history";
 import { renderPlanPortability, type PlanPortabilityRepository } from "./plan-portability";
 import { renderWorkspaceLayout } from "./workspace-layout";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
+import { routeCoordinatesDistanceMidpoint } from "../application/weather-station-reference";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -60,6 +62,7 @@ interface PlannerState {
   readonly unlockedLegId?: string;
   readonly inspectedCalculation?: NavlogInspectionSelection;
   readonly availableForecasts: readonly WindsForecastAvailability[];
+  readonly unavailableForecastCycles: readonly WindsForecastCycle[];
   readonly selectedForecastValidTimeUtc?: string;
   readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
   readonly calculationPreview?: JsonValue;
@@ -107,7 +110,7 @@ export function renderPlanner(root: HTMLElement, dependencies: PlannerDependenci
 }
 
 class Planner {
-  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], invalidCruiseAltitudeIndexes: [], availableForecasts: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
+  private state: PlannerState = { profiles: [], checkpoints: [], cruiseAltitudes: [], invalidCruiseAltitudeIndexes: [], availableForecasts: [], unavailableForecastCycles: [], weatherSnapshots: [], revisions: [], families: [], routeForm: emptyRouteForm(), descentTargetIsManual: false, hasUnsavedChanges: false, hasUnsavedForecastSelection: false };
   private readonly feedback: HTMLParagraphElement;
   private readonly content: HTMLDivElement;
 
@@ -394,6 +397,7 @@ class Planner {
     const load = workflowButton("Load available winds periods", "button", "load-winds", this.workflowUnavailableReason("load-winds"));
     load.addEventListener("click", () => void this.handleLoadForecastPeriods());
     section.append(load, actionStatus("load-winds", this.workflowUnavailableReason("load-winds")));
+    if (this.state.unavailableForecastCycles.length > 0) section.append(text("p", `Availability is incomplete because forecast cycles ${this.state.unavailableForecastCycles.join(", ")} could not be checked. Listed periods are confirmed published products; missing periods are unknown.`));
     if (this.state.availableForecasts.length === 0) return section;
     const label = document.createElement("label");
     label.htmlFor = "selected-forecast-period";
@@ -433,15 +437,27 @@ class Planner {
       const points = routePointsWithCheckpoints(this.state, this.state.checkpoints);
       if (!this.beginInputTransaction("Loading published winds periods…")) return;
       const discovery = await winds.discoverStations(points.map((point) => point.coordinate));
+      const midpoint = routeCoordinatesDistanceMidpoint(points.map((point) => point.coordinate));
+      const candidates = discovery.stations.map((station) => {
+        const location = coordinate(station.coordinates.latitudeDeg, station.coordinates.longitudeDeg);
+        if (!location.ok) throw new Error("A discovered winds station has invalid coordinates.");
+        return { id: station.id, coordinate: location.value };
+      });
+      const selectedStation = selectNearestWindsStation(midpoint, candidates);
+      if (!selectedStation.ok) throw new Error(selectedStation.error.message);
+      const selectedStationForecasts = discovery.forecasts.filter((forecast) => forecast.stationId === selectedStation.value.station.id);
       this.state = {
         ...this.state,
         pendingOperation: undefined,
-        availableForecasts: discovery.forecasts,
+        availableForecasts: selectedStationForecasts,
+        unavailableForecastCycles: discovery.unavailableForecastCycles,
         selectedForecastValidTimeUtc: undefined,
         hasUnsavedForecastSelection: weatherSelectionIsDirty(this.state.draft, this.effectiveForecastValidTimeUtc(null), this.state.routeForm.surfaceWeatherIcao),
         calculationPreview: undefined,
       };
-      this.feedback.textContent = `Loaded ${discovery.forecasts.length} published winds period(s); choose one explicitly.`;
+      this.feedback.textContent = selectedStationForecasts.length === 0
+        ? `The nearest verified winds station ${selectedStation.value.station.id} has no published forecast periods, so it cannot be used as a wind source.`
+        : `Loaded ${selectedStationForecasts.length} published winds period(s) for nearest station ${selectedStation.value.station.id}; choose one explicitly.`;
       this.render();
     } catch (error) {
       this.reportError(error);
@@ -654,6 +670,7 @@ class Planner {
         selectedTasLegId: undefined,
         unlockedLegId: undefined,
         availableForecasts: [],
+        unavailableForecastCycles: [],
         selectedForecastValidTimeUtc: undefined,
         hasUnsavedChanges: this.state.draft !== undefined,
         hasUnsavedForecastSelection: false,
@@ -678,7 +695,7 @@ class Planner {
       const name = inputValue(form, "checkpoint-name").trim();
       if (name.length === 0) throw new Error("Checkpoint name is required.");
       const checkpoint: CheckpointRoutePoint = { kind: "checkpoint", id: this.dependencies.ids.next(), name, coordinate: checked.value };
-      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+      this.state = { ...this.state, checkpoints: [...this.state.checkpoints, checkpoint], selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: expandAltitudes(this.state.cruiseAltitudes, this.state.checkpoints.length + 2), invalidCruiseAltitudeIndexes: [], availableForecasts: [], unavailableForecastCycles: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
       this.feedback.textContent = `Added checkpoint ${name}.`;
       this.render();
     } catch (error) {
@@ -689,7 +706,7 @@ class Planner {
   private removeCheckpoint(id: string): void {
     const removed = this.state.checkpoints.find((checkpoint) => checkpoint.id === id);
     const checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.id !== id);
-    this.state = { ...this.state, checkpoints, selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
+    this.state = { ...this.state, checkpoints, selectedTasLegId: undefined, unlockedLegId: undefined, inspectedCalculation: undefined, cruiseAltitudes: reconcileCruiseAltitudes(this.state, checkpoints), invalidCruiseAltitudeIndexes: [], availableForecasts: [], unavailableForecastCycles: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined };
     this.feedback.textContent = removed === undefined ? "Checkpoint was already absent." : `Removed checkpoint ${removed.name}.`;
     this.render();
   }
@@ -929,6 +946,7 @@ class Planner {
         cruiseAltitudes: reopened.draftSnapshot.route.legs.map((leg) => leg.cruiseAltitudeFeetMsl),
         invalidCruiseAltitudeIndexes: [],
         availableForecasts: [],
+        unavailableForecastCycles: [],
         selectedForecastValidTimeUtc: undefined,
         descentTargetIsManual: reopened.draftSnapshot.descentTargetAltitudeFeetMsl.origin === "pilot-input",
         hasUnsavedChanges: false,
@@ -1110,13 +1128,13 @@ class Planner {
     const field = routeFormField(input.name);
     if (field === undefined) return;
     this.state = field === "departureTime"
-      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+      ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, availableForecasts: [], unavailableForecastCycles: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
       : field === "descentTarget"
         ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, descentTargetIsManual: input.value.trim() !== "", hasUnsavedChanges: this.state.draft !== undefined, calculationPreview: undefined }
       : field === "departureIcao"
-          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, departure: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+          ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, departure: undefined, availableForecasts: [], unavailableForecastCycles: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
       : field === "destinationIcao"
-            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, destination: undefined, availableForecasts: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
+            ? { ...this.state, routeForm: { ...this.state.routeForm, [field]: input.value }, inspectedCalculation: undefined, destination: undefined, availableForecasts: [], unavailableForecastCycles: [], selectedForecastValidTimeUtc: undefined, hasUnsavedChanges: this.state.draft !== undefined, hasUnsavedForecastSelection: false, calculationPreview: undefined }
         : field === "surfaceWeatherIcao"
           ? {
             ...this.state,

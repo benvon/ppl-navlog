@@ -4,6 +4,7 @@ import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application
 import type { AircraftProfile } from "../domain/aircraft";
 import type { JsonValue, PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
+import type { WindsForecastAvailability, WindsStation } from "../../worker/api/contracts";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
 import { aircraftProfile, planFamily, planRevision } from "../services/storage/__tests__/fixtures";
 import { renderPlanner } from "./planner";
@@ -25,6 +26,8 @@ class MemoryPersistence implements NavlogPersistence {
 }
 
 const clock: UseCaseClock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
+const plannerWindsStation: WindsStation = { id: "BRL", name: "Burlington", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us", availableForecastCycles: ["06"], source: "aviationweather" };
+const plannerDiscovery = (forecasts: WindsForecastAvailability[]) => ({ stations: [plannerWindsStation], forecasts, unavailableForecastCycles: [] });
 
 function ids(): UseCaseIds {
   let count = 0;
@@ -998,7 +1001,7 @@ describe("planner shell", () => {
   it("requires a deliberate published forecast choice before storing it on a draft", async () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
-    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    const winds = { discoverStations: async () => plannerDiscovery([{ stationId: "BRL", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }]) } as unknown as WindsTransportClient;
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
     await settle();
     const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
@@ -1021,6 +1024,35 @@ describe("planner shell", () => {
     clickByLabel(root, "Save new plan revision");
     await settle();
     expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2026-09-22T00:00:00.000Z");
+  });
+
+  it("shows only the nearest station periods and discloses unavailable cycles", async () => {
+    const root = document.createElement("div");
+    const station = (id: string, latitudeDeg: number, longitudeDeg: number): WindsStation => ({ id, name: id, coordinates: { latitudeDeg, longitudeDeg }, elevationFt: null, region: "us", availableForecastCycles: ["06"], source: "aviationweather" });
+    const winds = { discoverStations: async () => ({
+      stations: [station("FAR", 35, -110), station("MID", 42.3, -88.5)],
+      forecasts: [
+        { stationId: "FAR", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" },
+        { stationId: "MID", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T06:00:00.000Z", useFrom: "2026-09-22T02:00:00.000Z", useUntil: "2026-09-22T09:00:00.000Z" },
+      ],
+      unavailableForecastCycles: ["12"],
+    }) } as unknown as WindsTransportClient;
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence: new MemoryPersistence(), ids: ids(), clock, winds });
+    await settle();
+    input(root, "departure-icao").value = "KORD";
+    input(root, "destination-icao").value = "KJVL";
+    clickByLabel(root, "Resolve airport endpoints");
+    await settle();
+    input(root, "departure-time").value = "2026-09-21T22:00";
+    input(root, "departure-time").dispatchEvent(new Event("input", { bubbles: true }));
+    clickByLabel(root, "Load available winds periods");
+    await settle();
+
+    const periodOptions = [...(root.querySelector<HTMLSelectElement>("#selected-forecast-period")?.options ?? [])].map((option) => option.value);
+    expect(periodOptions).toContain("2026-09-22T06:00:00.000Z");
+    expect(periodOptions).not.toContain("2026-09-22T00:00:00.000Z");
+    expect(root.textContent).toContain("cycles 12 could not be checked");
+    expect(root.textContent).toContain("nearest station MID");
   });
 
   it("preserves a saved forecast when only the surface weather source changes", async () => {
@@ -1135,7 +1167,7 @@ describe("planner shell", () => {
         },
       },
     };
-    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T11:00:00.000Z", validAt: "2030-09-21T12:00:00.000Z", useFrom: "2030-09-21T11:00:00.000Z", useUntil: "2030-09-21T13:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    const winds = { discoverStations: async () => plannerDiscovery([{ stationId: "BRL", forecastCycle: "06", issuedAt: "2030-09-21T11:00:00.000Z", validAt: "2030-09-21T12:00:00.000Z", useFrom: "2030-09-21T11:00:00.000Z", useUntil: "2030-09-21T13:00:00.000Z" }]) } as unknown as WindsTransportClient;
     await persistence.saveAircraftProfile(aircraftProfile());
     await persistence.savePlanRevision(family, revision);
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
@@ -1167,7 +1199,7 @@ describe("planner shell", () => {
         },
       },
     };
-    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2030-09-21T12:00:00.000Z", validAt: "2030-09-21T13:00:00.000Z", useFrom: "2030-09-21T12:30:00.000Z", useUntil: "2030-09-21T14:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    const winds = { discoverStations: async () => plannerDiscovery([{ stationId: "BRL", forecastCycle: "06", issuedAt: "2030-09-21T12:00:00.000Z", validAt: "2030-09-21T13:00:00.000Z", useFrom: "2030-09-21T12:30:00.000Z", useUntil: "2030-09-21T14:00:00.000Z" }]) } as unknown as WindsTransportClient;
     await persistence.saveAircraftProfile(aircraftProfile());
     await persistence.savePlanRevision(family, revision);
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds });
@@ -1200,7 +1232,7 @@ describe("planner shell", () => {
     const root = document.createElement("div");
     const persistence = new MemoryPersistence();
     const refreshWeather = vi.fn().mockResolvedValue({ status: "blocked", reason: "infeasible-profile", message: "Route phases overlap.", warnings: [], calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { boundaries: [] } } });
-    const winds = { discoverStations: async () => ({ forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }] }) } as unknown as WindsTransportClient;
+    const winds = { discoverStations: async () => plannerDiscovery([{ stationId: "BRL", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }]) } as unknown as WindsTransportClient;
     let attempt = 0;
     const calculatePlan: BrowserPlanCalculator = async (_draft, _profile, parent) => {
       attempt += 1;

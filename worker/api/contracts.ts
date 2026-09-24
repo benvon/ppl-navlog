@@ -75,6 +75,7 @@ export interface WindsStation {
 }
 
 export interface WindsForecastAvailability {
+  stationId: string;
   forecastCycle: WindsForecastCycle;
   issuedAt: string;
   validAt: string;
@@ -116,6 +117,8 @@ export interface WindsSourceProvenance {
 export interface WindsStationsSuccessPayload {
   stations: WindsStation[];
   forecasts: WindsForecastAvailability[];
+  /** Cycles that failed to load; their products are unknown, not absent. */
+  unavailableForecastCycles: WindsForecastCycle[];
   requestedRoute: WindsRoutePoint[];
   provenance: WindsSourceProvenance[];
   requestId: string;

@@ -16,12 +16,12 @@ const cache = {
   servedAt: COMPLETE_FLIGHT_TIME, ttlSeconds: 1200, maxPayloadAgeSeconds: 7200, key: "synthetic-study-weather", resource: "winds-temps",
 };
 const station = { id: "BRL", name: "Synthetic study winds station", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us" as const, availableForecastCycles: ["06" as const], source: "aviationweather" as const };
-const period = { forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: COMPLETE_FLIGHT_FORECAST_VALID_AT, useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
+const period = { stationId: "BRL", forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: COMPLETE_FLIGHT_FORECAST_VALID_AT, useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
 const provenance = { adapter: "aviationweather" as const, product: "NCEP FB Winds/Temps (legacy FD)" as const, region: "us" as const, endpoint: "https://aviationweather.gov/api/data/windtemp" as const, fetchedAt: COMPLETE_FLIGHT_TIME, cache };
 
 export const completeFlightWeatherClient: WindsTransportClient & MetarTransportClient = {
   discoverStations: async (): Promise<WindsStationsSuccessPayload> => ({
-    stations: [station], forecasts: [period], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111",
+    stations: [station], forecasts: [period], unavailableForecastCycles: [], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111",
   }),
   fetchForecast: async (): Promise<WindsForecastSuccessPayload> => ({
     forecast: {
