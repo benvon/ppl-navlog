@@ -16,4 +16,4 @@ The browser stores pilot inputs and aircraft profiles locally. Airport and weath
 
 The [UI architecture](docs/ui-architecture.md) explains the layout/theme boundary and the worksheet-to-inspector interaction.
 
-The [PDF output guide](docs/pdf-output.md) explains browser-local printing. The [release-readiness audit](docs/release-readiness-audit.md), [security review](docs/security-review.md), and [GitHub CI/CD setup guide](docs/github-ci-cd-setup.md) track the remaining development and production gates.
+The [PDF output guide](docs/pdf-output.md) records why printing is deferred while the core planner is built. The [release-readiness audit](docs/release-readiness-audit.md), [security review](docs/security-review.md), and [GitHub CI/CD setup guide](docs/github-ci-cd-setup.md) track the remaining development and production gates.

@@ -1,6 +1,6 @@
 # PPL Navlog Implementation Plan
 
-**Issue #7 persistence and scope amendment:** this document contains pre-issue requirements for immutable calculated revisions, migration, and JSON plan portability. The accepted [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md) supersedes those requirements for active planner persistence: v2 stores pilot inputs and aircraft profiles, keeps at most 20 explicit input submissions per plan, and keeps external responses and calculated output ephemeral. The planner does not load or migrate v1 data. Plan and aircraft-profile import/export are out of scope before version 1.0. Revision-specific flows below describe the former design; they are not requirements for the active planner.
+**Issue #7 persistence and scope amendment:** this document contains pre-issue requirements for immutable calculated revisions, migration, JSON plan portability, and printable output. The accepted [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md) supersedes those requirements for the active planner: v2 stores pilot inputs and aircraft profiles, allows at most 25 checkpoints and 20 explicit input submissions per plan, and keeps external responses and calculated output ephemeral. The planner does not load or migrate v1 data. Plan and aircraft-profile import/export are out of scope before version 1.0. Printing and PDF output are deferred while core planning functionality is built. Revision-specific flows below describe the former design; they are not requirements for the active planner.
 
 ## 1. Purpose
 
@@ -349,13 +349,13 @@ Selecting any calculated value opens a persistent Calculation Inspector. The ins
 
 Generated TOC and TOD rows must be visually distinct but participate in the same explanations and cumulative totals as other rows.
 
-The current print action invokes the browser print dialog for a successful calculation held in the current session. It does not refresh weather or save calculation output. Print layout remains subject to browser QA; it is not plan portability.
+Printing is deferred in the active planner while core planning functionality is built. There is no print action in the issue #7 UI; future browser output must use only a successful calculation held in the current session and pass browser layout review.
 
 ## 9. Active Persistence Scope
 
 The active planner uses the v2 IndexedDB store for aircraft profiles, one current pilot-input document per plan, and up to 20 explicit input submissions per plan. Airport and weather responses and calculated output remain session-only. The planner does not load or migrate v1 data.
 
-Plan and aircraft-profile import/export, including recovery files, are explicitly out of scope before version 1.0. There is no JSON portability or recovery format. PDF printing remains a one-way browser action for the current successful result, not a plan interchange format.
+Plan and aircraft-profile import/export, including recovery files, are explicitly out of scope before version 1.0. There is no JSON portability or recovery format. Printing and PDF output are deferred from issue #7 and must not be treated as plan interchange formats when implemented.
 
 ## 10. Failure and Freshness Behavior
 

@@ -1,5 +1,5 @@
 # Print and PDF output
 
-The issue #7 planner exposes **Print current plan** only while a successful calculation result is available in the current session. It invokes the browser's `window.print()` action. The result is ephemeral; printing does not save a calculation, weather evidence, or a revision to IndexedDB. The planner must be updated again after opening a plan, editing pilot inputs, or reloading.
+Printing and PDF output are deferred while the core issue #7 planner is being built. The active planner has no print action. A future print workflow must render only a successful current calculation, preserve the page-wide teaching disclaimer, avoid treating a prior session's weather as current, and receive browser layout and pagination review before release.
 
-The print action is browser-local and does not refresh weather or upload planning data. Browser print layout and output have not been verified for the issue #7 planner, so this action is not documented as a finished worksheet PDF export. There is no PDF import path. The application remains a teaching and planning aid, not an official weather briefing or complete preflight plan.
+The current on-screen calculation is session-only. Editing pilot inputs, opening another plan, or reloading removes it until a new successful **Update plan**. There is no plan or PDF import path.

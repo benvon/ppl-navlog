@@ -4,6 +4,7 @@ import { StorageValidationError, validateAircraftProfile } from "./validation";
 export const PILOT_INPUT_DATABASE_NAME = "ppl-navlog-pilot-input-v2";
 export const PILOT_INPUT_DATABASE_VERSION = 1;
 export const MAX_SUBMISSIONS_PER_PLAN = 20;
+export const MAX_CHECKPOINTS_PER_PLAN = 25;
 const MAX_PLAN_BYTES = 1024 * 1024;
 
 export interface PilotInputPlan {
@@ -202,7 +203,7 @@ function validatePlanCollections(value: Record<string, unknown>): void {
 }
 
 function validateCheckpoints(value: unknown): void {
-  if (!Array.isArray(value) || value.length > 100) throw invalid("$.checkpoints", "must be an array of at most 100 checkpoints");
+  if (!Array.isArray(value) || value.length > MAX_CHECKPOINTS_PER_PLAN) throw invalid("$.checkpoints", `must be an array of at most ${MAX_CHECKPOINTS_PER_PLAN} checkpoints`);
   value.forEach((point, index) => {
     const path = `$.checkpoints[${index}]`;
     if (!isRecord(point)) throw invalid(path, "must be an object");

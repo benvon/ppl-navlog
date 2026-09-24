@@ -156,3 +156,12 @@ td {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.875rem;
 }
+
+.teaching-disclaimer {
+  margin-block: var(--space-3) var(--space-4);
+  padding: var(--space-3);
+  border-inline-start: 0.3rem solid #a63d00;
+  background: #fff2e8;
+  color: #5b2300;
+  font-weight: 700;
+}

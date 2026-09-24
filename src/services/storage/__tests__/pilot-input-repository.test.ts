@@ -1,6 +1,6 @@
 import { indexedDB } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
-import { IndexedDbPilotInputRepository, MAX_SUBMISSIONS_PER_PLAN } from "../pilot-input-repository";
+import { IndexedDbPilotInputRepository, MAX_CHECKPOINTS_PER_PLAN, MAX_SUBMISSIONS_PER_PLAN } from "../pilot-input-repository";
 import type { PilotInputPlan } from "../pilot-input-repository";
 import { aircraftProfile, timestamp } from "./fixtures";
 
@@ -72,6 +72,48 @@ afterEach(async () => {
 });
 
 describe("input-only pilot repository", () => {
+  it("accepts 25 checkpoints and preserves their literal text", async () => {
+    const store = repo(); await store.initialize();
+    const checkpoints = Array.from({ length: MAX_CHECKPOINTS_PER_PLAN }, (_, index) => ({ name: ` stop ${index} `, coordinateText: `41.${index} ` }));
+    const valid = { ...plan(), checkpoints };
+
+    await store.saveWorkingCopy(valid);
+
+    expect((await store.getPlan("plan-one"))?.checkpoints).toEqual(checkpoints);
+  });
+
+  it("rejects 26 checkpoints without partially writing a working copy or profile", async () => {
+    const store = repo(); await store.initialize();
+    const invalid = { ...plan(), checkpoints: Array.from({ length: MAX_CHECKPOINTS_PER_PLAN + 1 }, (_, index) => ({ name: `stop-${index}`, coordinateText: "41.0" })) };
+
+    await expect(store.saveWorkingCopy(invalid)).rejects.toThrow("at most 25 checkpoints");
+    expect(await store.getPlan("plan-one")).toBeUndefined();
+    expect(await store.listPlans()).toEqual([]);
+    expect(await store.listProfiles()).toEqual([]);
+  });
+
+  it("rejects an over-limit plan when reading from storage", async () => {
+    const store = repo(); await store.initialize();
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const tx = db.transaction("pilotInputs", "readwrite");
+    tx.objectStore("pilotInputs").put({ ...plan(), checkpoints: Array.from({ length: MAX_CHECKPOINTS_PER_PLAN + 1 }, (_, index) => ({ name: `stop-${index}`, coordinateText: "41.0" })) });
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
+
+    await expect(store.getPlan("plan-one")).rejects.toThrow("at most 25 checkpoints");
+  });
+
+  it("rejects 26 checkpoints in a submission snapshot without changing stored data", async () => {
+    const store = repo(); await store.initialize();
+    await store.saveWorkingCopy({ ...plan(), selectedProfileId: undefined, profileSnapshot: undefined });
+    const snapshot = { ...plan(), selectedProfileId: undefined, profileSnapshot: undefined, checkpoints: Array.from({ length: MAX_CHECKPOINTS_PER_PLAN + 1 }, (_, index) => ({ name: `stop-${index}`, coordinateText: "41.0" })) };
+    const invalid = { ...planWithHistory([historyRecord({})]), submissions: [{ submittedAt: timestamp, rawFields: {}, inputs: {
+      title: snapshot.title, rawFields: snapshot.rawFields, checkpoints: snapshot.checkpoints, cruiseAltitudeTexts: [], overrideReasons: {},
+    } }] };
+
+    await expect(store.saveWorkingCopy(invalid)).rejects.toThrow("at most 25 checkpoints");
+    expect(await store.getPlan("plan-one")).toEqual({ ...plan(), selectedProfileId: undefined, profileSnapshot: undefined });
+  });
+
   it("round trips incomplete literal editor text without creating a submission", async () => {
     const store = repo(); await store.initialize();
     await store.saveWorkingCopy(plan());

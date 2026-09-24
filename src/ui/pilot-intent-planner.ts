@@ -15,7 +15,7 @@ import { renderCalculationInspector, type NavlogInspectionSelection } from "./ca
 import type { PlanDraft, PlanRevision } from "../domain/route";
 import type { WindsTransportClient, MetarTransportClient } from "../services/weather/winds-client";
 import { WorkerWindsAdapter } from "../services/weather/winds-adapter";
-import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
+import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
@@ -122,7 +122,7 @@ class PilotIntentPlanner {
       const output = document.createElement("section"); output.dataset.currentResult = "true";
       const navlog = renderCalculatedNavlog(this.result, { selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
       if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
-      const print = document.createElement("button"); print.type = "button"; print.textContent = "Print current plan"; print.addEventListener("click", () => window.print()); output.append(print); shell.append(output);
+      shell.append(output);
     }
     if (this.profiles.length === 0) shell.append(this.el("h3", "Create an aircraft profile to enable Update plan."));
     this.content.append(shell);
@@ -144,7 +144,9 @@ class PilotIntentPlanner {
     const add = document.createElement("button");
     add.type = "button";
     add.textContent = "Add checkpoint";
+    add.disabled = (this.current?.checkpoints.length ?? 0) >= MAX_CHECKPOINTS_PER_PLAN;
     add.addEventListener("click", () => {
+      if ((this.current?.checkpoints.length ?? 0) >= MAX_CHECKPOINTS_PER_PLAN) return;
       const hadOverrides = this.clearRouteOverrides();
       const current = this.current ?? this.blankPlan();
       this.current = this.withIdentity({
@@ -393,8 +395,8 @@ class PilotIntentPlanner {
     const destinationCode = raw["destination-icao"];
     if (!departureCode || !destinationCode) throw new Error("Enter both departure and destination airport codes.");
     const [departure, destination] = await Promise.all([
-      this.dependencies.airportLookup.lookupAirportCode(departureCode),
-      this.dependencies.airportLookup.lookupAirportCode(destinationCode),
+      this.dependencies.airportLookup.lookupAirportCode(departureCode.trim().toUpperCase()),
+      this.dependencies.airportLookup.lookupAirportCode(destinationCode.trim().toUpperCase()),
     ]);
     const checkpoints = this.buildCheckpoints(current);
     const departureText = raw["departure-time"];
@@ -627,7 +629,8 @@ function requiredFieldsError(fields: Readonly<Record<string, string>>): string |
 function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[], profileDraftDirty: boolean, confirmedOverrides: ReadonlySet<number>): string | undefined {
   const checks = [
     profileDraftDirty ? "Save the edited aircraft profile first." : undefined,
-    requiredFieldsError(fields), profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
+    requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
+    profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
     fuelError(fields), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
     metarError(fields["surface-weather-icao"] ?? ""), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
@@ -651,7 +654,12 @@ function altitudeError(plan: PilotInputPlan | undefined): string | undefined {
   return plan.cruiseAltitudeTexts.some((value) => value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) <= 0) ? "Enter a positive cruise altitude for every leg." : undefined;
 }
 function checkpointError(plan: PilotInputPlan | undefined): string | undefined {
+  if ((plan?.checkpoints.length ?? 0) > MAX_CHECKPOINTS_PER_PLAN) return `A plan can have no more than ${MAX_CHECKPOINTS_PER_PLAN} checkpoints.`;
   return plan?.checkpoints.some((point) => point.name.trim() === "" || !parsePlannerCoordinateText(point.coordinateText).ok) ? "Enter a name and valid coordinate for every checkpoint." : undefined;
+}
+function airportCodeError(departure: string, destination: string): string | undefined {
+  return [departure, destination].some((code) => !/^[A-Z0-9]{3,4}$/i.test(code.trim()))
+    ? "Enter departure and destination airport codes using exactly 3 or 4 letters or numbers." : undefined;
 }
 function metarError(value: string): string | undefined {
   return value.trim() !== "" && !/^[A-Z0-9]{4}$/.test(value.trim().toUpperCase()) ? "Selected METAR must be an exact four-character ICAO code." : undefined;

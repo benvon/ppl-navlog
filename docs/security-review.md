@@ -14,7 +14,7 @@ This is a public, zero-login application. Under issue #7, pilot input documents 
 | Medium | The winds route query accepted 100 points but no total character limit, allowing oversized numeric strings to consume parsing time. | **Fixed in code:** route query capped at 4,096 characters before parsing. Add a deployed abuse smoke test. |
 | Medium | Public dev and production deploy credentials and promotion path are not yet defined. A broad or PR-exposed token would allow unauthorized deployment. | **Open release blocker.** Use separate environment-scoped least-privilege tokens, protected production approval, pinned Actions, and deployment only from validated trusted refs. See `docs/github-ci-cd-setup.md`. |
 | Medium | `RUNWAY_PICKER_API` availability and response shape have only mock/local functional tests. A missing binding fails with 503, but the live contract and failure behavior are unverified. | **Open validation gate.** Smoke-test exact-ICAO airport/METAR success and 503 behavior on dev before production. |
-| Low | Browser print headers/footers may include the page URL by default. This is a local PDF privacy concern, not remote exfiltration. | **Documented:** users may disable browser headers/footers; print output itself is browser-local. |
+| Low | Future browser print headers/footers may include the page URL by default. This is a local PDF privacy concern, not remote exfiltration. | **Deferred:** printing is disabled in the active planner; review browser output and headers/footers before enabling it. |
 
 ## Positive controls reviewed
 

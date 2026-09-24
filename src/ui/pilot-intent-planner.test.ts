@@ -188,6 +188,72 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(false);
   });
 
+  it("autosaves malformed airport codes but blocks submission before airport lookup", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const lookup = createLocalStudyAirportLookup();
+    const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
+    const root = await mount(repository, winds(), lookup);
+    await makeLocallyValid(root, true);
+    await choosePublishedPeriod(root);
+    edit(root, "departure-icao", "K-ORD", true);
+    await settle();
+
+    expect(repository.plans.at(-1)?.rawFields["departure-icao"]).toBe("K-ORD");
+    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(root.querySelector("[data-local-error]")?.textContent).toContain("exactly 3 or 4 letters or numbers");
+    lookupSpy.mockClear();
+    button(root, "Update plan").disabled = false;
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(0);
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  it("accepts surrounding whitespace and lowercase airport codes using the normalized lookup codes", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const lookup = createLocalStudyAirportLookup();
+    const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
+    const root = await mount(repository, winds(), lookup);
+    await makeLocallyValid(root, true);
+    await choosePublishedPeriod(root);
+    edit(root, "departure-icao", " kord ");
+    edit(root, "destination-icao", "kjvl");
+    expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
+    expect(button(root, "Update plan").disabled).toBe(false);
+    lookupSpy.mockClear();
+
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(lookupSpy).toHaveBeenCalledWith("KORD");
+    expect(lookupSpy).toHaveBeenCalledWith("KJVL");
+  });
+
+  it("limits checkpoint creation to 25 and blocks a stored plan with 26", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    for (let index = 0; index < 25; index++) button(root, "Add checkpoint").click();
+    await settle();
+    expect(root.querySelectorAll("[name^='checkpoint-name-']")).toHaveLength(25);
+    expect(button(root, "Add checkpoint").disabled).toBe(true);
+    button(root, "Add checkpoint").disabled = false;
+    button(root, "Add checkpoint").click();
+    expect(root.querySelectorAll("[name^='checkpoint-name-']")).toHaveLength(25);
+    await makeLocallyValid(root, true);
+    await choosePublishedPeriod(root);
+    await settle();
+
+    const corrupt = { ...repository.plans[0]!, rawFields: { ...repository.plans[0]!.rawFields, "plan-title": "Checkpoint limit", "departure-time": "2026-09-21T22:00", "departure-icao": "KORD", "destination-icao": "KJVL", "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: Array.from({ length: 26 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })), cruiseAltitudeTexts: Array(27).fill("4500"), overrideReasons: {} };
+    repository.plans[0] = corrupt;
+    const reopened = await mount(repository);
+    expect(button(reopened, "Update plan").disabled).toBe(true);
+    expect(reopened.querySelector("[data-local-error]")?.textContent).toContain("no more than 25 checkpoints");
+    button(reopened, "Update plan").disabled = false;
+    button(reopened, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(0);
+  });
+
   it("rejects titles over 120 trimmed characters before submission and accepts 120", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const weather = winds();
@@ -564,7 +630,6 @@ describe("pilot intent planner", () => {
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
     await choosePublishedPeriod(root);
-    const print = vi.spyOn(window, "print").mockImplementation(() => {});
     button(root, "Update plan").click();
     await settle();
     expect(root.querySelector(".calculated-navlog")).not.toBeNull();
@@ -572,8 +637,7 @@ describe("pilot intent planner", () => {
     expect(inspected).not.toBeNull();
     inspected!.click();
     expect(root.querySelector(".calculation-inspector h3")?.textContent).toContain("True heading");
-    button(root, "Print current plan").click();
-    expect(print).toHaveBeenCalledOnce();
+    expect([...root.querySelectorAll<HTMLButtonElement>("button")].some((item) => item.textContent === "Print current plan")).toBe(false);
 
     fail = true;
     button(root, "Update plan").click();
@@ -590,7 +654,6 @@ describe("pilot intent planner", () => {
     await settle();
     expect(root.querySelector(".calculated-navlog")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated using current airport and weather context.");
-    print.mockRestore();
   });
 
   it("disables plan navigation during an update and clears the result when another plan is opened", async () => {
