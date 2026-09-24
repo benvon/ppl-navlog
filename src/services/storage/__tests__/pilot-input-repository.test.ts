@@ -82,6 +82,21 @@ describe("input-only pilot repository", () => {
     expect((await store.getPlan("plan-one"))?.checkpoints).toEqual(checkpoints);
   });
 
+  it("preserves independent endpoint source text and unrelated raw fields across reload", async () => {
+    const store = repo(); await store.initialize();
+    const rawFields = {
+      ...plan().rawFields,
+      "departure-metar-icao": " kord ",
+      "destination-taf-icao": "KJ",
+      "taxi-fuel": "1.2",
+    };
+
+    await store.saveWorkingCopy({ ...plan(), rawFields });
+    const reopened = await store.getPlan("plan-one");
+
+    expect(reopened?.rawFields).toEqual(rawFields);
+  });
+
   it("rejects 26 checkpoints without partially writing a working copy or profile", async () => {
     const store = repo(); await store.initialize();
     const invalid = { ...plan(), checkpoints: Array.from({ length: MAX_CHECKPOINTS_PER_PLAN + 1 }, (_, index) => ({ name: `stop-${index}`, coordinateText: "41.0" })) };
