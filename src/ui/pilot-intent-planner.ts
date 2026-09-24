@@ -81,7 +81,7 @@ class PilotIntentPlanner {
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
-      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "surface-weather-icao": "Selected METAR ICAO (optional)", "selected-forecast-period": "Selected forecast valid time (UTC)" };
+      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "surface-weather-icao": "Selected METAR ICAO (optional)", "selected-forecast-period": "Selected forecast valid time (UTC)" };
       form.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
