@@ -231,19 +231,26 @@ describe("pilot intent planner", () => {
 
   it("limits checkpoint creation to 25 and blocks a stored plan with 26", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const now = "2026-09-21T21:30:00.000Z";
+    const initial: PilotInputPlan = {
+      id: "checkpoint-limit", title: "Checkpoint limit", rawFields: {
+        "plan-title": "Checkpoint limit", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "", "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
+      }, selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: Array.from({ length: 24 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })),
+      cruiseAltitudeTexts: Array(25).fill("4500"), overrideReasons: {}, updatedAt: now, submissions: [],
+    };
+    repository.plans.push(initial);
     const root = await mount(repository);
-    for (let index = 0; index < 25; index++) button(root, "Add checkpoint").click();
+    button(root, "Add checkpoint").click();
     await settle();
     expect(root.querySelectorAll("[name^='checkpoint-name-']")).toHaveLength(25);
     expect(button(root, "Add checkpoint").disabled).toBe(true);
     button(root, "Add checkpoint").disabled = false;
     button(root, "Add checkpoint").click();
     expect(root.querySelectorAll("[name^='checkpoint-name-']")).toHaveLength(25);
-    await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
-    await settle();
 
-    const corrupt = { ...repository.plans[0]!, rawFields: { ...repository.plans[0]!.rawFields, "plan-title": "Checkpoint limit", "departure-time": "2026-09-21T22:00", "departure-icao": "KORD", "destination-icao": "KJVL", "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: Array.from({ length: 26 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })), cruiseAltitudeTexts: Array(27).fill("4500"), overrideReasons: {} };
+    const corrupt = { ...repository.plans[0]!, checkpoints: Array.from({ length: 26 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })), cruiseAltitudeTexts: Array(27).fill("4500"), overrideReasons: {} };
     repository.plans[0] = corrupt;
     const reopened = await mount(repository);
     expect(button(reopened, "Update plan").disabled).toBe(true);
