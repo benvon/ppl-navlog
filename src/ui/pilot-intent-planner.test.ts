@@ -131,6 +131,39 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(true);
   });
 
+  it("reopens the latest plan snapshot after blur autosave without losing fields on a later save", async () => {
+    const repository = new MemoryInputs();
+    const first: PilotInputPlan = {
+      id: "first-plan", title: "First plan", rawFields: { "plan-title": "First plan", "departure-time": "2026-09-21T22:00" },
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    };
+    const second: PilotInputPlan = {
+      id: "second-plan", title: "Second plan", rawFields: { "plan-title": "Second plan" },
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    };
+    repository.plans.push(first, second);
+    const root = await mount(repository);
+
+    edit(root, "departure-time", "2026-09-21T23:15", true);
+    await settle();
+    button(root, "Open First plan").click();
+    await settle();
+    expect(input(root, "departure-time").value).toBe("2026-09-21T23:15");
+
+    button(root, "Open Second plan").click();
+    await settle();
+    button(root, "Open First plan").click();
+    await settle();
+    expect(input(root, "departure-time").value).toBe("2026-09-21T23:15");
+    edit(root, "taxi-fuel", "1.2", true);
+    await settle();
+
+    expect(repository.plans.find((plan) => plan.id === first.id)?.rawFields).toMatchObject({
+      "departure-time": "2026-09-21T23:15",
+      "taxi-fuel": "1.2",
+    });
+  });
+
   it("keeps an autosave failure visible across Open and New until a later write succeeds", async () => {
     const repository = new MemoryInputs();
     const other: PilotInputPlan = {
@@ -145,6 +178,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
 
     button(root, "Open Other saved plan").click();
+    await settle();
     expect(input(root, "plan-title").value).toBe("Other saved plan");
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     button(root, "New plan").click();
@@ -411,6 +445,7 @@ describe("pilot intent planner", () => {
     repository.profileSaveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
     const root = await mount(repository);
     button(root, "Open First plan").click();
+    await settle();
 
     const values: Record<string, string> = {
       "profile-name": "Pending Cessna", cruiseTasKnots: "95", cruiseFuelFlowGallonsPerHour: "6",

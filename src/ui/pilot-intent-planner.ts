@@ -65,7 +65,7 @@ class PilotIntentPlanner {
       await this.dependencies.repository.initialize();
       [this.plans, this.profiles] = await Promise.all([this.dependencies.repository.listPlans(), this.dependencies.repository.listProfiles()]);
       this.render();
-      if (this.plans.length > 0) this.open(this.plans[0]!);
+      if (this.plans.length > 0) await this.open(this.plans[0]!.id);
       else this.newPlan();
     } catch (error) { this.fail(error); this.render(); }
   }
@@ -77,7 +77,7 @@ class PilotIntentPlanner {
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
     shell.append(heading, this.status);
     const plans = document.createElement("section"); plans.append(this.el("h3", "Saved pilot inputs"));
-    this.plans.forEach((plan) => { const b = document.createElement("button"); b.type = "button"; b.textContent = `Open ${plan.title}`; b.disabled = this.savingProfile; b.addEventListener("click", () => this.open(plan)); plans.append(b); });
+    this.plans.forEach((plan) => { const b = document.createElement("button"); b.type = "button"; b.textContent = `Open ${plan.title}`; b.disabled = this.savingProfile; b.addEventListener("click", () => { void this.open(plan.id); }); plans.append(b); });
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
@@ -298,8 +298,15 @@ class PilotIntentPlanner {
     this.render();
   }
 
-  private open(plan: PilotInputPlan): void {
+  private async open(planId: string): Promise<void> {
     if (this.updating || this.savingProfile) return;
+    await this.saveQueue.catch(() => undefined);
+    if (this.updating || this.savingProfile) return;
+    const plan = this.plans.find((candidate) => candidate.id === planId);
+    if (!plan) {
+      this.fail(new Error("Saved plan no longer exists."));
+      return;
+    }
     this.confirmedOverrides.clear();
     this.current = plan;
     this.fields = { ...initialFields, ...plan.rawFields };
