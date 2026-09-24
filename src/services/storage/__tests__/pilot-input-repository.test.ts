@@ -24,6 +24,46 @@ function plan(): PilotInputPlan {
   };
 }
 
+function largeFields(length: number): Record<string, string> {
+  return Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`field-${index}`, "x".repeat(length)]));
+}
+
+function planWithHistory(submissions: PilotInputPlan["submissions"]): PilotInputPlan {
+  return { ...plan(), selectedProfileId: undefined, profileSnapshot: undefined, submissions };
+}
+
+function historyRecord(rawFields: Readonly<Record<string, string>>): PilotInputPlan["submissions"][number] {
+  return {
+    submittedAt: timestamp,
+    rawFields,
+    inputs: {
+      title: "Raw draft", rawFields, checkpoints: [], cruiseAltitudeTexts: [], overrideReasons: {},
+    },
+  };
+}
+
+function historyNearSizeLimit(): PilotInputPlan {
+  let fields = largeFields(1_000);
+  let submissions = Array.from({ length: 10 }, () => historyRecord(fields));
+  while (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength > 1024 * 1024 - 100) {
+    const length = Object.values(fields)[0]?.length ?? 0;
+    if (length === 0) throw new Error("Could not create a valid near-limit history fixture");
+    fields = largeFields(length - 1);
+    submissions = Array.from({ length: 10 }, () => historyRecord(fields));
+  }
+  while (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength < 1024 * 1024 - 100) {
+    const length = Object.values(fields)[0]?.length ?? 0;
+    fields = largeFields(length + 1);
+    submissions = Array.from({ length: 10 }, () => historyRecord(fields));
+    if (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength > 1024 * 1024 - 100) {
+      fields = largeFields(length);
+      submissions = Array.from({ length: 10 }, () => historyRecord(fields));
+      break;
+    }
+  }
+  return planWithHistory(submissions);
+}
+
 afterEach(async () => {
   await Promise.all(repos.splice(0).map(async (item) => { const db = await (item as unknown as { database(): Promise<IDBDatabase> }).database(); db.close(); }));
   await Promise.all(names.splice(0).map((name) => new Promise<void>((resolve, reject) => {
@@ -64,6 +104,25 @@ describe("input-only pilot repository", () => {
     const invalid = { ...plan(), profileSnapshot: undefined };
     await expect(store.saveWorkingCopy(invalid)).rejects.toThrow("unavailable aircraft profile");
     expect(await store.getPlan("plan-one")).toBeUndefined();
+  });
+
+  it("rejects a submission whose merged history exceeds the document limit without writing it", async () => {
+    const store = repo(); await store.initialize();
+    const oversizedOnAppend = { ...plan(), rawFields: Object.fromEntries(Array.from({ length: 90 }, (_, index) => [`field-${index}`, "x".repeat(10_000)])), selectedProfileId: undefined, profileSnapshot: undefined };
+    await expect(store.submitInputs(oversizedOnAppend)).rejects.toThrow("plan exceeds size limit");
+    expect(await store.getPlan("plan-one")).toBeUndefined();
+    expect(await store.listPlans()).toEqual([]);
+    expect(await store.listProfiles()).toEqual([]);
+  });
+
+  it("rejects a working copy when retained submissions would make the stored document unreadable", async () => {
+    const store = repo(); await store.initialize();
+    const existing = historyNearSizeLimit();
+    await store.saveWorkingCopy(existing);
+    const oversizedMerged = { ...plan(), title: "x".repeat(10_000), selectedProfileId: undefined, profileSnapshot: undefined, submissions: [] };
+    await expect(store.saveWorkingCopy(oversizedMerged)).rejects.toThrow("plan exceeds size limit");
+    expect(await store.getPlan("plan-one")).toEqual(existing);
+    expect(await store.listPlans()).toEqual([existing]);
   });
 
 });

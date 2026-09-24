@@ -12,6 +12,8 @@ class MemoryInputs implements PilotInputRepository {
   readonly submissions: PilotInputPlan[] = [];
   readonly profiles: AircraftProfile[] = [];
   failSave = false;
+  failProfileSave = false;
+  profileSaveGate?: Promise<void>;
   failSubmit = false;
   failInitialize = false;
   async initialize(): Promise<void> { if (this.failInitialize) throw new Error("storage initialization failed"); }
@@ -28,7 +30,11 @@ class MemoryInputs implements PilotInputRepository {
     this.submissions.push(plan);
     this.replace(this.plans, plan);
   }
-  async saveProfile(profile: AircraftProfile): Promise<void> { this.profiles.push(profile); }
+  async saveProfile(profile: AircraftProfile): Promise<void> {
+    if (this.profileSaveGate) await this.profileSaveGate;
+    if (this.failProfileSave) throw new Error("profile write failed");
+    this.profiles.push(profile);
+  }
   async listProfiles(): Promise<readonly AircraftProfile[]> { return this.profiles; }
   private replace(collection: PilotInputPlan[], plan: PilotInputPlan): void {
     const index = collection.findIndex((item) => item.id === plan.id);
@@ -315,6 +321,55 @@ describe("pilot intent planner", () => {
     expect(repository.profiles[0]).toMatchObject({ name: "Test Cessna", cruiseTasKnots: 95, usableFuelGallons: 24, compassDeviationTable: [{ magneticHeadingDegrees: 0, deviationDegrees: 1 }, { magneticHeadingDegrees: 90, deviationDegrees: -1 }] });
     expect(root.querySelector("[role='status']")?.textContent).toContain("Aircraft profile Test Cessna saved.");
     expect(root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")?.value).toBe(repository.profiles[0]?.id);
+  });
+
+  it("keeps plan navigation locked during profile save and unlocks it after failure", async () => {
+    const repository = new MemoryInputs();
+    const first: PilotInputPlan = {
+      id: "first-plan", title: "First plan", rawFields: { "plan-title": "First plan" },
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    };
+    const second: PilotInputPlan = {
+      id: "second-plan", title: "Second plan", rawFields: { "plan-title": "Second plan" },
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    };
+    repository.plans.push(first, second);
+    let releaseSave!: () => void;
+    repository.profileSaveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    const root = await mount(repository);
+    button(root, "Open First plan").click();
+
+    const values: Record<string, string> = {
+      "profile-name": "Pending Cessna", cruiseTasKnots: "95", cruiseFuelFlowGallonsPerHour: "6",
+      climbRateFeetPerMinute: "500", climbTasKnots: "75", climbFuelFlowGallonsPerHour: "7",
+      descentRateFeetPerMinute: "500", descentTasKnots: "100", descentFuelFlowGallonsPerHour: "5",
+      "compass-deviation-card": "000:+1",
+    };
+    Object.entries(values).forEach(([name, value]) => { input(root, name).value = value; });
+    root.querySelector("form:not(.route-form)")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(button(root, "Open Second plan").disabled).toBe(true);
+    expect(input(root, "profile-name").disabled).toBe(true);
+    expect(input(root, "plan-title").disabled).toBe(true);
+    button(root, "Open Second plan").click();
+    button(root, "New plan").click();
+    expect(input(root, "plan-title").value).toBe("First plan");
+    expect(repository.plans.find((plan) => plan.id === second.id)).toEqual(second);
+
+    releaseSave();
+    await settle();
+    expect(repository.plans.find((plan) => plan.id === first.id)?.selectedProfileId).toBe(repository.profiles[0]?.id);
+    expect(repository.plans.find((plan) => plan.id === second.id)).toEqual(second);
+    expect(input(root, "profile-name").disabled).toBe(false);
+    expect(input(root, "plan-title").disabled).toBe(false);
+
+    repository.profileSaveGate = undefined;
+    repository.failProfileSave = true;
+    Object.entries(values).forEach(([name, value]) => { input(root, name).value = value; });
+    root.querySelector("form:not(.route-form)")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("profile write failed");
+    expect(button(root, "Open Second plan").disabled).toBe(false);
+    expect(input(root, "profile-name").disabled).toBe(false);
   });
 
   it("blocks a nonpositive TAS override before submitting pilot inputs", async () => {

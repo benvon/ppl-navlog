@@ -93,10 +93,11 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
     const existingValue = await req<unknown>(tx.objectStore(PLAN_STORE).get(valid.id));
     const existing = existingValue === undefined ? undefined : validatePlan(existingValue);
-    await ensureProfileReference(tx, valid);
     // A working-copy write is not a submission and must not let a stale editor
     // snapshot roll back the submitted-input history.
-    tx.objectStore(PLAN_STORE).put({ ...valid, submissions: existing?.submissions ?? valid.submissions });
+    const stored = validatePlan({ ...valid, submissions: existing?.submissions ?? valid.submissions });
+    await ensureProfileReference(tx, stored);
+    tx.objectStore(PLAN_STORE).put(stored);
     await done(tx);
   }
 
@@ -116,8 +117,9 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
       ...valid, updatedAt: timestamp,
       submissions: [...(prior?.submissions ?? valid.submissions), { submittedAt: timestamp, rawFields: { ...valid.rawFields }, inputs }].slice(-MAX_SUBMISSIONS_PER_PLAN),
     };
-    await ensureProfileReference(tx, submitted);
-    tx.objectStore(PLAN_STORE).put(submitted);
+    const stored = validatePlan(submitted);
+    await ensureProfileReference(tx, stored);
+    tx.objectStore(PLAN_STORE).put(stored);
     await done(tx);
   }
 

@@ -49,6 +49,7 @@ class PilotIntentPlanner {
   private profileDraftDirty = false;
   private readonly confirmedOverrides = new Set<number>();
   private updating = false;
+  private savingProfile = false;
   private forecastChoices: readonly { validAt: string; useFrom: string; useUntil: string }[] = [];
   private saveQueue: Promise<void> = Promise.resolve();
   private readonly status = document.createElement("p");
@@ -76,8 +77,8 @@ class PilotIntentPlanner {
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
     shell.append(heading, this.status);
     const plans = document.createElement("section"); plans.append(this.el("h3", "Saved pilot inputs"));
-    this.plans.forEach((plan) => { const b = document.createElement("button"); b.type = "button"; b.textContent = `Open ${plan.title}`; b.addEventListener("click", () => this.open(plan)); plans.append(b); });
-    const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
+    this.plans.forEach((plan) => { const b = document.createElement("button"); b.type = "button"; b.textContent = `Open ${plan.title}`; b.disabled = this.savingProfile; b.addEventListener("click", () => this.open(plan)); plans.append(b); });
+    const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
       const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "surface-weather-icao": "Selected METAR ICAO (optional)", "selected-forecast-period": "Selected forecast valid time (UTC)" };
@@ -126,7 +127,7 @@ class PilotIntentPlanner {
     if (this.profiles.length === 0) shell.append(this.el("h3", "Create an aircraft profile to enable Update plan."));
     this.content.append(shell);
     this.refreshUpdateGate();
-    if (this.updating) shell.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button").forEach((control) => { control.disabled = true; });
+    if (this.updating || this.savingProfile) shell.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button").forEach((control) => { control.disabled = true; });
     if (this.root.firstChild === null) this.root.append(this.content); else if (!this.root.contains(this.content)) this.root.replaceChildren(this.content);
   }
 
@@ -204,7 +205,7 @@ class PilotIntentPlanner {
       input.addEventListener("input", () => { this.fields[`profile-${input.name}`] = input.value; this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.fields[`profile-${input.name}`] = input.value; void this.persist(); });
     });
-    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; form.append(save); section.append(form); return section;
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; save.disabled = this.savingProfile; form.append(save); section.append(form); return section;
   }
   private async saveProfile(form: HTMLFormElement): Promise<void> {
     try {
@@ -246,14 +247,18 @@ class PilotIntentPlanner {
         compassDeviationTable,
       };
       const saved = createAircraftProfile(input, this.dependencies.ids, this.dependencies.clock);
+      this.savingProfile = true;
+      this.render();
       await this.dependencies.repository.saveProfile(saved);
       this.profiles = [...this.profiles, saved];
       if (this.current) this.current = { ...this.current, selectedProfileId: saved.id, profileSnapshot: saved };
       this.profileDraftDirty = false;
       await this.persist();
       this.setStatus(`Aircraft profile ${saved.name} saved.`);
+      this.savingProfile = false;
       this.render();
     } catch (error) {
+      this.savingProfile = false;
       this.fail(error);
       this.render();
     }
@@ -278,7 +283,7 @@ class PilotIntentPlanner {
   private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: this.fields["plan-title"] ?? "New study route", rawFields: { ...this.fields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...this.fields }, title: this.fields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
   private newPlan(): void {
-    if (this.updating) return;
+    if (this.updating || this.savingProfile) return;
     this.confirmedOverrides.clear();
     this.fields = { ...initialFields };
     this.current = this.blankPlan();
@@ -292,7 +297,7 @@ class PilotIntentPlanner {
   }
 
   private open(plan: PilotInputPlan): void {
-    if (this.updating) return;
+    if (this.updating || this.savingProfile) return;
     this.confirmedOverrides.clear();
     this.current = plan;
     this.fields = { ...initialFields, ...plan.rawFields };
