@@ -140,10 +140,11 @@ describe('Worker API functional contracts', () => {
     await expect(response.json()).resolves.toMatchObject({
       stations: [{ id: 'ABQ', coordinates: { latitudeDeg: 35.0402, longitudeDeg: -106.609 }, elevationFt: 5355, region: 'us', availableForecastCycles: ['06', '12', '24'], source: 'aviationweather' }],
       forecasts: [
-        { forecastCycle: '06', validAt: '2026-09-22T00:00:00.000Z' },
-        { forecastCycle: '12', validAt: '2026-09-22T06:00:00.000Z' },
-        { forecastCycle: '24', validAt: '2026-09-22T18:00:00.000Z' }
+        { stationId: 'ABQ', forecastCycle: '06', validAt: '2026-09-22T00:00:00.000Z' },
+        { stationId: 'ABQ', forecastCycle: '12', validAt: '2026-09-22T06:00:00.000Z' },
+        { stationId: 'ABQ', forecastCycle: '24', validAt: '2026-09-22T18:00:00.000Z' }
       ],
+      unavailableForecastCycles: [],
       requestedRoute: [{ latitudeDeg: 42.6, longitudeDeg: -89 }],
       provenance: [
         { adapter: 'aviationweather', product: 'NCEP FB Winds/Temps (legacy FD)', region: 'us', endpoint: 'https://aviationweather.gov/api/data/windtemp', fetchedAt: FIXED_NOW, cache: { status: 'upstream_refresh', source: 'upstream' } },

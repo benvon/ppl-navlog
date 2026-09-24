@@ -97,17 +97,40 @@ const isWindsStation = (value: unknown): value is WindsStation =>
     isString(value.id, 3), typeof value.id === "string" && /^[A-Z0-9]{3}$/.test(value.id),
     nullable(value.name, (candidate) => isString(candidate, 200)), isCoordinate(value.coordinates),
     nullable(value.elevationFt, isFiniteNumber), isRegion(value.region), Array.isArray(value.availableForecastCycles),
-    Array.isArray(value.availableForecastCycles) && value.availableForecastCycles.length > 0 && value.availableForecastCycles.every(isForecastCycle),
+    Array.isArray(value.availableForecastCycles) && value.availableForecastCycles.length > 0 && value.availableForecastCycles.every(isForecastCycle) && new Set(value.availableForecastCycles).size === value.availableForecastCycles.length,
     value.source === "aviationweather",
   );
 
 const isForecastAvailability = (value: unknown): value is WindsForecastAvailability =>
   isRecord(value) &&
+  isString(value.stationId, 3) && /^[A-Z0-9]{3}$/.test(value.stationId) &&
   isForecastCycle(value.forecastCycle) &&
   isUtcMilliseconds(value.issuedAt) &&
   isUtcMilliseconds(value.validAt) &&
   isUtcMilliseconds(value.useFrom) &&
   isUtcMilliseconds(value.useUntil);
+
+const isStationForecastMapping = (forecasts: unknown, stations: unknown): boolean => {
+  if (!Array.isArray(forecasts) || !Array.isArray(stations)) return false;
+  const keys = new Set<string>();
+  const cyclesByStation = new Map<string, Set<string>>();
+  const validForecasts = forecasts.every((forecast: unknown) => {
+    if (!isRecord(forecast) || typeof forecast.stationId !== "string" || typeof forecast.validAt !== "string" ||
+      !stations.some((station: unknown) => isRecord(station) && station.id === forecast.stationId)) return false;
+    const key = `${forecast.stationId}:${forecast.validAt}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+    const cycles = cyclesByStation.get(forecast.stationId) ?? new Set<string>();
+    cycles.add(String(forecast.forecastCycle));
+    cyclesByStation.set(forecast.stationId, cycles);
+    return true;
+  });
+  return validForecasts && stations.every((station: unknown) => {
+    if (!isRecord(station) || typeof station.id !== "string" || !Array.isArray(station.availableForecastCycles)) return false;
+    const forecastCycles = cyclesByStation.get(station.id) ?? new Set<string>();
+    return forecastCycles.size === station.availableForecastCycles.length && station.availableForecastCycles.every((cycle: unknown) => forecastCycles.has(String(cycle)));
+  });
+};
 
 const isLevel = (value: unknown): value is WindsAloftLevel =>
   isRecord(value) && all(
@@ -165,7 +188,9 @@ const isRequestId = (value: unknown): value is string => isString(value, 128) &&
 const isStationsPayload = (value: unknown): value is WindsStationsSuccessPayload =>
   isRecord(value) && all(
     isBoundedArray(value.stations, 500, isWindsStation),
-    isBoundedArray(value.forecasts, 10, isForecastAvailability),
+    isBoundedArray(value.forecasts, 1500, isForecastAvailability),
+    Array.isArray(value.unavailableForecastCycles) && value.unavailableForecastCycles.length <= 3 && value.unavailableForecastCycles.every(isForecastCycle) && new Set(value.unavailableForecastCycles).size === value.unavailableForecastCycles.length,
+    isStationForecastMapping(value.forecasts, value.stations),
     isBoundedArray(value.requestedRoute, 100, isCoordinate),
     isBoundedArray(value.provenance, 10, isSourceProvenance),
     isRequestId(value.requestId),

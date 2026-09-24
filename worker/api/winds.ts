@@ -26,7 +26,7 @@ export interface ServiceFetcher { fetch(request: Request): Promise<Response>; }
 export interface CacheStore { match(request: Request): Promise<Response | undefined>; put(request: Request, response: Response): Promise<void>; }
 
 export interface WindsDataAdapter {
-  getWindsStations(route: readonly WindsRoutePoint[]): Promise<{ stations: WindsStation[]; forecasts: WindsForecastAvailability[]; provenance: CacheProvenance[] }>;
+  getWindsStations(route: readonly WindsRoutePoint[]): Promise<{ stations: WindsStation[]; forecasts: WindsForecastAvailability[]; unavailableForecastCycles: WindsForecastCycle[]; provenance: CacheProvenance[] }>;
   getWindsForecast(station: string, validTime: string, region: WindsRegion): Promise<{ forecast: WindsForecast; provenance: CacheProvenance }>;
 }
 
@@ -147,6 +147,16 @@ async function boundedText(fetcher: ServiceFetcher, request: Request): Promise<s
     if (error instanceof ApiError) throw error;
     throw new ApiError('Aviation Weather Center is unavailable.', 503, 'upstream_unavailable');
   } finally { clearTimeout(timeout); }
+}
+
+function requireUniqueForecastMatch(
+  matches: readonly { readonly forecast: DecodedForecast; readonly product: CachedProduct; readonly provenance: CacheProvenance }[],
+  unavailableCycles: readonly WindsForecastCycle[],
+): void {
+  if (matches.length === 1) return;
+  if (matches.length > 1) throw new ApiError('The requested Winds/Temps station and valid time match multiple forecast cycles.', 502, 'upstream_invalid_response');
+  if (unavailableCycles.length > 0) throw new ApiError('The requested forecast is inconclusive because one or more supported cycles are unavailable.', 503, 'upstream_unavailable');
+  throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
 }
 
 function resolveDayTime(day: number, hour: number, minute: number, reference: Date): Date {
@@ -318,13 +328,13 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
     const current = now();
     let cached: CachedStationCatalog | undefined;
     if (cache) {
-      const response = await cache.match(request);
-      if (response) {
-        try {
+      try {
+        const response = await cache.match(request);
+        if (response) {
           const payload = await response.json() as unknown;
           if (isCachedStationCatalog(payload)) cached = payload;
-        } catch { /* Invalid edge cache values are replaced below. */ }
-      }
+        }
+      } catch { /* Cache read faults are misses; continue to bounded upstream retrieval. */ }
     }
     if (cached && Date.parse(cached.freshUntil) > current.getTime()) return cached;
     try {
@@ -355,13 +365,13 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
     const current = now();
     let cached: CachedProduct | undefined;
     if (cache) {
-      const response = await cache.match(request);
-      if (response) {
-        try {
+      try {
+        const response = await cache.match(request);
+        if (response) {
           const payload = await response.json() as unknown;
           if (isCachedProduct(payload)) cached = payload;
-        } catch { /* Invalid edge cache values are discarded by replacement below. */ }
-      }
+        }
+      } catch { /* Cache read faults are misses; continue to bounded upstream retrieval. */ }
     }
     if (cached && Date.parse(cached.freshUntil) > current.getTime()) return { product: cached, provenance: cacheProvenance('edge_hit', 'edge', request.url, cached.fetchedAt, cached.freshUntil, cached.staleUntil, current) };
     try {
@@ -381,24 +391,31 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
     }
   }
 
-  async function allProducts(region: WindsRegion): Promise<Array<{ product: CachedProduct; provenance: CacheProvenance }>> {
-    return Promise.all(FORECAST_CYCLES.map((cycle) => product(region, cycle)));
+  async function allProducts(region: WindsRegion): Promise<{ products: Array<{ product: CachedProduct; provenance: CacheProvenance }>; unavailableCycles: WindsForecastCycle[] }> {
+    const results = await Promise.allSettled(FORECAST_CYCLES.map((cycle) => product(region, cycle)));
+    const products: Array<{ product: CachedProduct; provenance: CacheProvenance }> = [];
+    const unavailableCycles: WindsForecastCycle[] = [];
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') products.push(result.value);
+      else unavailableCycles.push(FORECAST_CYCLES[index]!);
+    });
+    return { products, unavailableCycles };
   }
 
   return {
     async getWindsStations(route) {
       const region = regionForRoute(route);
-      const products = await allProducts(region);
+      const { products, unavailableCycles } = await allProducts(region);
+      if (products.length === 0) throw new ApiError('Aviation Weather Center forecast availability is inconclusive because all supported cycles failed.', 503, 'upstream_unavailable');
       const stationCycles = new Map<string, Set<WindsForecastCycle>>();
-      const availability = new Map<string, Map<string, WindsForecastAvailability>>();
+      const availability = new Map<string, WindsForecastAvailability>();
       for (const { product: item } of products) for (const forecast of item.forecasts) {
         const cycles = stationCycles.get(forecast.stationId) ?? new Set<WindsForecastCycle>();
         cycles.add(forecast.forecastCycle);
         stationCycles.set(forecast.stationId, cycles);
-        const key = `${forecast.forecastCycle}:${forecast.validAt}`;
-        const stationForecasts = availability.get(key) ?? new Map<string, WindsForecastAvailability>();
-        stationForecasts.set(forecast.stationId, forecast);
-        availability.set(key, stationForecasts);
+        const key = `${forecast.stationId}:${forecast.validAt}`;
+        if (availability.has(key)) throw new ApiError('Aviation Weather Center returned ambiguous station and valid-time forecasts.', 502, 'upstream_invalid_response');
+        availability.set(key, forecast);
       }
       const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort());
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
@@ -406,25 +423,23 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
       }).sort((left, right) => left.id.localeCompare(right.id));
       if (stations.length === 0) throw new ApiError('No Winds/Temps reporting stations with verified coordinates are available for this forecast region.', 404, 'upstream_no_data');
-      // Discovery does not yet ask the Worker to select the route midpoint's
-      // nearest station. Publish only periods shared by every selectable
-      // station, so the browser can never offer a period that its later
-      // deterministic nearest-station selection cannot retrieve.
-      const stationIds = new Set(stations.map((station) => station.id));
+      const selectableIds = new Set(stations.map((station) => station.id));
       const forecasts = [...availability.values()]
-        .filter((stationForecasts) => [...stationIds].every((stationId) => stationForecasts.has(stationId)))
-        .map((stationForecasts) => stationForecasts.values().next().value)
-        .filter((forecast): forecast is WindsForecastAvailability => forecast !== undefined)
-        .sort((left, right) => left.validAt.localeCompare(right.validAt) || left.forecastCycle.localeCompare(right.forecastCycle));
-      return { stations, forecasts, provenance: products.map(({ provenance }) => provenance) };
+        .filter((forecast) => selectableIds.has(forecast.stationId))
+        .sort((left, right) => left.validAt.localeCompare(right.validAt) || left.forecastCycle.localeCompare(right.forecastCycle) || left.stationId.localeCompare(right.stationId));
+      if (forecasts.length === 0) throw unavailableCycles.length > 0
+        ? new ApiError('No verified winds station has a usable published period, and one or more cycles could not be checked.', 503, 'upstream_unavailable')
+        : new ApiError('No verified winds station has a usable published forecast period.', 404, 'upstream_no_data');
+      return { stations, forecasts, unavailableForecastCycles: unavailableCycles, provenance: products.map(({ provenance }) => provenance) };
     },
     async getWindsForecast(station, validTime, region) {
       if (!/^[A-Z0-9]{3}$/.test(station)) throw new ApiError('Invalid Winds/Temps station identifier. Expected exactly three alphanumeric characters.', 400, 'invalid_request');
       const requestedMs = Date.parse(validTime);
       if (!Number.isFinite(requestedMs) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(validTime)) throw new ApiError('Invalid winds validTime. Expected a canonical UTC ISO timestamp.', 400, 'invalid_request');
       const matches: Array<{ forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance }> = [];
-      for (const item of await allProducts(region)) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
-      if (matches.length !== 1) throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
+      const { products, unavailableCycles } = await allProducts(region);
+      for (const item of products) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
+      requireUniqueForecastMatch(matches, unavailableCycles);
       const match = matches[0] as { forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance };
       const info = stationInfo(await stationCatalog(), [station]);
       const stationInfoValue = info.get(station);

@@ -136,8 +136,8 @@ const toAvailableStation = (source: { readonly id: string; readonly coordinates:
     : propagateFailure(location);
 };
 
-const forecastPeriods = (payload: WindsStationsSuccessPayload): readonly AvailableForecastValidPeriod[] =>
-  payload.forecasts.map((forecast) => ({
+const forecastPeriods = (payload: WindsStationsSuccessPayload, stationId: string): readonly AvailableForecastValidPeriod[] =>
+  payload.forecasts.filter((forecast) => forecast.stationId === stationId).map((forecast) => ({
     // Worker forecast lookup is keyed by the canonical validAt instant.
     id: forecast.validAt,
     validFromUtc: forecast.useFrom,
@@ -186,9 +186,10 @@ const validateForecastIdentity = (
 
 const requireUniqueDiscoveryAvailability = (
   discovery: WindsStationsSuccessPayload,
+  stationId: string,
   selectedValidTimeUtc: string,
 ): WindsForecastAvailability => {
-  const matches = discovery.forecasts.filter((forecast) => forecast.validAt === selectedValidTimeUtc);
+  const matches = discovery.forecasts.filter((forecast) => forecast.stationId === stationId && forecast.validAt === selectedValidTimeUtc);
   if (matches.length !== 1) {
     throw new WindsAdapterError("SELECTION", "Selected forecast valid time is unavailable or ambiguous in station discovery.");
   }
@@ -389,12 +390,12 @@ export class WorkerWindsAdapter {
     const stationSelection = selectNearestWindsStation(input.stationSelectionCoordinate, stations);
     const selectedStation = requireDomainValue(stationSelection);
     const forecastSelection = selectForecastValidTime(
-      forecastPeriods(discovery),
+      forecastPeriods(discovery, selectedStation.station.id),
       input.selectedForecastValidTimeUtc,
       input.departureTimeUtc,
     );
     const selectedForecast = requireDomainValue(forecastSelection);
-    const discoveryAvailability = requireUniqueDiscoveryAvailability(discovery, selectedForecast.period.id);
+    const discoveryAvailability = requireUniqueDiscoveryAvailability(discovery, selectedStation.station.id, selectedForecast.period.id);
     const selectedTransportStation = discovery.stations.find((station) => station.id === selectedStation.station.id);
     if (selectedTransportStation === undefined) {
       throw new WindsAdapterError("INVALID_FORECAST", "Selected station was not present in the discovery response.");

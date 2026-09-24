@@ -96,7 +96,8 @@ describe('Aviation Weather Center adapter', () => {
     const adapter = createAviationWeatherAdapter(requestLog.fetcher, memoryCache(), () => FIXED_NOW);
     const result = await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
     expect(result.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ABQ', region: 'us', coordinates: { latitudeDeg: 35.0402, longitudeDeg: -106.609 }, availableForecastCycles: ['06', '12', '24'] })]));
-    expect(result.forecasts).toHaveLength(3);
+    expect(result.forecasts).toHaveLength(9);
+    expect(result.unavailableForecastCycles).toEqual([]);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
     const stationRequest = requestLog.requests.find((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz');
     expect(stationRequest).toBeDefined();
@@ -136,12 +137,12 @@ describe('Aviation Weather Center adapter', () => {
     expect(requests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(2);
   });
 
-  it('publishes only forecast periods that every selectable station reports', async () => {
+  it('publishes availability independently for each verified station', async () => {
     const stationSpecificFetcher: ServiceFetcher = {
       async fetch(request) {
         const url = new URL(request.url);
         if (url.pathname === '/api/data/windtemp' && url.searchParams.get('fcst') === '12') {
-          return new Response(PRODUCT.replace(/^ATL.*$/m, ''), { headers: { 'Content-Type': 'text/plain' } });
+          return new Response(PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z').replace(/^ATL.*$/m, ''), { headers: { 'Content-Type': 'text/plain' } });
         }
         return responseFor(request);
       },
@@ -149,7 +150,10 @@ describe('Aviation Weather Center adapter', () => {
     const adapter = createAviationWeatherAdapter(stationSpecificFetcher, memoryCache(), () => FIXED_NOW);
     const result = await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
 
-    expect(result.forecasts.map((forecast) => forecast.forecastCycle)).toEqual(['06', '24']);
+    expect(result.forecasts.some((forecast) => forecast.stationId === 'ABQ' && forecast.forecastCycle === '12')).toBe(true);
+    expect(result.forecasts.some((forecast) => forecast.stationId === 'ATL' && forecast.forecastCycle === '12')).toBe(false);
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T06:00:00.000Z', 'us')).resolves.toMatchObject({ forecast: { station: { id: 'ABQ' } } });
+    await expect(adapter.getWindsForecast('ATL', '2026-09-22T06:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_no_data' });
   });
 
   it('requires a published valid time and uses the selected region rather than silently substituting a forecast', async () => {
@@ -157,6 +161,66 @@ describe('Aviation Weather Center adapter', () => {
     const result = await adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');
     expect(result.forecast.station.id).toBe('ABQ');
     await expect(adapter.getWindsForecast('ABQ', '2026-09-22T01:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_no_data' });
+  });
+
+  it('keeps successful cycles usable and marks failed-cycle discovery incomplete', async () => {
+    const partialFetcher: ServiceFetcher = { async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/api/data/windtemp' && url.searchParams.get('fcst') === '12') return new Response(null, { status: 204 });
+      return responseFor(request);
+    } };
+    const adapter = createAviationWeatherAdapter(partialFetcher, memoryCache(), () => FIXED_NOW);
+
+    const discovery = await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
+    expect(discovery.unavailableForecastCycles).toEqual(['12']);
+    expect(discovery.forecasts.some((forecast) => forecast.stationId === 'ABQ' && forecast.forecastCycle === '06')).toBe(true);
+    expect(discovery.provenance.map((entry) => entry.key)).toHaveLength(2);
+    expect(discovery.provenance.map((entry) => entry.key)).toEqual(expect.arrayContaining([expect.stringContaining('/06'), expect.stringContaining('/24')]));
+    expect(discovery.provenance.some((entry) => entry.key.endsWith('/12'))).toBe(false);
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us')).resolves.toMatchObject({ provenance: { status: 'edge_hit', key: expect.stringContaining('/06') } });
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T06:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_unavailable' });
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T03:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
+
+  it('returns no-data only when all forecast cycles were checked successfully', async () => {
+    const adapter = createAviationWeatherAdapter(fetcher().fetcher, memoryCache(), () => FIXED_NOW);
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T03:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_no_data' });
+  });
+
+  it('rejects duplicate station and valid-time products as ambiguous', async () => {
+    const duplicateTimeFetcher: ServiceFetcher = { async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/api/data/windtemp' && url.searchParams.get('fcst') === '12') return new Response(PRODUCT, { headers: { 'Content-Type': 'text/plain' } });
+      return responseFor(request);
+    } };
+    const adapter = createAviationWeatherAdapter(duplicateTimeFetcher, memoryCache(), () => FIXED_NOW);
+    await expect(adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }])).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+    await expect(adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+  });
+
+  it('treats cache match failures as misses for wind products and station catalog resources', async () => {
+    const rejectingCache: CacheStore = { async match() { throw new Error('cache read unavailable'); }, async put() {} };
+    const adapter = createAviationWeatherAdapter(fetcher().fetcher, rejectingCache, () => FIXED_NOW);
+    const result = await adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');
+    expect(result.forecast.station.id).toBe('ABQ');
+    expect(result.provenance.status).toBe('upstream_refresh');
+
+    const discovery = await createAviationWeatherAdapter(fetcher().fetcher, rejectingCache, () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
+    expect(discovery.stations).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ABQ' })]));
+    expect(discovery.provenance.every((entry) => entry.status === 'upstream_refresh')).toBe(true);
+
+    const invalidJsonCache: CacheStore = { async match(_request) { return new Response('not-json', { headers: { 'Content-Type': 'application/json' } }); }, async put() {} };
+    const invalidJsonResult = await createAviationWeatherAdapter(fetcher().fetcher, invalidJsonCache, () => FIXED_NOW).getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');
+    expect(invalidJsonResult.provenance.status).toBe('upstream_refresh');
+
+    let upstreamUnavailable = false;
+    const failingFetcher: ServiceFetcher = { async fetch(request) {
+      if (upstreamUnavailable) throw new Error('upstream unavailable');
+      return responseFor(request);
+    } };
+    const failingAdapter = createAviationWeatherAdapter(failingFetcher, rejectingCache, () => FIXED_NOW);
+    upstreamUnavailable = true;
+    await expect(failingAdapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_unavailable' });
   });
 
   it('serves an explicitly labeled stale product only when upstream refresh fails inside the bounded stale window', async () => {

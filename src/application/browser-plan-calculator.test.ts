@@ -9,10 +9,10 @@ const timestamp = "2026-09-21T21:30:00.000Z";
 const cache = { status: "upstream_refresh" as const, source: "upstream" as const, ageSeconds: 0, fetchedAt: timestamp, expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: timestamp, ttlSeconds: 1200, maxPayloadAgeSeconds: 7200, key: "weather", resource: "weather" };
 const station = { id: "BRL", name: "Burlington", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us" as const, availableForecastCycles: ["06" as const], source: "aviationweather" as const };
 const provenance = { adapter: "aviationweather" as const, product: "NCEP FB Winds/Temps (legacy FD)" as const, region: "us" as const, endpoint: "https://aviationweather.gov/api/data/windtemp" as const, fetchedAt: timestamp, cache };
-const period = { forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
+const period = { stationId: "BRL", forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
 
 const client: WindsTransportClient & MetarTransportClient = {
-  discoverStations: async (): Promise<WindsStationsSuccessPayload> => ({ stations: [station], forecasts: [period], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111" }),
+  discoverStations: async (): Promise<WindsStationsSuccessPayload> => ({ stations: [station], forecasts: [period], unavailableForecastCycles: [], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111" }),
   fetchForecast: async (): Promise<WindsForecastSuccessPayload> => ({ forecast: {
     station, ...period, levels: [
       { altitudeFt: 3000, windFromDegTrue: 270, windSpeedKt: 15, temperatureC: 2, availability: "available", raw: "2715+02" },

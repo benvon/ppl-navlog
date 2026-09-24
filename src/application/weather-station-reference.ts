@@ -10,10 +10,23 @@ import { nauticalMiles } from "../domain/units";
  */
 export const routeDistanceMidpoint = (route: RouteDefinition): Coordinate => {
   const points = new Map(route.points.map((point) => [point.id, point.coordinate]));
-  const segments = route.legs.map((leg) => {
+  const coordinates = route.legs.map((leg) => {
     const start = points.get(leg.fromPointId);
     const end = points.get(leg.toPointId);
     if (start === undefined || end === undefined) throw new Error("A route leg references a missing point.");
+    return [start, end] as const;
+  });
+  const ordered = coordinates.map(([start]) => start);
+  const last = coordinates.at(-1)?.[1];
+  if (last === undefined) throw new Error("A route with positive distance is required for winds-station selection.");
+  ordered.push(last);
+  return routeCoordinatesDistanceMidpoint(ordered);
+};
+
+export const routeCoordinatesDistanceMidpoint = (points: readonly Coordinate[]): Coordinate => {
+  const segments = points.slice(0, -1).map((start, index) => {
+    const end = points[index + 1];
+    if (end === undefined) throw new Error("A route leg references a missing point.");
     const geometry = calculateGreatCircleDistanceAndInitialCourse(start, end);
     if (!geometry.ok) throw new Error(geometry.error.message);
     return { start, geometry: geometry.value };

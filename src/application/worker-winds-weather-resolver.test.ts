@@ -21,7 +21,8 @@ const provenance = { adapter: "aviationweather" as const, product: "NCEP FB Wind
 const station: WindsStation = { id: "BRL", name: "Burlington", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us", availableForecastCycles: ["06"], source: "aviationweather" };
 const discovery = (): WindsStationsSuccessPayload => ({
   stations: [station],
-  forecasts: [{ forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }],
+  forecasts: [{ stationId: "BRL", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }],
+  unavailableForecastCycles: [],
   requestedRoute: [{ latitudeDeg: 40.8, longitudeDeg: -91.1 }], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111",
 });
 const forecast = (): WindsForecastSuccessPayload => ({

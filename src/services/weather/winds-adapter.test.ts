@@ -46,9 +46,13 @@ const discoveryPayload = (): WindsStationsSuccessPayload => ({
     },
   ],
   forecasts: [{
-    forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z",
+    stationId: "BRL", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z",
+    useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z",
+  }, {
+    stationId: "DBQ", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z",
     useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z",
   }],
+  unavailableForecastCycles: [],
   requestedRoute: [{ latitudeDeg: 40.8, longitudeDeg: -91.1 }],
   provenance: [sourceProvenance],
   requestId: "11111111-1111-4111-8111-111111111111",
@@ -119,6 +123,18 @@ describe("WorkerWindsClient trust boundary", () => {
     await expect(client.discoverStations([value(coordinate(40.8, -91.1))])).rejects.toMatchObject({
       code: "INVALID_RESPONSE",
     });
+  });
+
+  it("rejects station-period records with unknown station IDs or duplicate station-time identities", async () => {
+    const wrongStation = discoveryPayload();
+    wrongStation.forecasts[0] = { ...wrongStation.forecasts[0]!, stationId: "XYZ" };
+    const wrongStationClient = new WorkerWindsClient({ fetch: async () => Response.json(wrongStation) }, "https://navlog.example");
+    await expect(wrongStationClient.discoverStations([value(coordinate(40.8, -91.1))])).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const duplicate = discoveryPayload();
+    duplicate.forecasts.push({ ...duplicate.forecasts[0]! });
+    const duplicateClient = new WorkerWindsClient({ fetch: async () => Response.json(duplicate) }, "https://navlog.example");
+    await expect(duplicateClient.discoverStations([value(coordinate(40.8, -91.1))])).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("normalizes local forecast input and validates the forecast response contract", async () => {
@@ -318,6 +334,16 @@ describe("WorkerWindsAdapter", () => {
     await expect(new WorkerWindsAdapter(new FakeWindsClient(discoveryPayload(), changed)).load(input)).rejects.toMatchObject({
       code: "INVALID_FORECAST",
     });
+  });
+
+  it("uses only periods belonging to the deterministic nearest station", async () => {
+    const discovery = discoveryPayload();
+    const distantOnly = { ...discovery.forecasts[0]!, stationId: "DBQ", validAt: "2026-09-22T06:00:00.000Z", forecastCycle: "12" as const, useFrom: "2026-09-22T02:00:00.000Z", useUntil: "2026-09-22T09:00:00.000Z" };
+    discovery.forecasts = [...discovery.forecasts, distantOnly];
+    const client = new FakeWindsClient(discovery);
+    const loaded = await new WorkerWindsAdapter(client).load(input);
+    expect(loaded.stationSelection.station.id).toBe("BRL");
+    await expect(new WorkerWindsAdapter(client).load({ ...input, selectedForecastValidTimeUtc: distantOnly.validAt })).rejects.toMatchObject({ code: "SELECTION" });
   });
 
   it("does not turn transport, unusable levels, or malformed calm data into a calculated wind", async () => {
