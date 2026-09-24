@@ -18,7 +18,8 @@
 - The navlog shows values and current-weather validity; the inspector shows sources and interpolation math; a future PDF contains values only.
 - Weather payloads, point answers, and calculated results are session-only. Existing `surfaceWeatherIcao` maps only to departure; destination starts unset.
 - A failed Update plan retains submitted inputs, retains its error until success, and clears any earlier current result.
-- Retain fixed upstream hosts, bounded requests/responses, timeouts, rate limiting, validation, and nonsensitive errors. Do not add production-data fixtures or credentials.
+- Retain fixed upstream hosts, bounded requests/responses, timeouts, rate limiting, validation, and nonsensitive errors. Use synthetic large-product fixtures; do not add private source payloads or credentials.
+- A valid regional winds/temps product larger than the current 512 KiB decoded cap must load. Measure supported-region/cycle product sizes before choosing a finite replacement byte, parse-work, and cache-size budget.
 - Every implementation task is performed by a Luna/Medium subagent in an isolated worktree. The architect inspects its diff, runs fresh focused verification, and sends findings to the same agent for correction before accepting it. Agents do not merge or open PRs.
 
 ## Review Focus
@@ -26,6 +27,7 @@
 - A future-issued or amended forecast must not be used before issuance; Task 2 and Task 3 tests pin issue-time behavior.
 - Two station-catalog entries sharing an ID with different coordinates must fail; Task 1 tests pin ambiguous identity behavior.
 - A point just outside a use window or published altitude envelope must fail instead of borrowing a nearby period or level; Task 2 tests pin boundary behavior.
+- A valid regional product just above 512 KiB must parse and cache within the measured budget; Task 2 tests pin the large-source behavior.
 - An arrival time that moves into another TAF group during iteration must recompute the chosen wind; Task 5 tests pin timing stability.
 - An edit or failed update must make earlier inspector and navlog evidence unavailable even if the old result object remains in memory; Task 6 tests pin visible-state behavior.
 
@@ -73,8 +75,8 @@ expectTypeOf<WindsDataAdapter['getWindsPoint']>().toBeFunction();
 
 **Interfaces:** Consumes Task 1's exact catalog and point types. Produces `GET /api/weather/winds/point?lat=<decimal>&lon=<decimal>&altitudeFeetMsl=<integer>&plannedUtc=<encoded ISO>` and `WindsDataAdapter.getWindsPoint`.
 
-- [ ] **Step 1: Build fixed-source coverage fixtures.** Record source issue/use windows, station coordinates, nearest distances, and two same-altitude route points that should differ. Derive and document an initial maximum station distance and sampling guidance from these fixtures; reject routes outside demonstrated coverage. Include cache entries with fresh fetch time but expired published use window, a newer applicable product, a failed cycle, a gap, and a future-issued product.
-- [ ] **Step 2: Write red request and resolver tests.** Reject duplicate/unknown query keys, malformed UTC, out-of-region coordinates, unsupported altitude, oversized query, stale product, insufficient coverage, and mixed-period station inputs. Assert vector interpolation on a 350°/10° pair avoids a false 180° result and that temperature/vertical interpolation stays within published levels.
+- [ ] **Step 1: Measure and fixture the actual regional source.** From a development Worker environment with official-source network access, record the decoded byte count and fetch duration for all supported regions and cycles, without logging source bodies. Build a synthetic valid regional-product fixture above 512 KiB. If the official source is unavailable, mark measurement inconclusive and do not select a new production cap until it can be measured. Record source issue/use windows, station coordinates, nearest distances, and two same-altitude route points that should differ. Derive and document an initial maximum station distance and sampling guidance from these fixtures; reject routes outside demonstrated coverage. Include cache entries with fresh fetch time but expired published use window, a newer applicable product, a failed cycle, a gap, and a future-issued product.
+- [ ] **Step 2: Write red request and resolver tests.** Reject duplicate/unknown query keys, malformed UTC, out-of-region coordinates, unsupported altitude, oversized query, stale product, insufficient coverage, and mixed-period station inputs. Assert a valid product above 512 KiB parses and caches, while a product above the newly measured finite budget is rejected before unbounded buffering or parsing. Distinguish byte-limit and unreadable-stream diagnostics internally. Assert vector interpolation on a 350°/10° pair avoids a false 180° result and that temperature/vertical interpolation stays within published levels.
 
 ```ts
 const answer = await adapter.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 4500, plannedUtc: '2026-09-22T01:00:00.000Z' });
@@ -83,7 +85,7 @@ expect(answer.useFrom <= answer.query.plannedUtc && answer.query.plannedUtc < an
 ```
 
 - [ ] **Step 3: Run** `mise exec -- npm test -- worker/api/winds-point.test.ts worker/api.functional.test.ts`; expect new assertions to fail.
-- [ ] **Step 4: Implement point selection and interpolation.** Parse one canonical query; choose the newest issued applicable nonstale product per point; require compatible source windows; rank exact-coordinate stations deterministically; interpolate `u/v` wind components, temperature, and bounded altitude; return weights and provenance. Reject failed-cycle uncertainty when it could change the chosen answer. Keep source cache freshness separate from product validity; never serve `stale_on_error` as current.
+- [ ] **Step 4: Implement point selection and interpolation.** Set a measured regional-product limit with headroom, preserving streaming byte checks and bounded parse/cache work. Parse one canonical query; choose the newest issued applicable nonstale product per point; require compatible source windows; rank exact-coordinate stations deterministically; interpolate `u/v` wind components, temperature, and bounded altitude; return weights and provenance. Reject failed-cycle uncertainty when it could change the chosen answer. Keep source cache freshness separate from product validity; never serve `stale_on_error` as current.
 - [ ] **Step 5: Run** focused Worker tests, typecheck, lint, boundary checks, and `git diff --check`; commit `feat(weather): resolve aloft weather at a point`.
 - [ ] **Step 6: Architect review.** Recompute representative vectors and period choices independently, inspect abuse bounds and cache semantics, then send defects back to the same agent.
 
@@ -167,5 +169,5 @@ expect(result.iterations).toBeLessThanOrEqual(8);
 - [ ] **Step 1: Integrate only reviewed signed task commits** on a focused `feature/route-aware-weather` branch. Check `origin/main` ancestry, current PRs, and working-tree cleanliness before branch or PR operations; preserve unrelated user changes.
 - [ ] **Step 2: Audit the combined diff against every spec section.** Confirm no persisted weather/results, exact station and endpoint identities, latest applicable aloft reports, conditional TAF worst-case rule, request bounds, stale-data rejection, and inspector/navlog consistency. Return any defects to the responsible Luna agent and re-review its correction.
 - [ ] **Step 3: Run full repository gates.** Use `mise exec -- npm run ci`, `mise exec -- npm run lint:workflows`, `git diff --check origin/main...HEAD`, and the repository's deployment-artifact verification. Report skipped/unavailable audit or network checks distinctly.
-- [ ] **Step 4: Run a local development Worker smoke** against live official AWC sources for representative short/long CONUS and supported Alaska/Hawaii queries plus one current destination TAF. Record timestamp, sample requests/statuses, provider gaps, and selected coverage limits without treating a provider outage as a passing calculation.
+- [ ] **Step 4: Run a local development Worker smoke** against live official AWC sources for representative short/long CONUS and supported Alaska/Hawaii queries plus one current destination TAF. Record timestamp, decoded regional-product sizes, fetch durations, sample requests/statuses, provider gaps, and selected coverage limits without treating a provider outage as a passing calculation.
 - [ ] **Step 5: Refresh docs and issue #9 acceptance text** to reflect destination TAF, navlog weather validity, inspector detail, and values-only future PDF. Open a focused conventional-title PR with changes, rationale, tests, limitations, and live-smoke status; attach the PR to this task. Do not claim remote checks passed until their current results are read.
