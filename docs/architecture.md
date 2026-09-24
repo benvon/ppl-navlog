@@ -1,6 +1,6 @@
 # Architecture
 
-PPL Navlog is a single TypeScript application deployed as one Cloudflare Worker with static assets. The Worker owns the same-origin `/api/*` boundary and serves the built Vite frontend from `dist/`. The browser keeps plans and aircraft profiles locally; no user account or server-side navlog store is part of V1.
+PPL Navlog is a single TypeScript application deployed as one Cloudflare Worker with static assets. The Worker owns the same-origin `/api/*` boundary and serves the built Vite frontend from `dist/`. The browser stores pilot input documents and aircraft profiles in a versioned v2 IndexedDB database; no user account or server-side navlog store exists. The v2 planner does not load or migrate the former v1 database. Airport and weather responses and calculated navlog output are session-only and are not written as durable plan history.
 
 The repository uses inward dependencies: `src/domain` contains pure calculation types and functions; `src/application` orchestrates domain use cases; `src/services` adapts browser storage, HTTP, import/export, and clocks; `src/ui` renders and collects user intent. Domain code must not import the DOM, storage, HTTP, Cloudflare, Worker, UI, application, or service modules. ESLint and `npm run lint:boundaries` enforce this constraint.
 

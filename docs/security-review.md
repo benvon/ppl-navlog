@@ -2,7 +2,7 @@
 
 ## Threat model
 
-This is a public, zero-login application. Browser-local plans and aircraft profiles are sensitive to the user but are not intentionally uploaded; the Worker sees only airport, METAR, and winds lookup parameters. Trust boundaries are browser input and imported JSON, browser IndexedDB, upstream aviation products, the runway-picker service binding, Cloudflare cache, deployment configuration, and GitHub Actions credentials. Plausible attackers include a malicious public API caller, a crafted JSON-import sender, a malicious or compromised upstream payload, and an actor with access to a deployment token or workflow edit. No review can guarantee that the application cannot be hacked; the findings below are release gates and risk reductions, not a security certification.
+This is a public, zero-login application. Under issue #7, pilot input documents and aircraft profiles are browser-local and are not intentionally uploaded; the Worker sees only airport, METAR, and winds lookup parameters. Trust boundaries are browser input and imported JSON, browser IndexedDB, upstream aviation products, the runway-picker service binding, Cloudflare cache, deployment configuration, and GitHub Actions credentials. The active planner uses a separate v2 input-only IndexedDB database and does not load or migrate the former v1 store. Plausible attackers include a malicious public API caller, a crafted JSON-import sender, a malicious or compromised upstream payload, and an actor with access to a deployment token or workflow edit. No review can guarantee that the application cannot be hacked; the findings below are release gates and risk reductions, not a security certification.
 
 ## Findings and status
 
@@ -18,7 +18,7 @@ This is a public, zero-login application. Browser-local plans and aircraft profi
 
 ## Positive controls reviewed
 
-The UI places imported and upstream strings with `textContent`, not HTML interpretation. JSON recovery snapshots have a 1 MiB limit, schema validation, and one atomic fresh-ID restore; they never merge or replace local records and exclude weather evidence and calculated results. API paths and parameters are allowlisted; the Worker uses fixed Aviation Weather Center hosts and bounded request time. API responses are `no-store` with a restrictive CSP; static responses gain restrictive headers through the Worker-first routing change. Provider failures return generic client-visible errors. A current reachable `npm audit --audit-level=high` returned zero known vulnerabilities; this does not prove dependencies are free of unknown defects.
+The UI places imported and upstream strings with `textContent`, not HTML interpretation. Issue #7 JSON recovery documents are limited to 1 MiB, schema-validated, and atomically imported with fresh IDs as a new plan; they contain pilot inputs and the required profile, not weather evidence or calculated results. API paths and parameters are allowlisted; the Worker uses fixed Aviation Weather Center hosts and bounded request time. API responses are `no-store` with a restrictive CSP; static responses gain restrictive headers through the Worker-first routing change. Provider failures return generic client-visible errors. A current reachable `npm audit --audit-level=high` returned zero known vulnerabilities; this does not prove dependencies are free of unknown defects.
 
 ## Before a production deployment
 

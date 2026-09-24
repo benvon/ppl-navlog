@@ -1,5 +1,7 @@
 # PPL Navlog Implementation Plan
 
+**Issue #7 persistence amendment:** this document contains pre-issue requirements for immutable calculated revisions and migration. The accepted [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md) supersedes those requirements for active planner persistence: v2 stores pilot inputs and aircraft profiles, keeps at most 20 explicit input submissions per plan, and keeps external responses and calculated output ephemeral. The planner does not load or migrate v1 data. Revision-specific flows and tests below describe the former design; they are not requirements for issue #7.
+
 ## 1. Purpose
 
 Build a desktop-first VFR flight-planning and study application based on the conceptual workflow in FAA Pilot's Handbook of Aeronautical Knowledge Figure 16-26. The application must be useful as a conventional visual flight log, but its primary purpose is teaching: every important result must remain traceable to pilot input, aircraft-profile data, authoritative external data, interpolation, or an explicit calculation.

@@ -2,6 +2,8 @@
 
 This audit compares the current `feature/init` implementation with the agreed acceptance criteria in `docs/implementation-plan.md`. It is a code and local-test audit, not a claim that live aviation providers, Cloudflare bindings, deployed domains, or human usability have been verified. `navlog.benvon.dev` is the development target; `navlog.benvon.net` is production.
 
+This is a historical snapshot from before issue #7. Its immutable-revision and migration-era persistence status does not describe the v2 pilot-input-only design or establish that issue #7 is implemented. Re-audit the current branch against [the issue #7 specification](superpowers/specs/2026-09-24-pilot-intent-design.md) before using this document as a release checklist.
+
 | Area | Evidence and current status | Remaining gate |
 | --- | --- | --- |
 | Foundation, flight math, phase allocation | TypeScript Worker/static-assets app, pure domain tests, calculation traces, generated TOC/TOD and altitude-transition sublegs, deterministic complete-flight fixture: implemented and locally tested. | Human aviation-teaching review of formulas and representative calculations. |
