@@ -457,7 +457,7 @@ function validateRevisionSnapshotRelationships(value: UnknownRecord, issues: Val
 }
 
 function validateRevisionMetadata(value: UnknownRecord, issues: ValidationIssue[], now: Date): void {
-  oneOf(value.reason, ["initial-save", "input-change", "weather-refresh", "recalculation", "import"] as const, "$.reason", issues);
+  oneOf(value.reason, ["initial-save", "input-change", "weather-refresh", "recalculation"] as const, "$.reason", issues);
   if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
 }
 

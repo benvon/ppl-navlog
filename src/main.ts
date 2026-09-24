@@ -1,10 +1,8 @@
 import { WorkerAirportLookup } from './services/airport/worker-airport-lookup';
 import { WorkerWindsClient } from './services/weather/winds-client';
-import { createBrowserPlanCalculator } from './application/browser-plan-calculator';
-import { createBrowserWeatherRefresh } from './application/browser-weather-refresh';
 import { createBrowserUseCaseIds, createSystemClock } from './application/plan-use-cases';
-import { IndexedDbNavlogRepository } from './services/storage/indexed-db-repository';
-import { renderApp } from './ui/renderApp';
+import { IndexedDbPilotInputRepository } from './services/storage/pilot-input-repository';
+import { renderPilotIntentPlanner } from './ui/pilot-intent-planner';
 import './ui/styles.css';
 
 const root = document.querySelector<HTMLElement>('#app');
@@ -13,22 +11,19 @@ if (!root) {
   throw new Error('Application root was not found.');
 }
 
-const persistence = new IndexedDbNavlogRepository();
+const repository = new IndexedDbPilotInputRepository();
 const winds = new WorkerWindsClient();
 const ids = createBrowserUseCaseIds();
 const clock = createSystemClock();
 
-renderApp(root, {
-  version: import.meta.env.VITE_APP_VERSION ?? 'v0.0.0-dev',
-  commitSha: import.meta.env.VITE_APP_COMMIT_SHA ?? 'local'
-}, {
-  airportLookup: new WorkerAirportLookup(),
-  winds,
-  persistence,
-  weatherEvidence: persistence,
-  portability: persistence,
-  ids,
-  clock,
-  calculatePlan: createBrowserPlanCalculator(persistence, winds, ids, clock),
-  refreshWeather: createBrowserWeatherRefresh(persistence, winds, ids, clock)
-});
+const main = document.createElement('main');
+main.className = 'app-shell';
+const heading = document.createElement('h1'); heading.textContent = 'PPL Navlog';
+const description = document.createElement('p'); description.textContent = 'A VFR navigation planning study tool with inspectable calculations.';
+const disclaimer = document.createElement('p'); disclaimer.className = 'teaching-disclaimer'; disclaimer.textContent = 'For teaching purposes only. Not for actual flight planning or a complete preflight briefing.';
+const footer = document.createElement('footer');
+const identity = document.createElement('p'); identity.className = 'build-identity'; identity.textContent = `Build ${import.meta.env.VITE_APP_VERSION ?? 'v0.0.0-dev'} (${import.meta.env.VITE_APP_COMMIT_SHA ?? 'local'})`;
+footer.append(identity);
+const workspace = document.createElement('div'); workspace.className = 'planning-workspace';
+main.append(heading, description, disclaimer, workspace, footer); root.replaceChildren(main);
+renderPilotIntentPlanner(workspace, { repository, airportLookup: new WorkerAirportLookup(), winds, ids, clock });

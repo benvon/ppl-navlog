@@ -1,5 +1,7 @@
 # PPL Navlog Implementation Plan
 
+**Issue #7 persistence and scope amendment:** this document contains pre-issue requirements for immutable calculated revisions, migration, JSON plan portability, and printable output. The accepted [pilot intent design](superpowers/specs/2026-09-24-pilot-intent-design.md) supersedes those requirements for the active planner: v2 stores pilot inputs and aircraft profiles, allows at most 25 checkpoints and 20 explicit input submissions per plan, and keeps external responses and calculated output ephemeral. The planner does not load or migrate v1 data. Plan and aircraft-profile import/export are out of scope before version 1.0. Printing and PDF output are deferred while core planning functionality is built. Revision-specific flows below describe the former design; they are not requirements for the active planner.
+
 ## 1. Purpose
 
 Build a desktop-first VFR flight-planning and study application based on the conceptual workflow in FAA Pilot's Handbook of Aeronautical Knowledge Figure 16-26. The application must be useful as a conventional visual flight log, but its primary purpose is teaching: every important result must remain traceable to pilot input, aircraft-profile data, authoritative external data, interpolation, or an explicit calculation.
@@ -43,7 +45,6 @@ V1 supports:
 - pilot-entered taxi/run-up fuel and reserve fuel;
 - generated TOC and TOD points;
 - immutable saved plan revisions;
-- JSON export and import with schema validation and versioning;
 - a print-friendly PDF export of a selected, complete saved navlog revision.
 
 ### 3.2 Flight phases and calculations
@@ -109,7 +110,7 @@ Start with a single application and clear internal layers. Do not introduce a pa
 ├── src/
 │   ├── domain/          # Pure types, calculations, errors, and explanation traces
 │   ├── application/     # Use cases and orchestration
-│   ├── services/        # HTTP, IndexedDB, import/export, and clock adapters
+│   ├── services/        # HTTP, IndexedDB, and clock adapters
 │   ├── ui/              # Controllers, presenters, components, and layout
 │   ├── test/            # Shared test builders and fixtures
 │   └── main.ts
@@ -140,7 +141,7 @@ Dependencies point inward: UI and services may depend on application and domain 
 
 ### 4.2 Cloudflare topology
 
-One independently deployed Worker serves the static frontend and the `/api/*` boundary. It may call the existing `runway-picker` service through a configurable internal or HTTPS adapter when that contract is available. A local or direct upstream adapter remains possible so development and recovery do not require the other application.
+One independently deployed Worker serves the static frontend and the `/api/*` boundary. It may call the existing `runway-picker` service through a configurable internal or HTTPS adapter when that contract is available. A local or direct upstream adapter remains possible so development and testing do not require the other application.
 
 Expected endpoints:
 
@@ -348,24 +349,13 @@ Selecting any calculated value opens a persistent Calculation Inspector. The ins
 
 Generated TOC and TOD rows must be visually distinct but participate in the same explanations and cumulative totals as other rows.
 
-The PDF is a one-way output artifact, not a persistence or interchange format. Export uses the selected immutable calculated revision without refreshing weather or silently recalculating values. It presents the PHAK-style worksheet in a legible landscape layout with sensible pagination and repeats table headings when a log spans pages. Include route and aircraft identity, planned departure UTC, revision ID and generation time, source/forecast validity, visible assumptions and overrides, fuel summary, and the application's preflight limitation. PDF creation stays browser-local; no plan or aircraft data is uploaded. PDF import or reconstruction of a plan from a PDF is explicitly out of scope.
+Printing is deferred in the active planner while core planning functionality is built. There is no print action in the issue #7 UI; future browser output must use only a successful calculation held in the current session and pass browser layout review.
 
-## 9. Persistence, Revisions, and Portability
+## 9. Active Persistence Scope
 
-IndexedDB stores:
+The active planner uses the v2 IndexedDB store for aircraft profiles, one current pilot-input document per plan, and up to 20 explicit input submissions per plan. Airport and weather responses and calculated output remain session-only. The planner does not load or migrate v1 data.
 
-- aircraft profiles;
-- navlog plan families and immutable revisions;
-- weather/reference snapshots used by revisions;
-- application schema and migration state.
-
-Editable work occurs in a draft. Saving appends a revision with a stable plan ID, transaction-assigned journal number, revision ID, creation reason, timestamps, route inputs, aircraft snapshot, weather snapshot references, effective overrides, calculated route, calculation versions, and warnings. Each plan retains its latest 20 entries. Historical entries are read-only; restoring one appends its snapshot as a new current entry rather than branching history.
-
-Refreshing weather creates a new draft from the current revision, retrieves new weather, recalculates, and appends a new revision only after the user confirms. Prior revisions remain readable.
-
-JSON portability is a minor disaster-recovery feature, not a backup or synchronization system: an open plan exports only its current route draft and selected aircraft profile. It deliberately excludes journal history, weather evidence, calculations, and other browser data. Import validates the size, JSON shape, schema version, timestamps, numeric ranges, and nested route data before one atomic local write. It gives the recovered profile and plan fresh IDs, creates a new plan without merging or replacing existing records, and requires current weather selection and recalculation. Unsupported future schema versions fail closed with a useful message.
-
-JSON remains the only supported round-trip portability format. PDF export is available only for a complete saved calculated revision and must not be offered as an import path.
+Plan and aircraft-profile import/export, including recovery files, are explicitly out of scope before version 1.0. There is no JSON portability or recovery format. Printing and PDF output are deferred from issue #7 and must not be treated as plan interchange formats when implemented.
 
 ## 10. Failure and Freshness Behavior
 
@@ -380,7 +370,7 @@ JSON remains the only supported round-trip portability format. PDF export is ava
 
 ## 11. Security and Privacy
 
-Trust boundaries include user-entered route/profile data, imported files, IndexedDB records from older versions, upstream APIs, the compatible `runway-picker` service, URL parameters, and Worker request inputs.
+Trust boundaries include user-entered route/profile data, IndexedDB records, upstream APIs, the compatible `runway-picker` service, URL parameters, and Worker request inputs.
 
 Controls include:
 
@@ -389,10 +379,9 @@ Controls include:
 - fixed upstream base URLs and separately supplied query parameters;
 - no untrusted string interpolation into executable HTML, shell, or URLs;
 - safe text rendering for raw weather and user-entered labels;
-- import size, depth, and collection-count limits;
 - content security policy, no-sniff, referrer, frame, and permissions headers;
 - secrets injected only through Cloudflare/GitHub secret mechanisms;
-- logs that exclude raw imported files, credentials, full IP addresses, and unnecessary user flight-plan content;
+- logs that exclude credentials, full IP addresses, and unnecessary user flight-plan content;
 - dependency, secret, workflow, and static-analysis checks in CI.
 
 ## 12. Testing Strategy
@@ -420,7 +409,7 @@ Where the FAA example contains enough published inputs, reproduce its results wi
 - Use case tests with fake clock, weather, airport, magnetic-model, and persistence adapters.
 - Contract tests for compatible `runway-picker` airport and METAR responses.
 - Worker tests for validation, allowlisted routes, caching, stale behavior, rate limiting, timeouts, source metadata, and redacted errors.
-- IndexedDB migration, quota failure, atomic import, duplicate import, and corrupt-record tests.
+- IndexedDB quota failure and corrupt-record tests.
 - Snapshot/revision tests proving that profile edits and weather refreshes do not mutate prior revisions.
 
 ### 12.3 UI and end-to-end tests
@@ -430,7 +419,7 @@ Where the FAA example contains enough published inputs, reproduce its results wi
 - Override guard, badge, downstream recalculation, and restoration.
 - Explicit forecast selection and out-of-range forecast behavior.
 - Offline/retry/stale weather states.
-- Save, reopen, revise, export, and import.
+- Save, reopen, and revise.
 - Infeasible-profile presentation.
 - Desktop layouts at representative laptop sizes and a narrower horizontally scrolling layout.
 - Accessibility checks for labels, focus order, table semantics, contrast, non-color status communication, and reduced motion.
@@ -466,7 +455,7 @@ The initial deployment milestone must document rollback, service bindings, secre
 
 ### 13.3 Observability
 
-Record aggregate Worker request counts, latency, status/error codes, upstream identity, cache status, and request IDs. Do not log complete navlogs, raw imported files, provider tokens, or other unnecessary user data. Operational documentation defines alertable failures, upstream degradation behavior, and how to trace a user-visible request ID.
+Record aggregate Worker request counts, latency, status/error codes, upstream identity, cache status, and request IDs. Do not log complete navlogs, provider tokens, or other unnecessary user data. Operational documentation defines alertable failures, upstream degradation behavior, and how to trace a user-visible request ID.
 
 ## 14. Phased Milestones and Acceptance Criteria
 
@@ -511,16 +500,15 @@ Acceptance criteria:
 Deliverables:
 
 - aircraft-profile model and editor;
-- IndexedDB repository with schema migrations;
+- Versioned IndexedDB repository for new local data; no pre-1.0 data migration;
 - profile snapshot behavior;
-- versioned JSON export/import foundation.
+- Durable local profile and pilot-input persistence.
 
 Acceptance criteria:
 
 - Profiles persist across reloads and validate all fields.
 - Updating a profile cannot change a previously stored snapshot.
-- Import is atomic and rejects malformed, oversized, or unsupported data without partial writes.
-- Export followed by import preserves all supported profile fields.
+- Plan and profile import/export are excluded from the pre-1.0 scope.
 
 ### Phase 3: Route planning without live weather
 
@@ -655,8 +643,8 @@ Issue IDs below are planning identifiers, not existing tracker numbers. Each iss
 | DOM-05 | Implement true/magnetic conversion and compass-deviation interpolation | DOM-01 | Heading-conversion engine |
 | DOM-06 | Implement structured calculation traces and formula registry | DOM-01 | Renderable explanations |
 | TST-01 | Build FAA/reference fixtures and tolerance documentation | DOM-02, DOM-03, DOM-04, DOM-05, DOM-06 | Authoritative regression suite |
-| STO-01 | Implement IndexedDB schema, repositories, and migrations | FND-02, DOM-01 | Durable local data |
-| STO-02 | Implement validated atomic JSON export/import | STO-01 | Portable user data |
+| STO-01 | Implement versioned IndexedDB schema and repositories without pre-1.0 data migration | FND-02, DOM-01 | Durable local data |
+| STO-02 | Deferred: plan/profile JSON import/export is out of scope before 1.0 | STO-01 | No portability interface |
 | AIR-01 | Implement aircraft-profile model and validation | DOM-01, STO-01 | Persisted aircraft defaults |
 | AIR-02 | Implement compass-deviation table editor and preview | AIR-01, DOM-05 | Usable deviation profiles |
 | RTE-01 | Implement route, checkpoint, user-leg, and plan-draft models | DOM-01, DOM-02 | Editable route domain |
@@ -689,7 +677,7 @@ Issue IDs below are planning identifiers, not existing tracker numbers. Each iss
 | APP-02 | Implement weather refresh as a new revision with comparison | APP-01, RTE-02 | Immutable refresh workflow |
 | UI-05 | Add generated TOC/TOD/transition rows and infeasibility presentation | FLT-05, UI-02, UI-03 | Visible phase planning |
 | UI-06 | Add weather status, selection, raw data, and source views | API-05, WX-02, WX-03, UI-03 | Weather transparency |
-| UI-07 | Add revision history, comparison, export, and import | RTE-02, APP-02, STO-02 | Durable plan management |
+| UI-07 | Add revision history and comparison | RTE-02, APP-02 | Durable plan management |
 | UI-08 | Generate a browser-local, print-friendly PDF from a complete saved revision; never import PDF | APP-01, UI-02, UI-05, UI-06, UI-07 | One-way printable navlog artifact |
 | QUA-01 | Add end-to-end core-planning and failure-path coverage | APP-01, UI-04, UI-05, UI-06, UI-07, UI-08 | Release-level behavior tests |
 | QUA-02 | Complete accessibility and representative-layout validation | UI-01, UI-02, UI-03, UI-04, UI-05, UI-06, UI-07, UI-08 | Accessible desktop and print experience |
@@ -712,6 +700,6 @@ The issue graph should be delivered in vertical slices rather than completing ev
 
 ## 16. V1 Definition of Done
 
-V1 is complete only when a pilot can enter exact FAA LID or ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; choose an explicit ICAO surface-weather source to add a surface-METAR anchor (without one, planning uses winds aloft only); generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save immutable revisions; refresh weather into a new revision; export and import JSON plan data safely; export a print-friendly PDF of a complete saved revision without supporting PDF import; and use the deployed application through a tested, accessible desktop workflow.
+V1 is complete only when a pilot can enter exact FAA LID or ICAO endpoints, manual checkpoints, departure UTC time, per-leg altitudes, an aircraft profile, taxi/run-up fuel, and reserve fuel; explicitly select applicable weather; choose an explicit ICAO surface-weather source to add a surface-METAR anchor (without one, planning uses winds aloft only); generate an explained climb/cruise/descent plan with TOC and TOD; inspect raw sources and every material calculation; deliberately override and restore supported values; save pilot inputs locally; export a print-friendly PDF of a successful current calculation; and use the deployed application through a tested, accessible desktop workflow. Plan and profile import/export are out of scope before version 1.0.
 
 All automated quality gates must pass, production deployment and rollback must be documented and smoke-tested, and known limitations must be visible in both the application and user documentation. Human review must confirm that the teaching explanations match the implemented formulas and that the worksheet remains usable at representative laptop sizes.

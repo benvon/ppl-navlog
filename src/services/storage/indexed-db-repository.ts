@@ -1,8 +1,6 @@
 import type { AircraftProfile } from "../../domain/aircraft";
 import type { PlanFamily, PlanRevision, WeatherReferenceSnapshot } from "../../domain/route";
 import {
-  type ImportResult,
-  type PlanRecoveryArchive,
   NAVLOG_DATABASE_NAME,
   NAVLOG_DATABASE_VERSION,
   MAX_REVISIONS_PER_PLAN,
@@ -11,7 +9,6 @@ import {
   ImmutableRevisionError,
   StorageUnavailableError,
 } from "./contracts";
-import { parsePlanRecoveryArchive, serializePlanRecoveryArchive } from "./json-transfer";
 import {
   StorageValidationError,
   validateAircraftProfile,
@@ -24,26 +21,23 @@ export interface IndexedDbRepositoryOptions {
   readonly databaseName?: string;
   readonly indexedDbFactory?: IDBFactory;
   readonly now?: () => Date;
-  readonly nextId?: () => string;
 }
 
 /**
  * Browser persistence boundary. Every object is checked on both write and read
- * because older migrations, imported files, and browser tooling can all leave
+ * because older records and browser tooling can all leave
  * malformed IndexedDB records behind TypeScript's compile-time guarantees.
  */
 export class IndexedDbNavlogRepository {
   private readonly databaseName: string;
   private readonly factory: IDBFactory | undefined;
   private readonly now: () => Date;
-  private readonly nextId: () => string;
   private databasePromise: Promise<IDBDatabase> | undefined;
 
   public constructor(options: IndexedDbRepositoryOptions = {}) {
     this.databaseName = options.databaseName ?? NAVLOG_DATABASE_NAME;
     this.factory = options.indexedDbFactory ?? globalThis.indexedDB;
     this.now = options.now ?? (() => new Date());
-    this.nextId = options.nextId ?? (() => crypto.randomUUID());
   }
 
   public async close(): Promise<void> {
@@ -182,83 +176,6 @@ export class IndexedDbNavlogRepository {
 
   public async listPlanFamilies(): Promise<readonly PlanFamily[]> {
     return this.readAll(NAVLOG_STORES.planFamilies, (value) => validatePlanFamily(value, this.now()));
-  }
-
-  /** Exports only the current editable plan and aircraft data needed to recreate it. */
-  public async exportPlanRecoveryArchive(planId: string, exportedAt = this.now().toISOString()): Promise<string> {
-    const database = await this.database();
-    const transaction = database.transaction([NAVLOG_STORES.planFamilies, NAVLOG_STORES.planRevisions], "readonly");
-    const [planFamilies, planRevisions] = await Promise.all([
-      requestResult<unknown[]>(transaction.objectStore(NAVLOG_STORES.planFamilies).getAll()),
-      requestResult<unknown[]>(transaction.objectStore(NAVLOG_STORES.planRevisions).getAll()),
-    ]);
-    await transactionDone(transaction);
-    const family = planFamilies
-      .map((value) => clone(ensureValid(value, (candidate) => validatePlanFamily(candidate, this.now()))))
-      .find((candidate) => candidate.id === planId);
-    if (family === undefined) throw new StorageValidationError([{ path: "$.planId", message: "does not identify a saved plan" }]);
-    const revision = planRevisions
-      .map((value) => clone(ensureValid(value, (candidate) => validatePlanRevision(candidate, this.now()))))
-      .filter((revision) => revision.planId === planId)
-      .find((candidate) => candidate.id === family.latestRevisionId);
-    if (revision === undefined) throw new StorageValidationError([{ path: "$.latestRevisionId", message: "does not identify a saved plan revision" }]);
-    const archive: PlanRecoveryArchive = {
-      format: "ppl-navlog/plan-recovery",
-      formatVersion: 1,
-      exportedAt,
-      draft: revision.draftSnapshot,
-      aircraftProfile: revision.aircraftProfileSnapshot.profile,
-    };
-    return serializePlanRecoveryArchive(archive, this.now());
-  }
-
-  /**
-   * Restores a recovery snapshot as a new local plan. Fresh IDs deliberately
-   * prevent this feature from becoming a merge or synchronization protocol.
-   */
-  public async importPlanRecoveryArchive(serialized: string): Promise<ImportResult> {
-    const archive = parsePlanRecoveryArchive(serialized, this.now());
-    const timestamp = this.now().toISOString();
-    const recoveredPlanId = this.nextId();
-    const profile = { ...archive.aircraftProfile, id: this.nextId(), createdAt: timestamp, updatedAt: timestamp };
-    const draft = {
-      ...archive.draft,
-      id: this.nextId(),
-      planId: recoveredPlanId,
-      selectedAircraftProfileId: profile.id,
-      weatherSelection: undefined,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const revision = {
-      schemaVersion: 1 as const,
-      id: this.nextId(),
-      planId: recoveredPlanId,
-      revisionNumber: 1,
-      reason: "import" as const,
-      createdAt: timestamp,
-      draftSnapshot: draft,
-      aircraftProfileSnapshot: { profile, snapshottedAt: timestamp },
-      weatherSnapshotIds: [],
-      warnings: ["Recovered from a local JSON snapshot. Select current weather and recalculate before use."],
-    };
-    const family = { schemaVersion: 1 as const, id: recoveredPlanId, title: draft.title, createdAt: timestamp, latestRevisionId: revision.id, latestRevisionNumber: 1 };
-    validateAircraftProfile(profile, this.now());
-    validatePlanFamily(family, this.now());
-    validatePlanRevision(revision, this.now());
-    const database = await this.database();
-    const transaction = database.transaction([NAVLOG_STORES.aircraftProfiles, NAVLOG_STORES.planFamilies, NAVLOG_STORES.planRevisions], "readwrite");
-    transaction.objectStore(NAVLOG_STORES.aircraftProfiles).add(clone(profile));
-    transaction.objectStore(NAVLOG_STORES.planFamilies).add(clone(family));
-    transaction.objectStore(NAVLOG_STORES.planRevisions).add(clone(revision));
-    await transactionDone(transaction);
-    return {
-      aircraftProfiles: 1,
-      planFamilies: 1,
-      planRevisions: 1,
-      weatherSnapshots: 0,
-      recoveredPlanId,
-    };
   }
 
   private async readAll<T>(storeName: NavlogStoreName, validate: (value: unknown) => value is T): Promise<readonly T[]> {
