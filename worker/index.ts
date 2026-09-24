@@ -4,6 +4,7 @@ import { handleApiRequest } from './api/handlers';
 import { createRequestId } from './api/request';
 import { errorResponse } from './api/response';
 import { createAviationWeatherAdapter, type CacheStore } from './api/winds';
+import { createTafAdapter } from './api/taf';
 
 interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }>; }
 
@@ -64,7 +65,8 @@ export default {
         : undefined;
       const edgeCache = env.WINDS_CACHE ?? (globalThis as unknown as { caches?: { default?: CacheStore } }).caches?.default;
       const windsData = createAviationWeatherAdapter({ fetch: globalThis.fetch.bind(globalThis) }, edgeCache);
-      return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData });
+      const tafData = createTafAdapter({ fetch: globalThis.fetch.bind(globalThis) });
+      return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData, tafData });
     }
 
     const assetResponse = await env.ASSETS.fetch(request);

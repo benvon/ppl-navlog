@@ -153,3 +153,6 @@ export interface WindsStationsSuccessPayload {
 }
 
 export interface WindsForecastSuccessPayload { forecast: WindsForecast; provenance: WindsSourceProvenance; requestId: string; }
+
+export interface TafWindGroup { kind: 'prevailing' | 'FM' | 'TEMPO' | 'PROB'; fromUtc: string; untilUtc: string; windDirectionType: 'fixed' | 'variable' | 'missing'; windFromDegTrue: number | null; windSpeedKt: number | null; gustKt: number | null; probabilityPercent: number | null; raw: string; }
+export interface TafAnswer { stationIcao: string; issuedAt: string; validFrom: string; validUntil: string; rawTaf: string; groups: TafWindGroup[]; requestId: string; }

@@ -5,6 +5,7 @@ const REQUEST_ID_HEADER = 'X-Request-Id';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type ApiRoute = { readonly kind: 'health' } | { readonly kind: 'airport'; readonly icao: string } | { readonly kind: 'metar'; readonly icao: string }
+  | { readonly kind: 'taf'; readonly icao: string }
   | { readonly kind: 'winds-stations'; readonly route: WindsRoutePoint[] }
   | { readonly kind: 'winds-forecast'; readonly station: string; readonly validTime: string; readonly region: WindsRegion }
   | { readonly kind: 'winds-point'; readonly latitudeDeg: number; readonly longitudeDeg: number; readonly altitudeFeetMsl: number; readonly plannedUtc: string };
@@ -100,6 +101,10 @@ function parseWindsPoint(url: URL): ApiRoute {
 export function parseApiRoute(request: Request): ApiRoute {
   const url = new URL(request.url);
   const segments = url.pathname.split('/').filter(Boolean);
+  if (hasSegments(segments.slice(0, 3), ['api', 'weather', 'taf']) && segments.length === 4) {
+    if ([...url.searchParams.keys()].length > 0) throw new ApiError('Query parameters are not accepted by this endpoint.', 400, 'invalid_request');
+    return { kind: 'taf', icao: normalizeIcao(segments[3] ?? '') };
+  }
   const baseRoute = parseBaseRoute(segments, url);
   if (baseRoute) return baseRoute;
   const windsRoute = parseWindsRoute(segments, url);

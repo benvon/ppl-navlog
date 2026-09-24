@@ -13,6 +13,8 @@ import type {
   WindsSourceProvenance,
   WindsStation,
   WindsStationsSuccessPayload,
+  TafAnswer,
+  TafWindGroup,
 } from "../../../worker/api/contracts";
 import type { Coordinate } from "../../domain/coordinates";
 
@@ -33,6 +35,7 @@ export interface WindsTransportClient {
 export interface MetarTransportClient {
   fetchMetar(icao: string): Promise<MetarSuccessPayload>;
 }
+export interface TafTransportClient { fetchTaf(icao: string): Promise<TafAnswer>; }
 
 export class WindsClientError extends Error {
   public constructor(
@@ -183,6 +186,20 @@ const isMetar = (value: unknown): value is MetarData =>
     isUtcMilliseconds(value.fetchedAt), nullable(value.observedAt, isUtcMilliseconds),
   );
 
+const isTafWind = (value: Record<string, unknown>): boolean =>
+  nullable(value.windFromDegTrue, (n) => isBoundedInteger(n, 0, 360)) &&
+  nullable(value.windSpeedKt, (n) => isBoundedInteger(n, 0, 199)) && nullable(value.gustKt, (n) => isBoundedInteger(n, 0, 199)) && (value.windSpeedKt !== null || value.gustKt === null) &&
+  (value.windDirectionType === "fixed" ? value.windFromDegTrue !== null && value.windSpeedKt !== null : value.windDirectionType === "variable" ? value.windFromDegTrue === null && value.windSpeedKt !== null : value.windDirectionType === "missing" && value.windFromDegTrue === null && value.windSpeedKt === null);
+const isTafGroup = (value: unknown): value is TafWindGroup => isRecord(value) &&
+  oneOf(value.kind, ["prevailing", "FM", "TEMPO", "PROB"]) && oneOf(value.windDirectionType, ["fixed", "variable", "missing"]) && isUtcMilliseconds(value.fromUtc) && isUtcMilliseconds(value.untilUtc) &&
+  Date.parse(value.fromUtc) < Date.parse(value.untilUtc) && isTafWind(value) && nullable(value.probabilityPercent, (n) => isBoundedInteger(n, 0, 100)) &&
+  (value.kind === "PROB" ? value.probabilityPercent !== null : value.probabilityPercent === null) && isString(value.raw, 4096);
+const isTafPayload = (value: unknown): value is TafAnswer => isRecord(value) &&
+  isString(value.stationIcao, 4) && /^[A-Z0-9]{4}$/.test(value.stationIcao) && isUtcMilliseconds(value.issuedAt) &&
+  isUtcMilliseconds(value.validFrom) && isUtcMilliseconds(value.validUntil) && Date.parse(value.validFrom) < Date.parse(value.validUntil) &&
+  isString(value.rawTaf, 4096) && isBoundedArray(value.groups, 100, isTafGroup) &&
+  value.groups.filter((g) => g.kind === "prevailing").length === 1 && value.groups.every((g) => Date.parse(g.fromUtc) >= Date.parse(value.validFrom as string) && Date.parse(g.untilUtc) <= Date.parse(value.validUntil as string)) && isRequestId(value.requestId);
+
 const isRequestId = (value: unknown): value is string => isString(value, 128) && /^[0-9a-f-]{8,128}$/i.test(value);
 
 const isStationsPayload = (value: unknown): value is WindsStationsSuccessPayload =>
@@ -305,7 +322,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
   }
 };
 
-export class WorkerWindsClient implements WindsTransportClient, MetarTransportClient {
+export class WorkerWindsClient implements WindsTransportClient, MetarTransportClient, TafTransportClient {
   private readonly baseUrl: URL;
 
   public constructor(
@@ -348,6 +365,13 @@ export class WorkerWindsClient implements WindsTransportClient, MetarTransportCl
     if (!isMetarPayload(payload) || payload.metar.icao !== normalizedIcao) {
       throw new WindsClientError("INVALID_RESPONSE", "METAR response did not match the documented contract.");
     }
+    return payload;
+  }
+
+  public async fetchTaf(icao: string): Promise<TafAnswer> {
+    const normalizedIcao = ensureIcao(icao);
+    const payload = await this.requestJson(new URL(`/api/weather/taf/${normalizedIcao}`, this.baseUrl));
+    if (!isTafPayload(payload) || payload.stationIcao !== normalizedIcao) throw new WindsClientError("INVALID_RESPONSE", "TAF response did not match the documented contract.");
     return payload;
   }
 

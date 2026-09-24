@@ -377,4 +377,14 @@ describe("WorkerWindsAdapter", () => {
     };
     await expect(new WorkerWindsAdapter(new FakeWindsClient(discoveryPayload(), unadvertisedCycle)).load(input)).rejects.toMatchObject({ code: "INVALID_FORECAST" });
   });
+
+  it("validates TAF transport station identity and every group field", async () => {
+    const payload = { stationIcao: "KORD", issuedAt: "2026-09-22T00:00:00.000Z", validFrom: "2026-09-22T00:00:00.000Z", validUntil: "2026-09-23T00:00:00.000Z", rawTaf: "TAF KORD", requestId: "11111111-1111-4111-8111-111111111111", groups: [{ kind: "prevailing", fromUtc: "2026-09-22T00:00:00.000Z", untilUtc: "2026-09-23T00:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 10, gustKt: null, probabilityPercent: null, raw: "prevailing" }] };
+    const valid = new WorkerWindsClient({ fetch: async () => Response.json(payload) }, "https://navlog.example");
+    await expect(valid.fetchTaf("KORD")).resolves.toMatchObject({ stationIcao: "KORD" });
+    const wrongStation = new WorkerWindsClient({ fetch: async () => Response.json({ ...payload, stationIcao: "KJFK" }) }, "https://navlog.example");
+    await expect(wrongStation.fetchTaf("KORD")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const malformed = { ...payload, groups: [{ ...payload.groups[0]!, windDirectionType: "variable" }] };
+    await expect(new WorkerWindsClient({ fetch: async () => Response.json(malformed) }, "https://navlog.example").fetchTaf("KORD")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
 });
