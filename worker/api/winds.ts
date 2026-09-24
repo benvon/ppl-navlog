@@ -1,5 +1,7 @@
 import type {
   AirportCoordinates,
+  AloftPointAnswer,
+  AloftPointQuery,
   CacheProvenance,
   WindsAloftLevel,
   WindsForecast,
@@ -26,6 +28,7 @@ export interface ServiceFetcher { fetch(request: Request): Promise<Response>; }
 export interface CacheStore { match(request: Request): Promise<Response | undefined>; put(request: Request, response: Response): Promise<void>; }
 
 export interface WindsDataAdapter {
+  getWindsPoint(query: AloftPointQuery): Promise<AloftPointAnswer>;
   getWindsStations(route: readonly WindsRoutePoint[]): Promise<{ stations: WindsStation[]; forecasts: WindsForecastAvailability[]; unavailableForecastCycles: WindsForecastCycle[]; provenance: CacheProvenance[] }>;
   getWindsForecast(station: string, validTime: string, region: WindsRegion): Promise<{ forecast: WindsForecast; provenance: CacheProvenance }>;
 }
@@ -287,13 +290,27 @@ function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCata
   };
 }
 
-function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[]): Map<string, StationInfo> {
+function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
   const requestedIds = new Set(stationIds);
-  const result = new Map<string, StationInfo>();
+  const matches = new Map<string, StationInfo[]>();
   for (const entry of catalog.entries) {
-    for (const identifier of entry.identifiers) {
-      if (requestedIds.has(identifier)) result.set(identifier, { id: identifier, ...entry.info });
+    for (const identifier of requestedIds) {
+      if (entry.identifiers.includes(identifier)) {
+        const records = matches.get(identifier) ?? [];
+        records.push({ id: identifier, ...entry.info });
+        matches.set(identifier, records);
+      }
     }
+  }
+  const result = new Map<string, StationInfo>();
+  for (const identifier of requestedIds) {
+    const records = matches.get(identifier) ?? [];
+    if (records.length !== 1) throw new ApiError('Aviation Weather Center station catalog did not provide one exact identity for a reported station.', 502, 'upstream_invalid_response');
+    let actualRegion: WindsRegion;
+    try { actualRegion = regionForPoint(records[0]!.coordinates); }
+    catch { throw new ApiError('Aviation Weather Center station catalog placed a reported station outside its supported product region.', 502, 'upstream_invalid_response'); }
+    if (actualRegion !== expectedRegion) throw new ApiError('Aviation Weather Center station catalog placed a reported station in a different product region.', 502, 'upstream_invalid_response');
+    result.set(identifier, records[0]!);
   }
   return result;
 }
@@ -403,6 +420,9 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
   }
 
   return {
+    async getWindsPoint(_query) {
+      throw new ApiError('Route-aware winds point queries are not implemented yet.', 503, 'service_unavailable');
+    },
     async getWindsStations(route) {
       const region = regionForRoute(route);
       const { products, unavailableCycles } = await allProducts(region);
@@ -417,7 +437,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         if (availability.has(key)) throw new ApiError('Aviation Weather Center returned ambiguous station and valid-time forecasts.', 502, 'upstream_invalid_response');
         availability.set(key, forecast);
       }
-      const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort());
+      const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort(), region);
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
         const info = stationsById.get(id);
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
@@ -441,7 +461,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       for (const item of products) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
       requireUniqueForecastMatch(matches, unavailableCycles);
       const match = matches[0] as { forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance };
-      const info = stationInfo(await stationCatalog(), [station]);
+      const info = stationInfo(await stationCatalog(), [station], region);
       const stationInfoValue = info.get(station);
       if (!stationInfoValue) throw new ApiError('The requested Winds/Temps station does not have verified Aviation Weather Center coordinates.', 502, 'upstream_invalid_response');
       const windsStation: WindsStation = { id: station, name: stationInfoValue.name, coordinates: stationInfoValue.coordinates, elevationFt: stationInfoValue.elevationFt, region: match.product.region, availableForecastCycles: [match.forecast.forecastCycle], source: 'aviationweather' };

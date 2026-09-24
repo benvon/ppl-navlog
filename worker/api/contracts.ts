@@ -64,6 +64,31 @@ export type WindsRoutePoint = AirportCoordinates;
 export type WindsForecastCycle = '06' | '12' | '24';
 export type WindsRegion = 'us' | 'alaska' | 'hawaii';
 
+export interface AloftPointQuery { latitudeDeg: number; longitudeDeg: number; altitudeFeetMsl: number; plannedUtc: string; }
+export interface AloftSourceWeight {
+  stationId: string;
+  latitudeDeg: number;
+  longitudeDeg: number;
+  distanceNauticalMiles: number;
+  horizontalWeight: number;
+  lowerAltitudeFeet: number;
+  upperAltitudeFeet: number;
+  verticalWeight: number;
+}
+export interface AloftPointAnswer {
+  query: AloftPointQuery;
+  windFromDegTrue: number | null;
+  windSpeedKt: number;
+  temperatureC: number;
+  issuedAt: string;
+  useFrom: string;
+  useUntil: string;
+  forecastCycle: WindsForecastCycle;
+  sources: AloftSourceWeight[];
+  method: 'station-level' | 'vertical-vector' | 'horizontal-vector' | 'horizontal-vertical-vector';
+  requestId: string;
+}
+
 export interface WindsStation {
   id: string;
   name: string | null;
