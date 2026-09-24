@@ -74,6 +74,9 @@ export interface AloftSourceWeight {
   lowerAltitudeFeet: number;
   upperAltitudeFeet: number;
   verticalWeight: number;
+  temperatureLowerAltitudeFeet: number | null;
+  temperatureUpperAltitudeFeet: number | null;
+  temperatureVerticalWeight: number | null;
 }
 export interface AloftPointAnswer {
   query: AloftPointQuery;

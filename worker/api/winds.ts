@@ -348,14 +348,14 @@ function verticalLevels(levels: readonly WindsAloftLevel[], altitude: number): {
   return { lower, upper, weight: lower.altitudeFt === upper.altitudeFt ? 0 : (altitude - lower.altitudeFt) / (upper.altitudeFt - lower.altitudeFt) };
 }
 
-function temperatureAtAltitude(levels: readonly WindsAloftLevel[], altitude: number): number | null {
+type TemperatureInterpolation = { value: number; lowerAltitudeFeet: number; upperAltitudeFeet: number; verticalWeight: number };
+function temperatureAtAltitude(levels: readonly WindsAloftLevel[], altitude: number): TemperatureInterpolation | null {
   const available = levels.filter((level) => level.availability === 'available' && level.temperatureC !== null);
   const lower = [...available].filter((level) => level.altitudeFt <= altitude).sort((a, b) => b.altitudeFt - a.altitudeFt)[0];
   const upper = [...available].filter((level) => level.altitudeFt >= altitude).sort((a, b) => a.altitudeFt - b.altitudeFt)[0];
   if (!lower || !upper) return null;
-  if (lower.altitudeFt === upper.altitudeFt) return lower.temperatureC;
-  const weight = (altitude - lower.altitudeFt) / (upper.altitudeFt - lower.altitudeFt);
-  return lower.temperatureC! + (upper.temperatureC! - lower.temperatureC!) * weight;
+  const weight = lower.altitudeFt === upper.altitudeFt ? 0 : (altitude - lower.altitudeFt) / (upper.altitudeFt - lower.altitudeFt);
+  return { value: lower.temperatureC! + (upper.temperatureC! - lower.temperatureC!) * weight, lowerAltitudeFeet: lower.altitudeFt, upperAltitudeFeet: upper.altitudeFt, verticalWeight: weight };
 }
 
 function levelVector(level: WindsAloftLevel): { u: number; v: number } {
@@ -378,7 +378,7 @@ function windFromVector(u: number, v: number): { direction: number | null; speed
 
 type ProductEntry = { product: CachedProduct; provenance: CacheProvenance };
 type ApplicableProduct = ProductEntry & { forecast: DecodedForecast };
-type PointStation = { forecast: DecodedForecast; identity: StationInfo; levels: { lower: WindsAloftLevel; upper: WindsAloftLevel; weight: number }; distance: number; temperatureC: number | null };
+type PointStation = { forecast: DecodedForecast; identity: StationInfo; levels: { lower: WindsAloftLevel; upper: WindsAloftLevel; weight: number }; distance: number; temperature: TemperatureInterpolation | null };
 
 function validateAloftPointQuery(query: AloftPointQuery, current: Date): WindsRegion {
   if (!isCoordinates(query) || !Number.isSafeInteger(query.altitudeFeetMsl) || query.altitudeFeetMsl < 3_000 || query.altitudeFeetMsl > 53_000
@@ -415,7 +415,7 @@ function selectPointStations(query: AloftPointQuery, chosen: ApplicableProduct, 
       const levels = verticalLevels(forecast.levels, query.altitudeFeetMsl);
       if (!identity || !levels) return [];
       const distance = distanceNm(query, identity.coordinates);
-      return distance <= MAX_POINT_DISTANCE_NM ? [{ forecast, identity, levels, distance, temperatureC: temperatureAtAltitude(forecast.levels, query.altitudeFeetMsl) }] : [];
+      return distance <= MAX_POINT_DISTANCE_NM ? [{ forecast, identity, levels, distance, temperature: temperatureAtAltitude(forecast.levels, query.altitudeFeetMsl) }] : [];
     }).sort((a, b) => a.distance - b.distance || a.forecast.stationId.localeCompare(b.forecast.stationId)).slice(0, MAX_POINT_SOURCES);
   if (stations.length === 0) throw new ApiError('No reporting station with usable levels is within supported point coverage.', 404, 'upstream_no_data');
   const exact = stations.find((station) => station.distance < 0.01);
@@ -427,17 +427,18 @@ function answerFromPointStations(query: AloftPointQuery, chosen: ApplicableProdu
   const weightTotal = inverseWeights.some((weight) => !Number.isFinite(weight)) ? 1 : inverseWeights.reduce((sum, weight) => sum + weight, 0);
   const horizontalWeights = inverseWeights.map((weight) => Number.isFinite(weight) ? weight / weightTotal : 1);
   let u = 0; let v = 0; let temperatureTotal = 0;
-  const temperatureAvailable = stations.every((station) => station.temperatureC !== null);
+  const temperatureAvailable = stations.every((station) => station.temperature !== null);
   stations.forEach((station, index) => {
     const weight = station.levels.weight;
     const vector = interpolateVector(station.levels.lower, station.levels.upper, weight);
     u += vector.u * horizontalWeights[index]!;
     v += vector.v * horizontalWeights[index]!;
-    if (station.temperatureC !== null) temperatureTotal += station.temperatureC * horizontalWeights[index]!;
+    if (station.temperature !== null) temperatureTotal += station.temperature.value * horizontalWeights[index]!;
   });
   const wind = windFromVector(u, v);
   const sources = stations.map((station, index) => ({ stationId: station.forecast.stationId, latitudeDeg: station.identity.coordinates.latitudeDeg, longitudeDeg: station.identity.coordinates.longitudeDeg,
-    distanceNauticalMiles: station.distance, horizontalWeight: horizontalWeights[index]!, lowerAltitudeFeet: station.levels.lower.altitudeFt, upperAltitudeFeet: station.levels.upper.altitudeFt, verticalWeight: station.levels.weight }));
+    distanceNauticalMiles: station.distance, horizontalWeight: horizontalWeights[index]!, lowerAltitudeFeet: station.levels.lower.altitudeFt, upperAltitudeFeet: station.levels.upper.altitudeFt, verticalWeight: station.levels.weight,
+    temperatureLowerAltitudeFeet: station.temperature?.lowerAltitudeFeet ?? null, temperatureUpperAltitudeFeet: station.temperature?.upperAltitudeFeet ?? null, temperatureVerticalWeight: station.temperature?.verticalWeight ?? null }));
   const vertical = stations.some((station) => station.levels.lower.altitudeFt !== station.levels.upper.altitudeFt);
   const horizontal = stations.length > 1;
   return { query, windFromDegTrue: wind.direction, windSpeedKt: wind.speed, temperatureC: temperatureAvailable ? temperatureTotal : null, issuedAt: chosen.forecast.issuedAt, useFrom: chosen.forecast.useFrom, useUntil: chosen.forecast.useUntil,
