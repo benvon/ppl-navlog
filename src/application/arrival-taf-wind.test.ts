@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { selectArrivalTafWind } from './arrival-taf-wind';
+import { arrivalTafWindSelectionChanged, selectArrivalTafWind } from './arrival-taf-wind';
 import type { TafAnswer, TafWindGroup } from '../../worker/api/contracts';
 
 const group = (kind: TafWindGroup['kind'], from: string, until: string, direction: number | null, speed: number | null, windDirectionType: TafWindGroup['windDirectionType'] = direction === null ? 'missing' : 'fixed'): TafWindGroup => ({ kind, fromUtc: from, untilUtc: until, windDirectionType, windFromDegTrue: direction, windSpeedKt: speed, gustKt: speed === null ? null : speed + 20, probabilityPercent: kind === 'PROB' ? 30 : null, raw: `${kind} fixture` });
@@ -47,5 +47,21 @@ describe('selectArrivalTafWind', () => {
     const selected = selectArrivalTafWind(input, arrival, 270, 100);
     expect(selected.candidates).toHaveLength(1);
     expect(selected.candidates[0]).toMatchObject({ group: { kind: 'TEMPO' }, inheritedWindGroup: { kind: 'FM', windFromDegTrue: 90, windSpeedKt: 14 }, effectiveWind: { directionFromDegTrue: 90, speedKt: 14 } });
+  });
+
+  it('detects an FM base change under the same windless conditional group', () => {
+    const input = taf([
+      group('prevailing', '2026-09-22T00:00:00.000Z', '2026-09-23T00:00:00.000Z', 270, 10),
+      group('FM', '2026-09-22T04:00:00.000Z', '2026-09-23T00:00:00.000Z', 90, 14),
+      group('TEMPO', '2026-09-22T02:00:00.000Z', '2026-09-22T06:00:00.000Z', null, null),
+    ]);
+    const before = selectArrivalTafWind(input, '2026-09-22T03:00:00.000Z', 270, 100);
+    const after = selectArrivalTafWind(input, '2026-09-22T05:00:00.000Z', 270, 100);
+
+    expect(after.selectedGroup).toEqual(before.selectedGroup);
+    expect(before.selectedCandidate.inheritedWindGroup?.kind).toBe('prevailing');
+    expect(after.selectedCandidate.inheritedWindGroup?.kind).toBe('FM');
+    expect(before.effectiveWind).not.toEqual(after.effectiveWind);
+    expect(arrivalTafWindSelectionChanged(before, after)).toBe(true);
   });
 });

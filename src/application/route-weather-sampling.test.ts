@@ -166,7 +166,7 @@ describe("route waypoint weather sampling", () => {
     let requests = 0;
     const client = { async fetchPoint(query: AloftPointQuery) { requests += 1; return answer(query, 270, 10); } };
     const aboveCruise = { ...base, descentTargetAltitudeFeetMsl: { ...base.descentTargetAltitudeFeetMsl, effectiveValue: 5_000 } };
-    await expect(resolveRouteWeather(aboveCruise, aircraftProfile(), client, endpoints)).rejects.toThrow(/target altitude must not exceed the final selected cruise altitude/i);
+    await expect(resolveRouteWeather(aboveCruise, aircraftProfile(), client, endpoints)).rejects.toThrow(/target altitude must be below the final selected cruise altitude/i);
     await expect(resolveRouteWeather(base, { ...aircraftProfile(), descentTasKnots: Number.NaN }, client, endpoints)).rejects.toThrow(/descent true airspeed must be finite and positive/i);
     expect(requests).toBe(0);
   });
@@ -221,6 +221,20 @@ describe("route waypoint weather sampling", () => {
     expect(terminalRows.length).toBeGreaterThan(0);
     expect(terminalRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("TAF"))).toBe(true);
     expect(JSON.stringify(terminalRows.map((row) => row.effectiveWind.trace.inputs))).toContain("destination TAF selected group until");
+  });
+
+  it("rejects a destination target equal to the final cruise altitude before point requests", async () => {
+    const base = planDraft();
+    const cruiseAltitude = base.route.legs.at(-1)!.cruiseAltitudeFeetMsl;
+    const draft = {
+      ...base,
+      departureTimeUtc: departure,
+      descentTargetAltitudeFeetMsl: { ...base.descentTargetAltitudeFeetMsl, effectiveValue: cruiseAltitude },
+    };
+    let requests = 0;
+
+    await expect(resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) { requests += 1; return answer(query, 270, 15); } }, endpoints)).rejects.toThrow(/destination target altitude must be below the final selected cruise altitude/i);
+    expect(requests).toBe(0);
   });
 
   it("blocks when the starting point report expires before the completed outgoing interval", async () => {
@@ -299,6 +313,35 @@ describe("route waypoint weather sampling", () => {
     transition.groups[1]!.windSpeedKt = 9;
     transition.groups[1]!.gustKt = null;
     await expect(resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationTaf: transition })).rejects.toThrow(/different destination TAF wind group/i);
+  });
+
+  it("blocks when arrival remains in the same windless TEMPO but inherits a changed FM base wind", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const baseRun = await planWith(draft, () => 270);
+    const tod = baseRun.queries[3]!;
+    const lastGeometry = calculateGreatCircleDistanceAndInitialCourse(draft.route.points.at(-2)!.coordinate, draft.route.points.at(-1)!.coordinate);
+    if (!lastGeometry.ok) throw new Error(lastGeometry.error.message);
+    const speed = knots(100);
+    if (!speed.ok) throw new Error(speed.error.message);
+    const aloftWind = wind(270, 15);
+    if (!aloftWind.ok) throw new Error(aloftWind.error.message);
+    const triangle = solveWindTriangle(lastGeometry.value.initialTrueCourse, speed.value, aloftWind.value);
+    if (!triangle.ok) throw new Error(triangle.error.message);
+    const finalCruise = draft.route.legs.at(-1)!.cruiseAltitudeFeetMsl;
+    const descentDistance = (finalCruise - draft.descentTargetAltitudeFeetMsl.effectiveValue) * 100 / aircraftProfile().descentRateFeetPerMinute / 60;
+    const projectedArrivalMs = Date.parse(tod.plannedUtc) + descentDistance / triangle.value.groundspeed * 3_600_000;
+    const fmStart = new Date(projectedArrivalMs + 10_000).toISOString();
+    const tempoStart = new Date(projectedArrivalMs - 60_000).toISOString();
+    const destinationTaf = {
+      ...taf(),
+      groups: [
+        { kind: "prevailing" as const, fromUtc: departure, untilUtc: fmStart, windDirectionType: "fixed" as const, windFromDegTrue: lastGeometry.value.initialTrueCourse, windSpeedKt: 30, gustKt: null, probabilityPercent: null, raw: "prevailing headwind" },
+        { kind: "FM" as const, fromUtc: fmStart, untilUtc: periodEnd, windDirectionType: "fixed" as const, windFromDegTrue: (lastGeometry.value.initialTrueCourse + 180) % 360, windSpeedKt: 30, gustKt: null, probabilityPercent: null, raw: "FM tailwind" },
+        { kind: "TEMPO" as const, fromUtc: tempoStart, untilUtc: periodEnd, windDirectionType: "missing" as const, windFromDegTrue: null, windSpeedKt: null, gustKt: null, probabilityPercent: null, raw: "TEMPO wind omitted" },
+      ],
+    };
+
+    await expect(resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationTaf })).rejects.toThrow(/different destination TAF wind group/i);
   });
 
   it("blocks when tailwind makes the fixed-airspeed TOD descent miss the target altitude", async () => {

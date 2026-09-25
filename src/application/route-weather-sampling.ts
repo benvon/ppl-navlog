@@ -10,7 +10,7 @@ import type { AircraftProfile } from "../domain/aircraft";
 import { canonicalPointCoordinateDegrees, type Coordinate } from "../domain/coordinates";
 import { trace } from "../domain/calculation-trace";
 import { MAX_CHECKPOINTS_PER_PLAN } from "../services/storage/pilot-input-repository";
-import { selectArrivalTafWind, type SelectedArrivalWind } from "./arrival-taf-wind";
+import { arrivalTafWindSelectionChanged, selectArrivalTafWind, type SelectedArrivalWind } from "./arrival-taf-wind";
 import { calculatePlanningMagneticVariation } from "./magnetic-variation";
 import type { CompletePlanRouteLeg, CompletePlanWeather, RouteWeatherSample } from "./complete-plan";
 import { calculateNavlogRow, createNavlogCalculationSession, createNavlogCalculationState, finalizeNavlog, type AllocatedNavlogSubleg, type NavlogWindResolver } from "./navlog-calculation";
@@ -308,7 +308,7 @@ const calculateProgressiveRoute = async (
   if (!todRequested) throw new RouteWeatherSamplingError("The generated top of descent was not reached in route order.");
   if (Math.abs(currentAltitude - finalTargetAltitude) > 1) throw new RouteWeatherSamplingError("The selected descent rate and true airspeed cannot reach the destination target altitude.");
   const arrival = selectArrivalTafWind(endpoints.destinationTaf, new Date(finalArrivalMs()).toISOString(), routeLegs.at(-1)!.trueCourse, profile.descentTasKnots);
-  if (projectedArrivalWind !== undefined && !sameTafGroup(arrival.selectedGroup, projectedArrivalWind.selectedGroup)) throw new RouteWeatherSamplingError("Completed arrival moved into a different destination TAF wind group; update the plan again for a consistent estimate.");
+  if (projectedArrivalWind !== undefined && arrivalTafWindSelectionChanged(projectedArrivalWind, arrival)) throw new RouteWeatherSamplingError("Completed arrival moved into a different destination TAF wind group; update the plan again for a consistent estimate.");
   const navlog = finalizeNavlog(session.value, state);
   if (!navlog.ok) throw new RouteWeatherSamplingError(navlog.error.message);
   const snapshot = jsonValue({
@@ -321,7 +321,7 @@ const calculateProgressiveRoute = async (
 };
 
 const createFixedAirspeedDescentPlan = (finalCruise: number, target: number, distance: number, profile: AircraftProfile) => {
-  if (target > finalCruise) throw new RouteWeatherSamplingError("Destination target altitude must not exceed the final selected cruise altitude for a descent.");
+  if (target >= finalCruise) throw new RouteWeatherSamplingError("Destination target altitude must be below the final selected cruise altitude.");
   const tas = profile.descentTasKnots;
   if (!Number.isFinite(tas) || tas <= 0) throw new RouteWeatherSamplingError("Descent true airspeed must be finite and positive.");
   checkedRate(profile.climbRateFeetPerMinute, "climb");
@@ -646,12 +646,6 @@ const projectOntoRouteLine = (line: RouteLine, target: Coordinate): { readonly d
 };
 
 const sameCoordinate = (left: Coordinate, right: Coordinate): boolean => Math.abs(left.latitude - right.latitude) < 1e-8 && Math.abs((((left.longitude - right.longitude) + 540) % 360) - 180) < 1e-8;
-
-const sameTafGroup = (left: TafAnswer["groups"][number], right: TafAnswer["groups"][number]): boolean =>
-  left.kind === right.kind && left.fromUtc === right.fromUtc && left.untilUtc === right.untilUtc &&
-  left.windDirectionType === right.windDirectionType && left.windFromDegTrue === right.windFromDegTrue &&
-  left.windSpeedKt === right.windSpeedKt && left.gustKt === right.gustKt &&
-  left.probabilityPercent === right.probabilityPercent && left.raw === right.raw;
 
 const jsonValue = (value: unknown): JsonValue => {
   assertFiniteJsonInput(value, "snapshot", new WeakSet<object>());

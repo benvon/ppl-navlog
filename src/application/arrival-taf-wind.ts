@@ -4,9 +4,22 @@ import { wind } from '../domain/wind';
 import type { TafAnswer, TafWindGroup } from '../../worker/api/contracts';
 
 export interface ArrivalWindCandidate { group: TafWindGroup; inheritedWindGroup: TafWindGroup | null; sourceWind: { directionType: TafWindGroup['windDirectionType']; directionFromDegTrue: number | null; speedKt: number | null; gustKt: number | null }; effectiveWind: { directionFromDegTrue: number; speedKt: number }; groundspeedKt: number; directionAssumption: 'VRB treated as direct headwind' | null; }
-export interface SelectedArrivalWind { selectedGroup: TafWindGroup; effectiveWind: ArrivalWindCandidate['effectiveWind']; groundspeedKt: number; candidates: ArrivalWindCandidate[]; surfaceToPatternAssumption: string; }
+export interface SelectedArrivalWind { selectedGroup: TafWindGroup; selectedCandidate: ArrivalWindCandidate; effectiveWind: ArrivalWindCandidate['effectiveWind']; groundspeedKt: number; candidates: ArrivalWindCandidate[]; surfaceToPatternAssumption: string; }
 export class ArrivalTafError extends Error { constructor(message: string) { super(message); this.name = 'ArrivalTafError'; } }
 const surfaceAssumption = 'TAF surface wind is used as a proxy for wind from the surface to the traffic pattern; no runway or crosswind is selected.';
+
+function sameGroup(a: TafWindGroup, b: TafWindGroup): boolean {
+  return a.kind === b.kind && a.fromUtc === b.fromUtc && a.untilUtc === b.untilUtc && a.windDirectionType === b.windDirectionType && a.windFromDegTrue === b.windFromDegTrue && a.windSpeedKt === b.windSpeedKt && a.gustKt === b.gustKt && a.probabilityPercent === b.probabilityPercent && a.raw === b.raw;
+}
+
+function sameCandidate(a: ArrivalWindCandidate, b: ArrivalWindCandidate): boolean {
+  const inheritedSame = a.inheritedWindGroup === null ? b.inheritedWindGroup === null : b.inheritedWindGroup !== null && sameGroup(a.inheritedWindGroup, b.inheritedWindGroup);
+  return sameGroup(a.group, b.group) && inheritedSame && a.sourceWind.directionType === b.sourceWind.directionType && a.sourceWind.directionFromDegTrue === b.sourceWind.directionFromDegTrue && a.sourceWind.speedKt === b.sourceWind.speedKt && a.sourceWind.gustKt === b.sourceWind.gustKt && a.effectiveWind.directionFromDegTrue === b.effectiveWind.directionFromDegTrue && a.effectiveWind.speedKt === b.effectiveWind.speedKt && a.groundspeedKt === b.groundspeedKt && a.directionAssumption === b.directionAssumption;
+}
+
+export function arrivalTafWindSelectionChanged(a: SelectedArrivalWind, b: SelectedArrivalWind): boolean {
+  return !sameGroup(a.selectedGroup, b.selectedGroup) || !sameCandidate(a.selectedCandidate, b.selectedCandidate) || a.effectiveWind.directionFromDegTrue !== b.effectiveWind.directionFromDegTrue || a.effectiveWind.speedKt !== b.effectiveWind.speedKt || a.groundspeedKt !== b.groundspeedKt;
+}
 
 function candidateFor(group: TafWindGroup, base: TafWindGroup, courseDeg: number, tasKt: number): ArrivalWindCandidate {
   const direction = group.windDirectionType === 'variable' ? null : group.windDirectionType === 'missing' ? base.windFromDegTrue : group.windFromDegTrue;
@@ -51,5 +64,5 @@ export function selectArrivalTafWind(taf: TafAnswer, arrivalUtc: string, arrival
   const candidates = considered.map((group) => candidateFor(group, base, arrivalCourseDegTrue, arrivalTasKt));
   candidates.sort((a, b) => a.groundspeedKt - b.groundspeedKt || Date.parse(a.group.fromUtc) - Date.parse(b.group.fromUtc) || a.group.kind.localeCompare(b.group.kind));
   const selected = candidates[0]!;
-  return { selectedGroup: selected.group, effectiveWind: selected.effectiveWind, groundspeedKt: selected.groundspeedKt, candidates, surfaceToPatternAssumption: surfaceAssumption };
+  return { selectedGroup: selected.group, selectedCandidate: selected, effectiveWind: selected.effectiveWind, groundspeedKt: selected.groundspeedKt, candidates, surfaceToPatternAssumption: surfaceAssumption };
 }
