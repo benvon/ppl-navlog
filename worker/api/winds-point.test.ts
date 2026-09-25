@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { parseApiRoute } from './request';
 import { ApiError } from './errors';
-import { createAviationWeatherAdapter, type CacheStore, type ServiceFetcher } from './winds';
+import { createAviationWeatherAdapter, decodeWindsProduct, type CacheStore, type ServiceFetcher } from './winds';
 
 const url = '/api/weather/winds/point?lat=42.6&lon=-89&altitudeFeetMsl=4500&plannedUtc=2026-09-22T01%3A00%3A00.000Z';
 
 const FIXED_NOW = new Date('2026-09-21T18:30:00.000Z');
-const product = `000\nFBUS31 KWNO 212000\nFD1US1\nDATA BASED ON 211800Z\nVALID 220000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  3000    6000    9000   12000\nABQ 35203520+15 3520+10 3520+05\nATL 01200120+15 0120+10 0120+05\n`;
+const product = `000\nFBUS31 KWNO 212000\nFD1US1\nDATA BASED ON 211800Z\nVALID 220000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  3000    6000    9000   12000\nABQ 3520 3520+15 3520+10 3520+05\nATL 0120 0120+15 0120+10 0120+05\n`;
 const catalog = [
   { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Station A', lat: 42.5, lon: -89, elev: 0 },
   { iataId: 'ATL', faaId: 'ATL', icaoId: 'KATL', site: 'Station B', lat: 42.7, lon: -89, elev: 0 }
@@ -101,6 +101,70 @@ describe('winds point request', () => {
     await expect(adapterFor().getWindsPoint({ latitudeDeg: 44.4, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).rejects.toMatchObject({ code: 'upstream_no_data' });
   });
 
+  it('decodes official Hawaii products with the published 1000, 1500, and 2000 foot columns', () => {
+    const hawaiiProduct = `000\nFBHW31 KWNO 242001\nFD1HW1\nDATA BASED ON 241800Z\nVALID 250000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  1000 1500 2000 3000    6000    9000   12000\nLIH 0615 0617 0719 0823 0718+13 0518+13 0616+08\nLNY      0730 0828 0917 1010+12 0805+07 0810+03\n`;
+    const [forecast] = decodeWindsProduct(hawaiiProduct, '06', new Date('2026-09-24T18:30:00.000Z'));
+    expect(forecast?.levels.slice(0, 5)).toMatchObject([
+      { altitudeFt: 1000, windFromDegTrue: 60, windSpeedKt: 15 },
+      { altitudeFt: 1500, windFromDegTrue: 60, windSpeedKt: 17 },
+      { altitudeFt: 2000, windFromDegTrue: 70, windSpeedKt: 19 },
+      { altitudeFt: 3000, windFromDegTrue: 80, windSpeedKt: 23 },
+      { altitudeFt: 6000, windFromDegTrue: 70, windSpeedKt: 18, temperatureC: 13 }
+    ]);
+    const lny = decodeWindsProduct(hawaiiProduct, '06', new Date('2026-09-24T18:30:00.000Z')).find((item) => item.stationId === 'LNY');
+    expect(lny?.levels.slice(0, 4)).toMatchObject([
+      { altitudeFt: 1000, availability: 'unavailable', windSpeedKt: null },
+      { altitudeFt: 1500, windFromDegTrue: 70, windSpeedKt: 30 },
+      { altitudeFt: 2000, windFromDegTrue: 80, windSpeedKt: 28 },
+      { altitudeFt: 3000, windFromDegTrue: 90, windSpeedKt: 17 }
+    ]);
+    expect(decodeWindsProduct(hawaiiProduct, '06', new Date('2026-09-24T18:30:00.000Z'))[0]?.levels[0]?.raw).toBe('0615');
+  });
+
+  it('serves a Hawaii point from official-format winds rows', async () => {
+    const hawaiiProduct = `000\nFBHW31 KWNO 242001\nFD1HW1\nDATA BASED ON 241800Z\nVALID 250000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  1000 1500 2000 3000    6000    9000   12000\nLIH 0615 0617 0719 0823 0718+13 0518+13 0616+08\nLNY      0730 0828 0917 1010+12 0805+07 0810+03\n`;
+    const regionCatalog = [
+      { iataId: 'LIH', faaId: 'LIH', icaoId: 'PHLI', site: 'Lihue', lat: 21.975, lon: -159.338, elev: 153 },
+      { iataId: 'LNY', faaId: 'LNY', icaoId: 'PHNY', site: 'Lanai City', lat: 20.785, lon: -156.951, elev: 1308 }
+    ];
+    const adapter = adapterFor({
+      current: () => new Date('2026-09-24T18:30:00.000Z'),
+      product: async (cycle) => new Response(cycle === '12'
+        ? hawaiiProduct.replace('VALID 250000Z   FOR USE 2000-0300Z', 'VALID 250600Z   FOR USE 0200-0900Z')
+        : cycle === '24' ? hawaiiProduct.replace('VALID 250000Z   FOR USE 2000-0300Z', 'VALID 251800Z   FOR USE 1400-2100Z') : hawaiiProduct),
+      catalog: () => catalogResponse(regionCatalog)
+    });
+    await expect(adapter.getWindsPoint({ latitudeDeg: 21.3, longitudeDeg: -157.9, altitudeFeetMsl: 4500, plannedUtc: '2026-09-25T01:00:00.000Z' }))
+      .resolves.toMatchObject({ forecastCycle: '06', temperatureC: null, sources: expect.arrayContaining([expect.objectContaining({ stationId: 'LNY', temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null })]) });
+  });
+
+  it('ignores forecast rows without usable exact catalog identities', async () => {
+    const abqRow = product.split('\n').find((line) => line.startsWith('ABQ '))!;
+    const unknownRow = abqRow.replace(/^ABQ/, 'CZI');
+    const offRegionRow = abqRow.replace(/^ABQ/, 'MBW');
+    const withExtraStations = product.replace('\nABQ ', `\n${unknownRow}\n${offRegionRow}\nABQ `);
+    const mixedCatalog = [...catalog, { iataId: 'MBW', faaId: 'MBW', icaoId: 'YMBW', site: 'Outside product region', lat: -37.98, lon: 145.096, elev: 0 }];
+    const sourceForCycle = (cycle: string) => cycle === '12' ? withExtraStations.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+      : cycle === '24' ? withExtraStations.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : withExtraStations;
+    const answer = await adapterFor({ product: async (cycle) => new Response(sourceForCycle(cycle)), catalog: () => catalogResponse(mixedCatalog) }).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    expect(answer.sources.map((source) => source.stationId)).toEqual(['ABQ', 'ATL']);
+  });
+
+  it('returns unavailable when no exact, region-verified nearby station remains', async () => {
+    const noVerifiedRows = product.replace(/^ABQ /gm, 'CZI ').replace(/^ATL /gm, 'CZI ');
+    await expect(adapterFor({ product: async (cycle) => new Response(cycle === '12'
+      ? noVerifiedRows.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+      : cycle === '24' ? noVerifiedRows.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : noVerifiedRows) })
+      .getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_no_data' });
+  });
+
+  it('excludes conflicting catalog identities from point sources', async () => {
+    const conflictingCatalog = [...catalog, { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Conflicting identity', lat: 42.6, lon: -89, elev: 0 }];
+    const answer = await adapterFor({ catalog: () => catalogResponse(conflictingCatalog) }).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    expect(answer.sources.map((source) => source.stationId)).toEqual(['ATL']);
+  });
+
   it('selects the newest issued product whose published use window contains the planned UTC', async () => {
     const query = { latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T07:00:00.000Z' };
     await expect(adapterFor({ product: async (cycle) => new Response(cycle === '12'
@@ -141,9 +205,9 @@ describe('winds point request', () => {
   });
 
   it('accepts and caches a valid source over 512 KiB while rejecting one over its finite cap', async () => {
-    const widths = [4, 8, 8, 8, 8, 8, 7, 7, 7];
-    const fields = ['3520', '3520+15', '3520+10', '3520+05', '3520-05', '3520-10', '3520-20', '3520-30', '3520-40'];
-    const row = (stationId: string, direction: string) => `${stationId} ${[direction, ...fields.slice(1)].map((value, index) => value.padEnd(widths[index]!, ' ')).join('')}`;
+    const widths = [4, 7, 7, 7, 7, 7, 6, 6, 6];
+    const fields = ['3520', '3520+15', '3520+10', '3520+05', '3520-05', '3520-10', '352034', '352144', '352254'];
+    const row = (stationId: string, direction: string) => `${stationId} ${[direction, ...fields.slice(1)].map((value, index) => value.padEnd(widths[index]!, ' ')).join(' ')}`;
     const extraEntries = Array.from({ length: 8_998 }, (_, index) => {
       const id = index.toString(36).toUpperCase().padStart(3, '0');
       return { iataId: id, faaId: id, icaoId: `K${id}`, site: `Fixture ${id}`, lat: 35, lon: -100, elev: 0 };

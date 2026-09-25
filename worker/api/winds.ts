@@ -236,22 +236,19 @@ function requireStationBudget(count: number): void {
   if (count > MAX_PRODUCT_STATIONS) throw new ApiError('Aviation Weather Center returned a Winds/Temps product with too many stations.', 502, 'upstream_invalid_response');
 }
 
-/**
- * FB fixed-width fields are not aligned to the display start of every altitude
- * label. The 3,000-ft group has no temperature (4 chars), 6,000–24,000-ft
- * groups reserve 8 chars, and 30,000-ft-and-above groups reserve 7 chars.
- */
-function fbColumnWidth(altitudeFt: number): number {
-  if (altitudeFt === 3_000) return 4;
-  return altitudeFt >= 30_000 ? 7 : 8;
+function fbSeparatedColumnWidth(altitudeFt: number): number {
+  // Official FB rows separate groups with one space; 3,000-ft groups carry
+  // four characters, 6,000–24,000-ft groups seven, and high groups six.
+  if (altitudeFt <= 3_000) return 4;
+  return altitudeFt >= 30_000 ? 6 : 7;
 }
 
 function fixedWidthLevels(row: string, columns: readonly { altitudeFt: number; start: number }[]): WindsAloftLevel[] {
-  let start = columns[0]!.start;
-  return columns.map((column) => {
-    const width = fbColumnWidth(column.altitudeFt);
-    const raw = row.slice(start, start + width).trim();
-    start += width;
+  let cursor = columns[0]!.start;
+  return columns.map((column, index) => {
+    const width = fbSeparatedColumnWidth(column.altitudeFt);
+    const raw = row.slice(cursor, cursor + width).trim();
+    cursor += width + (index < columns.length - 1 ? 1 : 0);
     return decodeLevel(column.altitudeFt, raw);
   });
 }
@@ -269,18 +266,15 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
   const header = levelsMatch[0];
   const columns = [...header.matchAll(/\b\d{4,5}\b/g)].map((match) => ({ altitudeFt: Number(match[0]), start: match.index as number }));
   const altitudes = columns.map((column) => column.altitudeFt);
-  if (altitudes.length === 0 || altitudes.some((altitude) => !Number.isSafeInteger(altitude) || altitude < 3_000 || altitude > 53_000)) throw new ApiError('Aviation Weather Center returned invalid Winds/Temps altitude columns.', 502, 'upstream_invalid_response');
+  if (altitudes.length === 0 || altitudes.some((altitude) => !Number.isSafeInteger(altitude) || altitude < 1_000 || altitude > 53_000)) throw new ApiError('Aviation Weather Center returned invalid Winds/Temps altitude columns.', 502, 'upstream_invalid_response');
   const dataStart = (levelsMatch.index ?? 0) + header.length;
   const rows = normalized.slice(dataStart).split('\n').filter((line) => line.trim().length > 0);
   if (rows.length > MAX_PRODUCT_LINES) throw new ApiError('Aviation Weather Center returned a Winds/Temps product with too many rows.', 502, 'upstream_invalid_response');
-  const forecasts: DecodedForecast[] = [];
-  for (const row of rows) {
-    const stationId = row.slice(0, columns[0]!.start).trim();
-    if (!stationId || !/^[A-Z0-9]{3}$/.test(stationId)) continue;
-    const levels = fixedWidthLevels(row, columns);
-    forecasts.push({ stationId, forecastCycle: cycle, issuedAt: issuedAt.toISOString(), validAt: validAt.toISOString(), useFrom: useFrom.toISOString(), useUntil: useUntil.toISOString(), levels });
-    requireStationBudget(forecasts.length);
-  }
+  const stationRows = rows.map((row) => ({ row, stationId: row.slice(0, columns[0]!.start).trim() }))
+    .filter(({ stationId }) => /^[A-Z0-9]{3}$/.test(stationId));
+  const forecasts: DecodedForecast[] = stationRows.map(({ row, stationId }) => ({ stationId, forecastCycle: cycle,
+    issuedAt: issuedAt.toISOString(), validAt: validAt.toISOString(), useFrom: useFrom.toISOString(), useUntil: useUntil.toISOString(), levels: fixedWidthLevels(row, columns) }));
+  requireStationBudget(forecasts.length);
   if (forecasts.length === 0) throw new ApiError('Aviation Weather Center returned a Winds/Temps product without reporting stations.', 502, 'upstream_invalid_response');
   return forecasts;
 }
@@ -326,6 +320,28 @@ function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[
     catch { throw new ApiError('Aviation Weather Center station catalog placed a reported station outside its supported product region.', 502, 'upstream_invalid_response'); }
     if (actualRegion !== expectedRegion) throw new ApiError('Aviation Weather Center station catalog placed a reported station in a different product region.', 502, 'upstream_invalid_response');
     result.set(identifier, records[0]!);
+  }
+  return result;
+}
+
+/** Point interpolation only uses exact, unique, catalog-verified identities in the product region. */
+function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
+  const requestedIds = new Set(stationIds);
+  const matches = new Map<string, StationInfo[]>();
+  for (const entry of catalog.entries) for (const identifier of entry.identifiers) {
+    if (requestedIds.has(identifier)) {
+      const records = matches.get(identifier) ?? [];
+      records.push({ id: identifier, ...entry.info });
+      matches.set(identifier, records);
+    }
+  }
+  const result = new Map<string, StationInfo>();
+  for (const identifier of requestedIds) {
+    const records = matches.get(identifier) ?? [];
+    if (records.length !== 1) continue;
+    try {
+      if (regionForPoint(records[0]!.coordinates) === expectedRegion) result.set(identifier, records[0]!);
+    } catch { /* Uncovered catalog entries cannot participate in geographic math. */ }
   }
   return result;
 }
@@ -557,7 +573,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       const { products, unavailableCycles, failures } = await allProducts(region);
       const chosen = chooseApplicableProduct(products, unavailableCycles, failures, query, current);
       const ids = [...new Set(chosen.product.forecasts.map((forecast) => forecast.stationId))].sort();
-      const identities = stationInfo(await stationCatalog(), ids, region);
+      const identities = pointStationInfo(await stationCatalog(), ids, region);
       const stations = selectPointStations(query, chosen, identities);
       return answerFromPointStations(query, chosen, stations);
     },
