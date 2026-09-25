@@ -93,6 +93,7 @@ export interface AloftPointAnswer {
   useFrom: string;
   useUntil: string;
   forecastCycle: WindsForecastCycle;
+  product: { region: WindsRegion; cycle: WindsForecastCycle; cache: Pick<CacheProvenance, 'status' | 'source' | 'ageSeconds' | 'fetchedAt' | 'expiresAt' | 'freshnessRemainingSeconds' | 'servedAt'> };
   sources: AloftSourceWeight[];
   method: 'station-level' | 'vertical-vector' | 'horizontal-vector' | 'horizontal-vertical-vector';
   requestId: string;

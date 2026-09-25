@@ -198,7 +198,7 @@ const isTafWind = (value: Record<string, unknown>): boolean =>
   (value.windDirectionType === "fixed" ? value.windFromDegTrue !== null && value.windSpeedKt !== null : value.windDirectionType === "variable" ? value.windFromDegTrue === null && value.windSpeedKt !== null : value.windDirectionType === "missing" && value.windFromDegTrue === null && value.windSpeedKt === null);
 const isTafGroup = (value: unknown): value is TafWindGroup => isRecord(value) &&
   oneOf(value.kind, ["prevailing", "FM", "TEMPO", "PROB"]) && oneOf(value.windDirectionType, ["fixed", "variable", "missing"]) && isUtcMilliseconds(value.fromUtc) && isUtcMilliseconds(value.untilUtc) &&
-  Date.parse(value.fromUtc) < Date.parse(value.untilUtc) && isTafWind(value) && nullable(value.probabilityPercent, (n) => isBoundedInteger(n, 0, 100)) &&
+  Date.parse(value.fromUtc) < Date.parse(value.untilUtc) && isTafWind(value) && nullable(value.probabilityPercent, (n) => n === 30 || n === 40) &&
   (value.kind === "PROB" ? value.probabilityPercent !== null : value.probabilityPercent === null) && isString(value.raw, 4096);
 const isTafPayload = (value: unknown): value is TafAnswer => isRecord(value) &&
   isString(value.stationIcao, 4) && /^[A-Z0-9]{4}$/.test(value.stationIcao) && isUtcMilliseconds(value.issuedAt) &&
@@ -209,6 +209,8 @@ const isTafPayload = (value: unknown): value is TafAnswer => isRecord(value) &&
 const isRequestId = (value: unknown): value is string => isString(value, 128) && /^[0-9a-f-]{8,128}$/i.test(value);
 
 const POINT_QUERY_KEYS = ["latitudeDeg", "longitudeDeg", "altitudeFeetMsl", "plannedUtc"] as const;
+const POINT_PRODUCT_KEYS = ["region", "cycle", "cache"] as const;
+const POINT_CACHE_KEYS = ["status", "source", "ageSeconds", "fetchedAt", "expiresAt", "freshnessRemainingSeconds", "servedAt"] as const;
 const POINT_SOURCE_KEYS = ["stationId", "latitudeDeg", "longitudeDeg", "distanceNauticalMiles", "horizontalWeight", "lowerAltitudeFeet", "upperAltitudeFeet", "verticalWeight", "lowerWindFromDegTrue", "lowerWindSpeedKt", "upperWindFromDegTrue", "upperWindSpeedKt", "temperatureLowerAltitudeFeet", "temperatureUpperAltitudeFeet", "temperatureVerticalWeight", "temperatureLowerC", "temperatureUpperC"] as const;
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 const isAloftPointQuery = (value: unknown): value is AloftPointQuery => isRecord(value) && hasExactKeys(value, POINT_QUERY_KEYS) &&
@@ -234,14 +236,20 @@ const isPointSourceSet = (value: unknown): value is AloftSourceWeight[] => {
 const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && value >= 0 && value <= 360;
 const isPointWind = (direction: unknown, speed: unknown): boolean => isBoundedNumber(speed, 0, 199) &&
   ((speed === 0 && direction === null) || isPointDirection(direction));
+const isPointCacheProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_CACHE_KEYS) &&
+  oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh", "stale_while_refresh", "stale_on_error"]) && oneOf(value.source, ["edge", "kv", "upstream", "stale"]) &&
+  isFiniteNumber(value.ageSeconds) && value.ageSeconds >= 0 && isUtcMilliseconds(value.fetchedAt) && isUtcMilliseconds(value.expiresAt) &&
+  isFiniteNumber(value.freshnessRemainingSeconds) && value.freshnessRemainingSeconds >= 0 && isUtcMilliseconds(value.servedAt);
+const isPointProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_PRODUCT_KEYS) &&
+  isRegion(value.region) && isForecastCycle(value.cycle) && isPointCacheProduct(value.cache);
 const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMilliseconds(value.issuedAt) && isUtcMilliseconds(value.useFrom) && isUtcMilliseconds(value.useUntil) &&
   Date.parse(value.issuedAt) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse(value.useFrom) < Date.parse(value.useUntil) &&
   Date.parse(value.useFrom) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse((value.query as AloftPointQuery).plannedUtc) < Date.parse(value.useUntil);
-const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "requestId"] as const;
+const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "product", "requestId"] as const;
 const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && hasExactKeys(value, POINT_ANSWER_KEYS) &&
   isAloftPointQuery(value.query) && isPointWind(value.windFromDegTrue, value.windSpeedKt) && nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)) &&
   isPointAnswerTiming(value) && isForecastCycle(value.forecastCycle) && isPointSourceSet(value.sources) &&
-  oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]) && isRequestId(value.requestId);
+  oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]) && isPointProduct(value.product) && isRequestId(value.requestId);
 
 const isStationsPayload = (value: unknown): value is WindsStationsSuccessPayload =>
   isRecord(value) && all(

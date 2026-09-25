@@ -32,7 +32,7 @@ const taf = (shiftAt = "2029-09-21T16:00:00.000Z"): TafAnswer => ({
 });
 const answer = (query: AloftPointQuery, direction: number, speed: number, useUntil = periodEnd, useFrom = departure, issuedAt = departure): AloftPointAnswer => ({
   query, windFromDegTrue: direction, windSpeedKt: speed, temperatureC: null, issuedAt, useFrom, useUntil,
-  forecastCycle: "06", sources: [{ stationId: "BRL", latitudeDeg: 40.7, longitudeDeg: -91.1, distanceNauticalMiles: 30, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 1, lowerWindFromDegTrue: direction, lowerWindSpeedKt: speed, upperWindFromDegTrue: direction, upperWindSpeedKt: speed, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null }],
+  forecastCycle: "06", product: { region: "us", cycle: "06", cache: { status: "kv_hit", source: "kv", ageSeconds: 60, fetchedAt: "2029-09-21T11:59:00.000Z", expiresAt: departure, freshnessRemainingSeconds: 300, servedAt: departure } }, sources: [{ stationId: "BRL", latitudeDeg: 40.7, longitudeDeg: -91.1, distanceNauticalMiles: 30, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 1, lowerWindFromDegTrue: direction, lowerWindSpeedKt: speed, upperWindFromDegTrue: direction, upperWindSpeedKt: speed, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null }],
   method: "station-level", requestId: `point-${query.latitudeDeg.toFixed(3)}-${query.longitudeDeg.toFixed(3)}`,
 });
 const endpoints = { departureMetar: metar(), destinationTaf: taf() };
@@ -82,6 +82,8 @@ const assertProgressiveSnapshotEvidence = (result: Awaited<ReturnType<typeof pla
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("departure surface-to-aloft blend fraction");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("BRL lower wind speed");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("BRL upper wind from");
+  expect(climbRow?.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "winds product cache status", value: "kv_hit" }));
+  expect(climbRow?.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "winds product cycle", value: "06" }));
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("KORD");
 };
 const assertProgressiveCallContract = (draft: ReturnType<typeof planDraft>, outcome: Awaited<ReturnType<typeof planWith>>) => {

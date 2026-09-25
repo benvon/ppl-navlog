@@ -61,6 +61,8 @@ describe('winds point request', () => {
     expect(answer.windFromDegTrue).toBeCloseTo(0, 0);
     expect(answer.windSpeedKt).toBeGreaterThan(19);
     expect(answer.temperatureC).toBe(12.5);
+    expect(answer.product).toMatchObject({ region: 'us', cycle: answer.forecastCycle, cache: { status: 'upstream_refresh', source: 'upstream', freshnessRemainingSeconds: 1200 } });
+    expect(Object.keys(answer.product.cache).sort()).toEqual(['ageSeconds', 'expiresAt', 'fetchedAt', 'freshnessRemainingSeconds', 'servedAt', 'source', 'status']);
     expect(answer.sources).toHaveLength(2);
     expect(answer.sources.reduce((sum, source) => sum + source.horizontalWeight, 0)).toBeCloseTo(1);
     expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 6000, upperAltitudeFeet: 9000, verticalWeight: 0.5, lowerWindFromDegTrue: 350, lowerWindSpeedKt: 20, upperWindFromDegTrue: 350, upperWindSpeedKt: 20, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 9000, temperatureVerticalWeight: 0.5, temperatureLowerC: 15, temperatureUpperC: 10 });

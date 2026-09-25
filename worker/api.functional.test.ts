@@ -185,7 +185,7 @@ describe('Worker API functional contracts', () => {
     const response = await api('/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z', env({ WINDS_CACHE: memoryCache() }));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ query: { latitudeDeg: 35.0402, longitudeDeg: -106.609, altitudeFeetMsl: 9000 }, forecastCycle: '06', windSpeedKt: 0, requestId: FIXED_REQUEST_ID });
+    await expect(response.json()).resolves.toMatchObject({ query: { latitudeDeg: 35.0402, longitudeDeg: -106.609, altitudeFeetMsl: 9000 }, forecastCycle: '06', product: { region: 'us', cycle: '06', cache: { status: 'upstream_refresh', source: 'upstream' } }, windSpeedKt: 0, requestId: FIXED_REQUEST_ID });
     expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
     expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
   });

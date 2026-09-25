@@ -472,7 +472,7 @@ function answerFromPointStations(query: AloftPointQuery, chosen: ApplicableProdu
   const vertical = stations.some((station) => station.levels.lower.altitudeFt !== station.levels.upper.altitudeFt);
   const horizontal = stations.length > 1;
   return { query, windFromDegTrue: wind.direction, windSpeedKt: wind.speed, temperatureC: temperatureAvailable ? temperatureTotal : null, issuedAt: chosen.forecast.issuedAt, useFrom: chosen.forecast.useFrom, useUntil: chosen.forecast.useUntil,
-    forecastCycle: chosen.forecast.forecastCycle, sources, method: horizontal ? (vertical ? 'horizontal-vertical-vector' : 'horizontal-vector') : (vertical ? 'vertical-vector' : 'station-level'), requestId: '' };
+    forecastCycle: chosen.forecast.forecastCycle, product: { region: chosen.product.region, cycle: chosen.product.cycle, cache: { status: chosen.provenance.status, source: chosen.provenance.source, ageSeconds: chosen.provenance.ageSeconds, fetchedAt: chosen.provenance.fetchedAt, expiresAt: chosen.provenance.expiresAt, freshnessRemainingSeconds: chosen.provenance.freshnessRemainingSeconds, servedAt: chosen.provenance.servedAt } }, sources, method: horizontal ? (vertical ? 'horizontal-vertical-vector' : 'horizontal-vector') : (vertical ? 'vertical-vector' : 'station-level'), requestId: '' };
 }
 
 export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: CacheStore | undefined, now: () => Date = () => new Date()): WindsDataAdapter {
