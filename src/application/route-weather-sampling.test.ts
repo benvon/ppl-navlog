@@ -10,6 +10,7 @@ import { planDraft, aircraftProfile } from "../services/storage/__tests__/fixtur
 import { createFullNavlogCalculationEngine } from "./full-navlog-engine";
 import { calculateCompletePlan } from "./complete-plan";
 import { resolveRouteWeather } from "./route-weather-sampling";
+import { selectArrivalTafWind } from "./arrival-taf-wind";
 
 const departure = "2029-09-21T12:00:00.000Z";
 const periodEnd = "2029-09-21T18:00:00.000Z";
@@ -36,12 +37,13 @@ const answer = (query: AloftPointQuery, direction: number, speed: number, useUnt
 });
 const endpoints = { departureMetar: metar(), destinationTaf: taf() };
 
-async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query: AloftPointQuery) => number, options: { useUntil?: string | ((query: AloftPointQuery) => string); useFrom?: string | ((query: AloftPointQuery) => string); issuedAt?: string | ((query: AloftPointQuery) => string); destinationTaf?: TafAnswer; destinationMetar?: MetarSuccessPayload; speed?: number } = {}) {
+async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query: AloftPointQuery) => number, options: { useUntil?: string | ((query: AloftPointQuery) => string); useFrom?: string | ((query: AloftPointQuery) => string); issuedAt?: string | ((query: AloftPointQuery) => string); destinationTaf?: TafAnswer; destinationMetar?: MetarSuccessPayload; speed?: number; profile?: ReturnType<typeof aircraftProfile> } = {}) {
   const queries: AloftPointQuery[] = [];
-  const solution = await resolveRouteWeather(draft, aircraftProfile(), {
+  const profile = options.profile ?? aircraftProfile();
+  const solution = await resolveRouteWeather(draft, profile, {
     async fetchPoint(query) { queries.push(query); return answer(query, directionAt(query), options.speed ?? 15, typeof options.useUntil === "function" ? options.useUntil(query) : options.useUntil, typeof options.useFrom === "function" ? options.useFrom(query) : options.useFrom, typeof options.issuedAt === "function" ? options.issuedAt(query) : options.issuedAt); },
   }, { ...endpoints, destinationTaf: options.destinationTaf ?? taf(), ...(options.destinationMetar === undefined ? {} : { destinationMetar: options.destinationMetar }) });
-  const result = await calculateCompletePlan(draft, aircraftProfile(), {
+  const result = await calculateCompletePlan(draft, profile, {
     weather: { resolve: async () => solution.weather },
     calculations: createFullNavlogCalculationEngine(),
   });
@@ -286,6 +288,43 @@ describe("route waypoint weather sampling", () => {
     expect(JSON.stringify(terminalRows.map((row) => row.effectiveWind.trace.inputs))).toContain("destination TAF selected group until");
   });
 
+  it("retains bounded endpoint source provenance in the calculated snapshot", async () => {
+    const { result } = await planWith({ ...planDraft(), departureTimeUtc: departure }, () => 270);
+    expect(result).toMatchObject({ calculationSnapshot: { weather: { endpointSources: {
+      departureMetar: { stationIcao: "KORD", requestId: "metar-request", observedAt: departure, cache: { status: "upstream_refresh" } },
+      destinationTaf: { stationIcao: "KJVL", requestId: "taf-request", issuedAt: departure, validFrom: departure, validUntil: "2029-09-22T12:00:00.000Z" },
+    } } } });
+  });
+
+  it("ranks arrival TAF groups using the final terminal segment course", async () => {
+    const base = planDraft();
+    const farDestination = asCoordinate(60, -20);
+    const checkpoint = asCoordinate(40, -80);
+    const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, points: [base.route.points[0]!, { ...base.route.points[1]!, coordinate: checkpoint }, { ...base.route.points[2]!, coordinate: farDestination }] } };
+    const longTaf: TafAnswer = {
+      ...taf(), validUntil: "2030-09-23T12:00:00.000Z",
+      groups: [
+        { kind: "prevailing", fromUtc: departure, untilUtc: "2030-09-23T12:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 15, gustKt: null, probabilityPercent: null, raw: "27015KT" },
+        { kind: "TEMPO", fromUtc: departure, untilUtc: "2030-09-23T12:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 0, windSpeedKt: 15, gustKt: null, probabilityPercent: null, raw: "TEMPO 00015KT" },
+        { kind: "TEMPO", fromUtc: departure, untilUtc: "2030-09-23T12:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 85, windSpeedKt: 15, gustKt: null, probabilityPercent: null, raw: "TEMPO 08515KT" },
+      ],
+    };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const { result } = await planWith(draft, () => 270, { destinationTaf: longTaf, useUntil: "2030-09-23T12:00:00.000Z", profile });
+    const rows = navRows(result);
+    const finalRow = rows.at(-1)!;
+    const terminalCourse = finalRow.subleg.trueCourse;
+    const finalLegStart = draft.route.points.at(-2)!.coordinate;
+    const finalLeg = calculateGreatCircleDistanceAndInitialCourse(finalLegStart, farDestination);
+    if (!finalLeg.ok) throw new Error(finalLeg.error.message);
+    expect(terminalCourse).toBeGreaterThan(80);
+    const arrivalUtc = new Date(Date.parse(departure) + finalRow.cumulative.estimatedTimeEnroute * 60_000).toISOString();
+    const rankedAtTerminalCourse = selectArrivalTafWind(longTaf, arrivalUtc, terminalCourse, profile.descentTasKnots);
+    const rankedAtInitialCourse = selectArrivalTafWind(longTaf, arrivalUtc, finalLeg.value.initialTrueCourse, profile.descentTasKnots);
+    expect(rankedAtTerminalCourse.selectedGroup.raw, JSON.stringify({ terminalCourse, initialCourse: finalLeg.value.initialTrueCourse, candidates: rankedAtTerminalCourse.candidates.map((candidate) => [candidate.group.raw, candidate.groundspeedKt]) })).not.toBe(rankedAtInitialCourse.selectedGroup.raw);
+    expect(finalRow.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "destination TAF selected group raw", value: rankedAtTerminalCourse.selectedGroup.raw }));
+  });
+
   it("uses a fresh destination METAR for a feasible TOD inside the five mile ring without adding a point call", async () => {
     const baseDraft = { ...planDraft(), departureTimeUtc: departure };
     const draft = { ...baseDraft, weatherSelection: { ...baseDraft.weatherSelection, departureMetarIcao: "KMSN", destinationTafIcao: "KMSN", destinationMetarIcao: "KMSN" } };
@@ -327,6 +366,10 @@ describe("route waypoint weather sampling", () => {
     expect(result.status).toBe("ready");
     const descentRows = navRows(result).filter((row) => row.subleg.phase === "descent");
     expect(descentRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("Destination TAF"))).toBe(true);
+    expect(result).toMatchObject({ calculationSnapshot: { weather: { endpointSources: {
+      destinationTaf: { selectedForTerminalWind: true },
+      destinationMetar: { stationIcao: "KJVL", selectedForTerminalWind: false },
+    } } } });
   });
 
   it("rejects a within-ring descent that cannot reach pattern target at the configured descent rate", async () => {

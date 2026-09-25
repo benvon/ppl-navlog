@@ -53,6 +53,26 @@ describe("calculation inspector", () => {
     expect(renderCalculationInspector(undefined, undefined).textContent).toContain("Choose a value");
   });
 
+  it("shows endpoint weather request and cache provenance with a selected result", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", weather: { endpointSources: {
+        departureMetar: { stationIcao: "KORD", requestId: "dep-1", fetchedAt: "2026-09-22T12:00:00Z", observedAt: "2026-09-22T11:45:00Z", selectedForTerminalWind: false, cache: { status: "kv_hit", source: "kv", fetchedAt: "2026-09-22T12:00:00Z", expiresAt: "2026-09-22T12:05:00Z", freshnessRemainingSeconds: 300 } },
+        destinationTaf: { stationIcao: "KJVL", requestId: "taf-1", issuedAt: "2026-09-22T10:00:00Z", validFrom: "2026-09-22T12:00:00Z", validUntil: "2026-09-23T12:00:00Z", selectedForTerminalWind: true },
+        destinationMetar: { stationIcao: "KJVL", requestId: "metar-1", fetchedAt: "2026-09-22T12:00:00Z", observedAt: "2026-09-22T11:00:00Z", selectedForTerminalWind: false, cache: { status: "stale_on_error", source: "stale", fetchedAt: "2026-09-22T12:00:00Z", expiresAt: "2026-09-22T11:00:00Z", freshnessRemainingSeconds: 0 } },
+      } }, navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise" }, assumptions: [], appliedOverrides: [] }] } },
+    };
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
+    expect(rendered.textContent).toContain("Endpoint weather sources");
+    expect(rendered.textContent).toContain("KORD; request dep-1");
+    expect(rendered.textContent).toContain("cache kv_hit");
+    expect(rendered.textContent).toContain("from kv; fetched 2026-09-22T12:00:00Z; expires 2026-09-22T12:05:00Z; freshness 300 seconds");
+    expect(rendered.textContent).toContain("KJVL; request taf-1");
+    expect(rendered.textContent).toContain("valid 2026-09-22T12:00:00Z to 2026-09-23T12:00:00Z");
+    expect(rendered.textContent).toContain("Destination TAF (Selected for terminal wind)");
+    expect(rendered.textContent).toContain("Destination METAR (Fetched source; not selected for terminal wind)");
+  });
+
   it("shows wind provenance and a phase-allocation explanation when no calculation trace applies", () => {
     const revision = {
       ...planRevision(),
