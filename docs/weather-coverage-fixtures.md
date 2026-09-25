@@ -38,3 +38,21 @@ Each Update plan sends exactly one point query for each pilot route waypoint, in
 | ITO–HNL Hawaii station-pair geometry | 19.7191, -155.0490 → 21.3187, -157.9224 | 188 NM | 2 | 2 |
 
 The latter three are station-pair geometries, not validated flight plans or proof of forecast coverage. The KORD checkpoint coordinates and distance are from the existing KORD→KJVL mixed-altitude fixture; distances are great-circle geometry rounded to the nearest nautical mile. FAI–BRW midpoint is outside the Worker 100 NM station limit; CONUS station fixtures are sparse. Every requested waypoint must be individually resolved by the Worker. The browser starts at planned departure UTC and validates each returned issue/use window against its progressive query UTC and corrected waypoint UTC before requesting another point; final validation then checks each calculated waypoint UTC and requires adjacent answer windows jointly to cover each leg's full calculated time interval without a gap. A point whose period expires or starts too late, or a gap between adjacent product windows, blocks this Update. The calculation does not refetch or substitute another period.
+
+## Local Worker live-source smoke (2026-09-25 00:36–00:38 UTC)
+
+The local development Worker queried current official AWC products after the regional decoder and TAF parser corrections. The selected 06-cycle point answers were issued at 2026-09-24 18:00 UTC and usable from 20:00 to 03:00 UTC. Response sizes below are the decoded local API bodies; the same-time direct AWC regional `low` product downloads returned 12,504 bytes for CONUS, 2,704 for Alaska, and 618 for Hawaii, with HTTP 200 for all three 06/12/24 cycle requests (28–609 ms). This is an integration snapshot, not a claim of universal coverage.
+
+| Query | Result | API body | Duration | Verified point sources |
+| --- | --- | ---: | ---: | --- |
+| BRL area, 4,500 ft | 200 | 1,415 bytes | 84 ms | BRL, SPI, DBQ |
+| ORD area, 4,500 ft | 200 | 712 bytes | 32 ms | JOT |
+| Fairbanks area, 4,500 ft | 200 | 741 bytes | 47 ms | FAI |
+| Honolulu area, 4,500 ft | 200 | 1,418 bytes | 161 ms | HNL, LNY, OGG |
+| Hilo area, 4,500 ft | 200 | 1,100 bytes | 25 ms | ITO, KOA |
+| Denver area, 7,500 ft | 404 `upstream_no_data` | 164 bytes | 36 ms | No usable bracketed levels |
+| Denver area, 9,000 ft | 200 | — | 31 ms | DEN, PUB |
+| Sparse Alaska FAI–BRW gap, 4,500 ft | 404 `upstream_no_data` | 164 bytes | 14 ms | No verified source within the supported bound |
+| KJVL destination TAF | 200 | 1,302 bytes | 78 ms | Prevailing, PROB, FM groups |
+
+The Denver failures at 4,500 and 7,500 ft demonstrate that being inside a published region does not guarantee usable altitude levels. The 9,000-ft point resolved without extrapolation. The local TAF reported a 2026-09-24 23:30 UTC issue and validity from 2026-09-25 00:00 to 2026-09-26 00:00 UTC. A local Worker smoke does not test the deployed Worker binding or a complete browser flight plan.
