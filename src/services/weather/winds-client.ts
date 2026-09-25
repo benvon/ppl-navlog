@@ -231,7 +231,7 @@ const isPointSourceSet = (value: unknown): value is AloftSourceWeight[] => {
   if (!Array.isArray(value) || value.length < 1 || value.length > 3 || !value.every(isAloftSourceWeight)) return false;
   return Math.abs(value.reduce((total, source) => total + source.horizontalWeight, 0) - 1) <= 0.001;
 };
-const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && value >= 0 && value < 360;
+const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && value >= 0 && value <= 360;
 const isPointWind = (direction: unknown, speed: unknown): boolean => isBoundedNumber(speed, 0, 199) &&
   ((speed === 0 && direction === null) || isPointDirection(direction));
 const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMilliseconds(value.issuedAt) && isUtcMilliseconds(value.useFrom) && isUtcMilliseconds(value.useUntil) &&

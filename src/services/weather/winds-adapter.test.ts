@@ -387,6 +387,12 @@ describe("WorkerWindsAdapter", () => {
     };
     const client = new WorkerWindsClient({ fetch: async () => Response.json(answer) }, "https://navlog.example");
     await expect(client.fetchPoint(query)).resolves.toMatchObject({ query, windSpeedKt: 14 });
+    const boundaryClient = new WorkerWindsClient({ fetch: async () => Response.json({
+      ...answer,
+      windFromDegTrue: 360,
+      sources: [{ ...answer.sources[0]!, lowerWindFromDegTrue: 360 }],
+    }) }, "https://navlog.example");
+    await expect(boundaryClient.fetchPoint(query)).resolves.toMatchObject({ query, windFromDegTrue: 360, windSpeedKt: 14 });
     const mismatched = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, query: { ...query, altitudeFeetMsl: 5000 } }) }, "https://navlog.example");
     await expect(mismatched.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     const invalidWeight = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, sources: [{ ...answer.sources[0], horizontalWeight: 2 }] }) }, "https://navlog.example");
