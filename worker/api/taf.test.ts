@@ -3,7 +3,7 @@ import { createTafAdapter } from './taf';
 
 const FIXED = new Date('2026-09-22T00:00:00.000Z');
 const apiGroup = (fcstChange: string | null, timeFrom: number, timeTo: number, wdir: number | 'VRB' | null, wspd: number | null, extra: Record<string, unknown> = {}) => ({ fcstChange, timeFrom, timeTo, wdir, wspd, wgst: null, raw: `${fcstChange ?? 'prevailing'} source`, ...extra });
-const body = (overrides: Record<string, unknown> = {}) => [{ icaoId: 'KORD', issueTime: '2026-09-22T00:00:00.000Z', validTimeFrom: 1790035200, validTimeTo: 1790121600, mostRecent: true, rawTAF: 'TAF KORD fixture', fcsts: [apiGroup(null, 1790035200, 1790121600, 270, 10), apiGroup('FM', 1790042400, 1790121600, 280, 12), apiGroup('TEMPO', 1790042400, 1790049600, 'VRB', 8), apiGroup('PROB30', 1790042400, 1790049600, null, null, { probability: 30 })], ...overrides }];
+const body = (overrides: Record<string, unknown> = {}) => [{ icaoId: 'KORD', issueTime: '2026-09-22T00:00:00.000Z', validTimeFrom: 1790035200, validTimeTo: 1790121600, mostRecent: 1, rawTAF: 'TAF KORD fixture', fcsts: [apiGroup(null, 1790035200, 1790121600, 270, 10), apiGroup('FM', 1790042400, 1790121600, 280, 12), apiGroup('TEMPO', 1790042400, 1790049600, 'VRB', 8), apiGroup('PROB', 1790042400, 1790049600, null, null, { probability: 30 })], ...overrides }];
 const adapterFor = (data: unknown, status = 200) => {
   const requests: Request[] = [];
   const adapter = createTafAdapter({ fetch: async (request) => { requests.push(request); return Response.json(data, { status }); } }, () => FIXED);
@@ -18,7 +18,7 @@ describe('AWC TAF adapter', () => {
     expect(new URL(requests[0]!.url).pathname).toBe('/api/data/taf');
     expect(result.groups.map((group) => group.kind)).toEqual(['prevailing', 'FM', 'TEMPO', 'PROB']);
     expect(result.groups[2]).toMatchObject({ windDirectionType: 'variable', windFromDegTrue: null, windSpeedKt: 8 });
-    expect(result.groups[3]?.probabilityPercent).toBe(30);
+    expect(result.groups[3]).toMatchObject({ probabilityPercent: 30, windDirectionType: 'missing', windFromDegTrue: null, windSpeedKt: null });
   });
 
   it('normalizes omitted conditional wind elements as missing rather than variable', async () => {
@@ -30,7 +30,7 @@ describe('AWC TAF adapter', () => {
 
   it('rejects wrong station, non-most-recent/superseded reports, future issue, and malformed periods', async () => {
     await expect(adapterFor([{ ...body()[0], icaoId: 'KJFK' }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
-    await expect(adapterFor([{ ...body()[0], mostRecent: false }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+    await expect(adapterFor([{ ...body()[0], mostRecent: 0 }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
     await expect(adapterFor([{ ...body()[0], issueTime: '2026-09-22T00:01:00.000Z' }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
     const malformed = body();
     (malformed[0]!.fcsts as Record<string, unknown>[])[0]!.timeTo = 1;
@@ -48,8 +48,8 @@ describe('AWC TAF adapter', () => {
   });
 
   it('uses the latest amendment immediately even when its validity begins in the future', async () => {
-    const prior = { ...body()[0]!, issueTime: '2026-09-21T18:00:00.000Z', mostRecent: false };
-    const amendment = { ...body()[0]!, issueTime: '2026-09-22T00:00:00.000Z', validTimeFrom: 1790042400, mostRecent: true, fcsts: (body()[0]!.fcsts as Record<string, unknown>[]).map((group, index) => index === 0 ? { ...group, timeFrom: 1790042400 } : group) };
+    const prior = { ...body()[0]!, issueTime: '2026-09-21T18:00:00.000Z', mostRecent: 0 };
+    const amendment = { ...body()[0]!, issueTime: '2026-09-22T00:00:00.000Z', validTimeFrom: 1790042400, mostRecent: 1, fcsts: (body()[0]!.fcsts as Record<string, unknown>[]).map((group, index) => index === 0 ? { ...group, timeFrom: 1790042400 } : group) };
     const answer = await adapterFor([prior, amendment]).adapter.getTaf('KORD');
     expect(answer.issuedAt).toBe('2026-09-22T00:00:00.000Z');
     expect(answer.validFrom).toBe('2026-09-22T02:00:00.000Z');

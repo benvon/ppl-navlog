@@ -66,7 +66,7 @@ function aviationWeatherFetch(fetches: Request[]): typeof globalThis.fetch {
           : WINDS_PRODUCT;
       return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
     }
-    if (url.pathname === '/api/data/taf') return Response.json([{ icaoId: 'KORD', issueTime: FIXED_NOW, validTimeFrom: Date.parse(FIXED_NOW) / 1000, validTimeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, mostRecent: true, rawTAF: 'TAF KORD fixture', fcsts: [{ fcstChange: null, timeFrom: Date.parse(FIXED_NOW) / 1000, timeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, wdir: 'VRB', wspd: 8, wgst: 18, raw: 'VRB08G18KT' }] }]);
+    if (url.pathname === '/api/data/taf') return Response.json([{ icaoId: 'KORD', issueTime: FIXED_NOW, validTimeFrom: Date.parse(FIXED_NOW) / 1000, validTimeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, mostRecent: 1, rawTAF: 'TAF KORD fixture', fcsts: [{ fcstChange: null, timeFrom: Date.parse(FIXED_NOW) / 1000, timeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, wdir: 'VRB', wspd: 8, wgst: 18, raw: 'VRB08G18KT' }] }]);
     if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
     return new Response(null, { status: 404 });
   };

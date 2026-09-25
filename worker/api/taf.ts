@@ -45,7 +45,7 @@ function isValidGroupRecord(value: unknown, from: number, until: number, raw: st
 function groupKind(label: unknown): TafWindGroup['kind'] | null { return label === null || label === undefined || label === '' ? 'prevailing' : label === 'FM' ? 'FM' : label === 'TEMPO' ? 'TEMPO' : label === 'PROB' || label === 'PROB30' ? 'PROB' : null; }
 function currentReport(payload: unknown, icao: string): RecordValue {
   if (!Array.isArray(payload) || payload.length === 0 || payload.length > 8) throw new ApiError('No current TAF is available for this station.', 404, 'upstream_no_data');
-  const reports = payload.filter(record).filter((r) => r.icaoId === icao && r.mostRecent === true);
+  const reports = payload.filter(record).filter((r) => r.icaoId === icao && r.mostRecent === 1);
   if (reports.length !== 1) return fail();
   return reports[0]!;
 }
