@@ -155,13 +155,20 @@ describe('Aviation Weather Center adapter', () => {
 
     const missingCatalog = STATION_CATALOG;
     const missingFetcher: ServiceFetcher = { async fetch(request) {
-      if (new URL(request.url).pathname === '/api/data/windtemp') return new Response(PRODUCT.replace(/^ABQ/gm, 'BRL'), { headers: { 'Content-Type': 'text/plain' } });
+      const url = new URL(request.url);
+      if (url.pathname === '/api/data/windtemp') {
+        const baseProduct = PRODUCT.replace(/^ABQ/gm, 'BRL');
+        const product = url.searchParams.get('fcst') === '12' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : url.searchParams.get('fcst') === '24' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : baseProduct;
+        return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
+      }
       if (new URL(request.url).pathname === '/data/cache/stations.cache.json.gz') {
         return encodeCatalog(missingCatalog);
       }
       return responseFor(request);
     } };
-    await expect(createAviationWeatherAdapter(missingFetcher, memoryCache(), () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89 }])).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+    await expect(createAviationWeatherAdapter(missingFetcher, memoryCache(), () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89 }]))
+      .resolves.toMatchObject({ stations: expect.not.arrayContaining([expect.objectContaining({ id: 'BRL' })]) });
 
     const wrongRegionCatalog = [...STATION_CATALOG.filter((entry) => entry.faaId !== 'ABQ'), { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Mislocated ABQ', lat: 64, lon: -147, elev: 0 }];
     const wrongRegionFetcher: ServiceFetcher = { async fetch(request) {

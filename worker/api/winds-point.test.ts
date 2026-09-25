@@ -121,6 +121,11 @@ describe('winds point request', () => {
     expect(decodeWindsProduct(hawaiiProduct, '06', new Date('2026-09-24T18:30:00.000Z'))[0]?.levels[0]?.raw).toBe('0615');
   });
 
+  it('rejects a winds product that reports the same station identity more than once', () => {
+    const duplicateStation = product.replace('ATL 0120', 'ABQ 0120');
+    expect(() => decodeWindsProduct(duplicateStation, '06', FIXED_NOW)).toThrow(ApiError);
+  });
+
   it('serves a Hawaii point from official-format winds rows', async () => {
     const hawaiiProduct = `000\nFBHW31 KWNO 242001\nFD1HW1\nDATA BASED ON 241800Z\nVALID 250000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  1000 1500 2000 3000    6000    9000   12000\nLIH 0615 0617 0719 0823 0718+13 0518+13 0616+08\nLNY      0730 0828 0917 1010+12 0805+07 0810+03\n`;
     const regionCatalog = [
@@ -151,7 +156,7 @@ describe('winds point request', () => {
   });
 
   it('returns unavailable when no exact, region-verified nearby station remains', async () => {
-    const noVerifiedRows = product.replace(/^ABQ /gm, 'CZI ').replace(/^ATL /gm, 'CZI ');
+    const noVerifiedRows = product.replace(/^ABQ /gm, 'CZI ').replace(/^ATL /gm, 'XYZ ');
     await expect(adapterFor({ product: async (cycle) => new Response(cycle === '12'
       ? noVerifiedRows.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
       : cycle === '24' ? noVerifiedRows.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : noVerifiedRows) })
@@ -159,9 +164,19 @@ describe('winds point request', () => {
       .rejects.toMatchObject({ code: 'upstream_no_data' });
   });
 
-  it('excludes conflicting catalog identities from point sources', async () => {
+  it('rejects the whole point report when a reported station has conflicting catalog identities', async () => {
     const conflictingCatalog = [...catalog, { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Conflicting identity', lat: 42.6, lon: -89, elev: 0 }];
-    const answer = await adapterFor({ catalog: () => catalogResponse(conflictingCatalog) }).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    await expect(adapterFor({ catalog: () => catalogResponse(conflictingCatalog) }).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_invalid_response' });
+  });
+
+  it('does not resolve an IATA product station through FAA or ICAO catalog aliases', async () => {
+    const aliasOnlyCatalog = [
+      { iataId: 'ZZZ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Different IATA identity', lat: 42.5, lon: -89, elev: 0 },
+      catalog[1]!
+    ];
+    const answer = await adapterFor({ catalog: () => catalogResponse(aliasOnlyCatalog) })
+      .getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
     expect(answer.sources.map((source) => source.stationId)).toEqual(['ATL']);
   });
 

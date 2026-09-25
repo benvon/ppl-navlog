@@ -51,7 +51,7 @@ interface CachedProduct {
 
 interface DecodedForecast extends WindsForecastAvailability { readonly stationId: string; readonly levels: WindsAloftLevel[]; }
 interface StationInfo { readonly id: string; readonly name: string | null; readonly coordinates: AirportCoordinates; readonly elevationFt: number | null; }
-interface StationCatalogEntry { readonly identifiers: readonly string[]; readonly info: Omit<StationInfo, 'id'>; }
+interface StationCatalogEntry { readonly iataId: string | null; readonly info: Omit<StationInfo, 'id'>; }
 interface CachedStationCatalog {
   readonly fetchedAt: string;
   readonly freshUntil: string;
@@ -132,8 +132,7 @@ function isCachedProduct(value: unknown): value is CachedProduct {
 }
 
 function isStationCatalogEntry(value: unknown): value is StationCatalogEntry {
-  return isRecord(value) && Array.isArray(value.identifiers) && value.identifiers.length > 0 && value.identifiers.length <= 3
-    && value.identifiers.every((identifier) => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier))
+  return isRecord(value) && typeof value.iataId === 'string' && /^[A-Z0-9]{3}$/.test(value.iataId)
     && isRecord(value.info) && (value.info.name === null || (typeof value.info.name === 'string' && value.info.name.length <= 200))
     && isCoordinates(value.info.coordinates) && (value.info.elevationFt === null || isFiniteNumber(value.info.elevationFt));
 }
@@ -272,6 +271,8 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
   if (rows.length > MAX_PRODUCT_LINES) throw new ApiError('Aviation Weather Center returned a Winds/Temps product with too many rows.', 502, 'upstream_invalid_response');
   const stationRows = rows.map((row) => ({ row, stationId: row.slice(0, columns[0]!.start).trim() }))
     .filter(({ stationId }) => /^[A-Z0-9]{3}$/.test(stationId));
+  const stationIds = stationRows.map(({ stationId }) => stationId);
+  if (new Set(stationIds).size !== stationIds.length) throw new ApiError('Aviation Weather Center returned duplicate station identities in one Winds/Temps product.', 502, 'upstream_invalid_response');
   const forecasts: DecodedForecast[] = stationRows.map(({ row, stationId }) => ({ stationId, forecastCycle: cycle,
     issuedAt: issuedAt.toISOString(), validAt: validAt.toISOString(), useFrom: useFrom.toISOString(), useUntil: useUntil.toISOString(), levels: fixedWidthLevels(row, columns) }));
   requireStationBudget(forecasts.length);
@@ -281,10 +282,10 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
 
 function stationEntry(value: unknown): StationCatalogEntry | null {
   if (!isRecord(value) || !isFiniteNumber(value.lat) || !isFiniteNumber(value.lon) || value.lat < -90 || value.lat > 90 || value.lon < -180 || value.lon > 180) return null;
-  const identifiers = [...new Set([value.iataId, value.faaId, value.icaoId].filter((identifier): identifier is string => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier)))];
-  if (identifiers.length === 0) return null;
+  const iataId = typeof value.iataId === 'string' && /^[A-Z0-9]{3}$/.test(value.iataId) ? value.iataId : null;
+  if (iataId === null) return null;
   const name = typeof value.site === 'string' && value.site.length <= 200 ? value.site : null;
-  return { identifiers, info: { name, coordinates: { latitudeDeg: value.lat, longitudeDeg: value.lon }, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
+  return { iataId, info: { name, coordinates: { latitudeDeg: value.lat, longitudeDeg: value.lon }, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
 }
 
 function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCatalog {
@@ -303,18 +304,18 @@ function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[
   const requestedIds = new Set(stationIds);
   const matches = new Map<string, StationInfo[]>();
   for (const entry of catalog.entries) {
-    for (const identifier of entry.identifiers) {
-      if (requestedIds.has(identifier)) {
-        const records = matches.get(identifier) ?? [];
-        records.push({ id: identifier, ...entry.info });
-        matches.set(identifier, records);
-      }
+    const identifier = entry.iataId;
+    if (identifier && requestedIds.has(identifier)) {
+      const records = matches.get(identifier) ?? [];
+      records.push({ id: identifier, ...entry.info });
+      matches.set(identifier, records);
     }
   }
   const result = new Map<string, StationInfo>();
   for (const identifier of requestedIds) {
     const records = matches.get(identifier) ?? [];
-    if (records.length !== 1) throw new ApiError('Aviation Weather Center station catalog did not provide one exact identity for a reported station.', 502, 'upstream_invalid_response');
+    if (records.length > 1) throw new ApiError('Aviation Weather Center station catalog returned conflicting identities for a reported station.', 502, 'upstream_invalid_response');
+    if (records.length === 0) continue;
     let actualRegion: WindsRegion;
     try { actualRegion = regionForPoint(records[0]!.coordinates); }
     catch { throw new ApiError('Aviation Weather Center station catalog placed a reported station outside its supported product region.', 502, 'upstream_invalid_response'); }
@@ -328,8 +329,9 @@ function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[
 function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
   const requestedIds = new Set(stationIds);
   const matches = new Map<string, StationInfo[]>();
-  for (const entry of catalog.entries) for (const identifier of entry.identifiers) {
-    if (requestedIds.has(identifier)) {
+  for (const entry of catalog.entries) {
+    const identifier = entry.iataId;
+    if (identifier && requestedIds.has(identifier)) {
       const records = matches.get(identifier) ?? [];
       records.push({ id: identifier, ...entry.info });
       matches.set(identifier, records);
@@ -338,7 +340,8 @@ function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly st
   const result = new Map<string, StationInfo>();
   for (const identifier of requestedIds) {
     const records = matches.get(identifier) ?? [];
-    if (records.length !== 1) continue;
+    if (records.length > 1) throw new ApiError('Aviation Weather Center station catalog returned conflicting identities for a reported station.', 502, 'upstream_invalid_response');
+    if (records.length === 0) continue;
     try {
       if (regionForPoint(records[0]!.coordinates) === expectedRegion) result.set(identifier, records[0]!);
     } catch { /* Uncovered catalog entries cannot participate in geographic math. */ }
