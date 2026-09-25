@@ -50,7 +50,7 @@ async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query
 
 const navRows = (result: Awaited<ReturnType<typeof planWith>>["result"]) => {
   if (result.status !== "ready") throw new Error(result.message);
-  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly subleg: { readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly distance: number } }[] } };
+  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly subleg: { readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number } }[] } };
   return snapshot.navlog.rows;
 };
 const assertTodCallUsesFixedAirspeedGeometry = (draft: ReturnType<typeof planDraft>, queries: readonly AloftPointQuery[]) => {
@@ -198,6 +198,35 @@ describe("route waypoint weather sampling", () => {
     expect(rows.some((row) => row.subleg.phase.startsWith("transition"))).toBe(true);
     expect(result.status === "ready" && result.warnings.join(" ")).toMatch(/TAF surface wind/i);
     expect(rows.some((row) => row.subleg.routeEndDistance > row.subleg.routeStartDistance && row.effectiveWind.wind.effectiveValue.speed > 0)).toBe(true);
+  });
+
+  it("continues blending departure METAR wind after an early waypoint while still below the aloft sample altitude", async () => {
+    const base = planDraft();
+    const earlyCheckpoint = { ...base.route.points[1]!, coordinate: asCoordinate(41.95, -87.98) };
+    const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, points: [base.route.points[0]!, earlyCheckpoint, base.route.points[2]!] } };
+    const run = (checkpointDirection: number) => planWith(draft, (query) =>
+      Math.abs(query.latitudeDeg - draft.route.points[0]!.coordinate.latitude) < 0.001
+        && Math.abs(query.longitudeDeg - draft.route.points[0]!.coordinate.longitude) < 0.001 ? 10 : checkpointDirection,
+    );
+    const first = await run(350), changedCheckpoint = await run(340);
+    const waypointDistance = calculateGreatCircleDistanceAndInitialCourse(draft.route.points[0]!.coordinate, draft.route.points[1]!.coordinate);
+    if (!waypointDistance.ok) throw new Error(waypointDistance.error.message);
+    const beforeWaypoint = (result: typeof first.result) => navRows(result)
+      .filter((row) => row.subleg.routeEndDistance <= waypointDistance.value.distance + 1e-6)
+      .map((row) => [row.estimatedTimeEnroute, row.effectiveWind.wind.effectiveValue.directionFrom]);
+    expect(beforeWaypoint(changedCheckpoint.result)).toEqual(beforeWaypoint(first.result));
+    const continuedClimb = navRows(first.result).find((row) =>
+      row.subleg.phase === "climb"
+      && row.subleg.routeStartDistance > 0
+      && row.subleg.startingAltitude < 3_000,
+    );
+
+    expect(continuedClimb).toBeDefined();
+    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("departure surface-to-aloft blend fraction");
+    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("KORD");
+    expect(continuedClimb?.effectiveWind.wind.effectiveValue.directionFrom).toBeCloseTo(350, 0);
+    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("departure blend aloft longitude");
+    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("-87.98");
   });
 
   it("uses the projected climb-start position without adding its already-traveled phase distance", async () => {

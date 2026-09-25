@@ -66,6 +66,7 @@ describe("full navlog calculation engine", () => {
     const snapshot = { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [] }, phaseAllocation: { boundaries: [] } } as const;
     const progressiveWeather: CompletePlanWeather = {
       ...weather(),
+      warnings: ["Weather source warning."],
       loadedWindsData: undefined,
       routeWeatherSamples: undefined,
       progressiveCalculationSnapshot: snapshot,
@@ -73,6 +74,7 @@ describe("full navlog calculation engine", () => {
     };
     const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: progressiveWeather });
     expect(result.calculationSnapshot).toBe(snapshot);
+    expect(result.warnings).toEqual([]);
   });
   it("fails closed when route weather samples have no finalized progressive snapshot", async () => {
     const incompleteRouteWeather: CompletePlanWeather = {

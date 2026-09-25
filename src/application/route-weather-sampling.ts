@@ -160,7 +160,7 @@ const calculateProgressiveRoute = async (
     const terminal = cursorDistance >= totalDistance - TERMINAL_PATTERN_DISTANCE_NM;
     const selectedWind = windOverride ?? intervalWind(phase, startAltitude, endAltitude, terminal);
     const subleg = makeProgressiveSubleg(line, cursorDistance, endDistance, phase, startAltitude, endAltitude, `subleg-${++rowSequence}`, phaseId, distance);
-    const blendEvidence = departureBlendEvidence(phase, cursorDistance, startAltitude, endAltitude, routeLegs, samples, endpoints.departureMetar);
+    const blendEvidence = departureBlendEvidence(phase, startAltitude, endAltitude, routeLegs, currentAnswer, endpoints.departureMetar);
     const resolver: NavlogWindResolver = { resolveEffectiveWind: () => progressiveResolvedWind(currentAnswer, selectedWind, terminal ? projectedArrivalWind : undefined, blendEvidence) };
     const calculated = calculateNavlogRow(session.value, state, subleg, resolver);
     if (!calculated.ok) throw new RouteWeatherSamplingError(calculated.error.message);
@@ -170,8 +170,8 @@ const calculateProgressiveRoute = async (
   };
   const intervalWind = (phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number, terminal: boolean): Wind => {
     if (terminal && projectedArrivalWind !== undefined) return requiredWind(projectedArrivalWind.effectiveWind.directionFromDegTrue, projectedArrivalWind.effectiveWind.speedKt);
-    if (phase === "climb" && cursorDistance < 1e-8 && startAltitude < samples[0]!.altitudeFeetMsl) {
-      return blendDepartureSurface(routeLegs, samples, endpoints.departureMetar, (startAltitude + endAltitude) / 2);
+    if (phase === "climb" && startAltitude < currentAnswer.query.altitudeFeetMsl) {
+      return blendDepartureSurface(routeLegs, currentAnswer, endpoints.departureMetar, (startAltitude + endAltitude) / 2);
     }
     return pointWind(currentAnswer);
   };
@@ -342,16 +342,16 @@ const makeProgressiveSubleg = (line: RouteLine, startDistance: number, endDistan
   return { ...base, phaseId, trueCourse: line.leg.trueCourse, routeStartDistance: routeStartDistance.value, routeEndDistance: routeEndDistance.value, startingAltitude: startingAltitude.value, endingAltitude: endingAltitude.value, selectedCruiseAltitude: selected.value };
 };
 
-interface DepartureBlendEvidence { readonly stationIcao: string; readonly fieldElevationFeetMsl: number; readonly aloftAltitudeFeetMsl: number; readonly midpointAltitudeFeetMsl: number; readonly fraction: number; readonly directionFromDegTrue: number; readonly speedKt: number; }
+interface DepartureBlendEvidence { readonly stationIcao: string; readonly aloftRequestId: string; readonly aloftLatitudeDeg: number; readonly aloftLongitudeDeg: number; readonly fieldElevationFeetMsl: number; readonly aloftAltitudeFeetMsl: number; readonly midpointAltitudeFeetMsl: number; readonly fraction: number; readonly directionFromDegTrue: number; readonly speedKt: number; }
 const departureBlendEvidence = (
-  phase: AllocatedNavlogSubleg["phase"], routeDistance: number, startAltitude: number, endAltitude: number,
-  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar: MetarSuccessPayload,
+  phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number,
+  routeLegs: readonly CompletePlanRouteLeg[], aloftAnswer: AloftPointAnswer, metar: MetarSuccessPayload,
 ): DepartureBlendEvidence | undefined => {
-  if (phase !== "climb" || routeDistance >= 1e-8 || samples.length === 0) return undefined;
+  if (phase !== "climb" || startAltitude >= aloftAnswer.query.altitudeFeetMsl) return undefined;
   const surface = metarWind(metar), fieldElevation = routeLegs[0]!.start.kind === "airport" ? routeLegs[0]!.start.elevationFeetMsl : 0;
-  const aloftAltitude = samples[0]!.altitudeFeetMsl, midpoint = (startAltitude + endAltitude) / 2;
+  const aloftAltitude = aloftAnswer.query.altitudeFeetMsl, midpoint = (startAltitude + endAltitude) / 2;
   if (surface === null || aloftAltitude <= fieldElevation) return undefined;
-  return { stationIcao: metar.metar.icao, fieldElevationFeetMsl: fieldElevation, aloftAltitudeFeetMsl: aloftAltitude, midpointAltitudeFeetMsl: midpoint, fraction: Math.max(0, Math.min(1, (midpoint - fieldElevation) / (aloftAltitude - fieldElevation))), directionFromDegTrue: surface.directionFrom, speedKt: surface.speed };
+  return { stationIcao: metar.metar.icao, aloftRequestId: aloftAnswer.requestId, aloftLatitudeDeg: aloftAnswer.query.latitudeDeg, aloftLongitudeDeg: aloftAnswer.query.longitudeDeg, fieldElevationFeetMsl: fieldElevation, aloftAltitudeFeetMsl: aloftAltitude, midpointAltitudeFeetMsl: midpoint, fraction: Math.max(0, Math.min(1, (midpoint - fieldElevation) / (aloftAltitude - fieldElevation))), directionFromDegTrue: surface.directionFrom, speedKt: surface.speed };
 };
 
 const progressiveResolvedWind = (answer: AloftPointAnswer, value: Wind, arrival?: SelectedArrivalWind, blend?: DepartureBlendEvidence) => {
@@ -399,6 +399,9 @@ const progressiveSourceTraceInputs = (source: AloftPointAnswer["sources"][number
 ];
 const departureBlendTraceInputs = (blend?: DepartureBlendEvidence) => blend === undefined ? [] : [
   { name: "departure METAR station", value: blend.stationIcao, unit: "unitless" as const },
+  { name: "departure blend aloft request id", value: blend.aloftRequestId, unit: "unitless" as const },
+  { name: "departure blend aloft latitude", value: blend.aloftLatitudeDeg, unit: "degrees" as const },
+  { name: "departure blend aloft longitude", value: blend.aloftLongitudeDeg, unit: "degrees" as const },
   { name: "departure METAR wind from", value: blend.directionFromDegTrue, unit: "degrees-true" as const },
   { name: "departure METAR wind speed", value: blend.speedKt, unit: "knots" as const },
   { name: "departure field elevation", value: blend.fieldElevationFeetMsl, unit: "feet-msl" as const },
@@ -595,13 +598,13 @@ export const createWaypointPhaseResolver = (
 });
 
 const isTerminalPhase = (phase: string): boolean => phase === "descent" || phase === "pattern" || phase === "terminal";
-const blendDepartureSurface = (routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar: MetarSuccessPayload, altitude: number): Wind => {
+const blendDepartureSurface = (routeLegs: readonly CompletePlanRouteLeg[], aloftAnswer: AloftPointAnswer, metar: MetarSuccessPayload, altitude: number): Wind => {
   const surface = metarWind(metar);
   const fieldElevation = routeLegs[0]!.start.kind === "airport" ? routeLegs[0]!.start.elevationFeetMsl : 0;
-  const selectedAloftAltitude = samples[0]!.altitudeFeetMsl;
+  const selectedAloftAltitude = aloftAnswer.query.altitudeFeetMsl;
   if (surface === null || selectedAloftAltitude <= fieldElevation) throw new RouteWeatherSamplingError("Departure surface-to-aloft wind cannot be interpolated.");
   const fraction = Math.max(0, Math.min(1, (altitude - fieldElevation) / (selectedAloftAltitude - fieldElevation)));
-  return interpolateWind(surface, pointWind(samples[0]!.answer), fraction);
+  return interpolateWind(surface, pointWind(aloftAnswer), fraction);
 };
 
 const interpolateWind = (lower: Wind, upper: Wind, fraction: number): Wind => {

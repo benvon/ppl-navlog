@@ -28,6 +28,26 @@ describe('AWC TAF adapter', () => {
     expect(result.groups.at(-1)).toMatchObject({ windDirectionType: 'missing', windFromDegTrue: null, windSpeedKt: null });
   });
 
+  it('preserves 30 and 40 percent PROB groups from both raw labels and structured AWC data', async () => {
+    const report = body();
+    (report[0]!.fcsts as Record<string, unknown>[]).push(
+      apiGroup('PROB40', 1790042400, 1790049600, null, null),
+      apiGroup('PROB', 1790042400, 1790049600, null, null, { probability: 40 }),
+    );
+    const result = await adapterFor(report).adapter.getTaf('KORD');
+    expect(result.groups.slice(-2).map((group) => group.probabilityPercent)).toEqual([40, 40]);
+    expect(result.groups[3]?.probabilityPercent).toBe(30);
+  });
+
+  it('rejects unsupported or contradictory PROB percentages', async () => {
+    const unsupported = body();
+    (unsupported[0]!.fcsts as Record<string, unknown>[]).push(apiGroup('PROB', 1790042400, 1790049600, null, null, { probability: 50 }));
+    await expect(adapterFor(unsupported).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+    const contradictory = body();
+    (contradictory[0]!.fcsts as Record<string, unknown>[]).push(apiGroup('PROB40', 1790042400, 1790049600, null, null, { probability: 30 }));
+    await expect(adapterFor(contradictory).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+  });
+
   it('rejects wrong station, non-most-recent/superseded reports, future issue, and malformed periods', async () => {
     await expect(adapterFor([{ ...body()[0], icaoId: 'KJFK' }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });
     await expect(adapterFor([{ ...body()[0], mostRecent: 0 }]).adapter.getTaf('KORD')).rejects.toMatchObject({ code: 'upstream_invalid_response' });

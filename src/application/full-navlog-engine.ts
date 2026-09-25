@@ -19,7 +19,7 @@ import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "
 export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngine => ({
   calculate: async ({ draft, aircraftProfile, routeLegs, weather }) => {
     if (weather.progressiveCalculationSnapshot !== undefined) {
-      return { calculationSnapshot: weather.progressiveCalculationSnapshot, warnings: weather.warnings };
+      return { calculationSnapshot: weather.progressiveCalculationSnapshot, warnings: [] };
     }
     const routeSamples = weather.routeWeatherSamples;
     const loadedWinds = weather.loadedWindsData;

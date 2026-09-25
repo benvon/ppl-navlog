@@ -19,7 +19,7 @@ function validGroupWind(direction: unknown, speed: unknown, gust: unknown): bool
   const coherent = direction === null ? speed === null : speed !== null;
   return validDirection && integerOrNull(speed, 199) && integerOrNull(gust, 199) && (gust === null || speed !== null) && coherent;
 }
-function groupProbability(kind: TafWindGroup['kind'], probability: unknown): boolean { return kind === 'PROB' ? probability === 30 : probability === null || probability === undefined; }
+function groupProbability(kind: TafWindGroup['kind'], probability: unknown): boolean { return kind === 'PROB' ? probability === 30 || probability === 40 : probability === null || probability === undefined; }
 function normalizedWind(direction: unknown, speed: unknown): Pick<TafWindGroup, 'windDirectionType' | 'windFromDegTrue' | 'windSpeedKt'> {
   if (direction === 'VRB') return { windDirectionType: 'variable', windFromDegTrue: null, windSpeedKt: speed as number };
   if (direction === null) return { windDirectionType: 'missing', windFromDegTrue: null, windSpeedKt: null };
@@ -42,19 +42,29 @@ function isValidGroupRecord(value: unknown, from: number, until: number, raw: st
   return record(value) && Number.isSafeInteger(from) && Number.isSafeInteger(until) && until > from && typeof raw === 'string' && raw.length <= 4096;
 }
 
-function groupKind(label: unknown): TafWindGroup['kind'] | null { return label === null || label === undefined || label === '' ? 'prevailing' : label === 'FM' ? 'FM' : label === 'TEMPO' ? 'TEMPO' : label === 'PROB' || label === 'PROB30' ? 'PROB' : null; }
+function groupKind(label: unknown): TafWindGroup['kind'] | null { return label === null || label === undefined || label === '' ? 'prevailing' : label === 'FM' ? 'FM' : label === 'TEMPO' ? 'TEMPO' : label === 'PROB' || label === 'PROB30' || label === 'PROB40' ? 'PROB' : null; }
 function currentReport(payload: unknown, icao: string): RecordValue {
   if (!Array.isArray(payload) || payload.length === 0 || payload.length > 8) throw new ApiError('No current TAF is available for this station.', 404, 'upstream_no_data');
   const reports = payload.filter(record).filter((r) => r.icaoId === icao && r.mostRecent === 1);
   if (reports.length !== 1) return fail();
   return reports[0]!;
 }
+function probabilityForGroup(item: RecordValue): number | null {
+  const labelProbability = item.fcstChange === 'PROB30' ? 30 : item.fcstChange === 'PROB40' ? 40 : null;
+  const probability = item.probability ?? labelProbability;
+  if (probability !== 30 && probability !== 40) return null;
+  if (labelProbability !== null && probability !== labelProbability) return null;
+  return probability;
+}
 function prepareGroup(item: unknown, report: RecordValue): { kind: TafWindGroup['kind']; value: RecordValue; raw: string } | null {
   if (!record(item)) return null;
   const kind = groupKind(item.fcstChange);
-  if (!kind || kind === 'PROB' && item.probability !== 30 && !(item.fcstChange === 'PROB30' && (item.probability === null || item.probability === undefined))) return null;
+  if (!kind) return null;
+  const probability = kind === 'PROB' ? probabilityForGroup(item) : null;
+  if (kind === 'PROB' && probability === null) return null;
+  if (kind !== 'PROB' && item.probability !== null && item.probability !== undefined) return null;
   const raw = typeof item.rawTAF === 'string' ? item.rawTAF : typeof item.raw === 'string' ? item.raw : report.rawTAF as string;
-  const normalizedItem = kind === 'PROB' ? { ...item, probability: 30 } : item;
+  const normalizedItem = kind === 'PROB' ? { ...item, probability } : item;
   return { kind, value: normalizedItem, raw };
 }
 function normalizeOneGroup(item: unknown, report: RecordValue, start: number, end: number): TafWindGroup {
