@@ -663,7 +663,8 @@ function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: Pil
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
     fuelError(fields), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
-    metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), metarError(fields["destination-taf-icao"] ?? "", "Destination TAF"), tasOverrideError(plan, fields),
+    metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), metarError(fields["destination-metar-icao"] ?? "", "Destination METAR alternate"),
+    metarError(fields["destination-taf-icao"] ?? "", "Destination TAF"), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
   ];
   return checks.find((message) => message !== undefined);

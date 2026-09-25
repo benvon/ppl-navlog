@@ -346,6 +346,61 @@ describe("route waypoint weather sampling", () => {
     expect(metarEvidence).toContain("destination METAR cache status");
   });
 
+  it("projects terminal arrival with cruise speed before a TOD inside the five mile ring", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const profile = { ...aircraftProfile(), cruiseTasKnots: 50, descentRateFeetPerMinute: 1_500 };
+    const transition = "2029-09-21T13:51:30.000Z";
+    const destinationTaf: TafAnswer = {
+      ...taf(), validUntil: "2030-09-23T12:00:00.000Z",
+      groups: [
+        { kind: "prevailing", fromUtc: departure, untilUtc: transition, windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "27008KT" },
+        { kind: "FM", fromUtc: transition, untilUtc: "2029-09-22T12:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "FM210351 27008KT" },
+      ],
+    };
+    const outcome = await planWith(draft, () => 270, { destinationTaf, profile });
+    const rows = navRows(outcome.result);
+    const terminalRow = rows.find((row) => row.subleg.routeStartDistance >= rows.at(-1)!.cumulative.routeDistance - 5 - 1e-7);
+    expect(terminalRow).toBeDefined();
+    expect(JSON.stringify(terminalRow?.effectiveWind.trace.inputs)).toContain("FM210351 27008KT");
+  });
+
+  it("projects a terminal arrival through an active altitude transition before TOD", async () => {
+    const base = planDraft();
+    const departurePoint = base.route.points[0]!;
+    const destinationPoint = base.route.points.at(-1)!;
+    const direct = calculateGreatCircleDistanceAndInitialCourse(departurePoint.coordinate, destinationPoint.coordinate);
+    if (!direct.ok) throw new Error(direct.error.message);
+    const checkpointOffset = nauticalMiles(direct.value.distance - 5.5);
+    if (!checkpointOffset.ok) throw new Error(checkpointOffset.error.message);
+    const checkpointLocation = pointAlongGreatCircle(departurePoint.coordinate, direct.value.initialTrueCourse, checkpointOffset.value);
+    if (!checkpointLocation.ok) throw new Error(checkpointLocation.error.message);
+    const checkpoint = { ...base.route.points[1]!, coordinate: checkpointLocation.value };
+    const route = {
+      ...base.route,
+      points: [departurePoint, checkpoint, destinationPoint],
+      legs: [
+        { id: "first-leg", fromPointId: departurePoint.id, toPointId: checkpoint.id, cruiseAltitudeFeetMsl: 4_500 },
+        { id: "final-leg", fromPointId: checkpoint.id, toPointId: destinationPoint.id, cruiseAltitudeFeetMsl: 5_750 },
+      ],
+    };
+    const draft = { ...base, departureTimeUtc: departure, route };
+    const profile = { ...aircraftProfile(), climbTasKnots: 25, descentRateFeetPerMinute: 2_500 };
+    const baseline = await planWith(draft, () => 270, { profile, speed: 0 });
+    const baselineRows = navRows(baseline.result);
+    const finalArrival = new Date(Date.parse(departure) + baselineRows.at(-1)!.cumulative.estimatedTimeEnroute * 60_000 - 30_000).toISOString();
+    const destinationTaf: TafAnswer = {
+      ...taf(), validUntil: "2030-09-23T12:00:00.000Z",
+      groups: [
+        { kind: "prevailing", fromUtc: departure, untilUtc: finalArrival, windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "27008KT" },
+        { kind: "FM", fromUtc: finalArrival, untilUtc: "2029-09-22T12:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "FM-arrival" },
+      ],
+    };
+    const outcome = await planWith(draft, () => 270, { destinationTaf, profile, speed: 0 });
+    const rows = navRows(outcome.result);
+    expect(rows.some((row) => row.subleg.phase === "transition-climb" && Math.abs(row.subleg.routeEndDistance - (direct.value.distance - 5)) < 0.1)).toBe(true);
+    expect(JSON.stringify(rows.at(-1)?.effectiveWind.trace.inputs)).toContain("FM-arrival");
+  });
+
   it("accepts only the actual destination or explicitly selected destination METAR alternate", async () => {
     const base = { ...planDraft(), departureTimeUtc: departure };
     const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };

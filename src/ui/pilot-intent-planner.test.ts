@@ -553,6 +553,24 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(false);
   });
 
+  it("blocks an invalid destination METAR alternate before creating a submission", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    edit(root, "destination-metar-icao", "K-XYZ", true);
+    await settle();
+
+    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(input(root, "destination-metar-icao").getAttribute("aria-invalid")).toBe("true");
+    expect(root.querySelector("#destination-metar-icao-error")?.textContent).toContain("exact four-character ICAO code");
+    expect(root.querySelector("[data-local-error]")?.textContent).toContain("exact four-character ICAO code");
+
+    button(root, "Update plan").disabled = false;
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(0);
+  });
+
   it("autosaves malformed airport codes but blocks submission before airport lookup", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const lookup = createLocalStudyAirportLookup();

@@ -40,6 +40,12 @@ interface WaypointTarget {
   readonly altitudeFeetMsl: number;
 }
 type ProgressiveRouteMode = "climb" | "cruise" | "transition-climb" | "transition-descent" | "descent";
+interface PreTodVerticalPhase {
+  readonly currentAltitude: number;
+  readonly targetAltitude: number;
+  readonly tasKnots: number;
+  readonly rateFeetPerMinute: number;
+}
 const isClimbOrTransition = (mode: ProgressiveRouteMode): boolean => mode === "climb" || mode === "transition-climb" || mode === "transition-descent";
 const isClimbingMode = (mode: ProgressiveRouteMode): boolean => mode === "climb" || mode === "transition-climb";
 const isVerticalMode = (mode: ProgressiveRouteMode): boolean => mode !== "cruise";
@@ -216,6 +222,14 @@ const calculateProgressiveRoute = async (
     currentAnswer,
     courseDegTrue: terminalCourse(lines, totalDistance),
     tasKnots: descentTas,
+    cruiseTasKnots: profile.cruiseTasKnots,
+    todDistance,
+    preTodVerticalPhase: isVerticalMode(mode) ? {
+      currentAltitude,
+      targetAltitude: phaseTarget,
+      tasKnots: isClimbingMode(mode) ? profile.climbTasKnots : profile.descentTasKnots,
+      rateFeetPerMinute: checkedRate(isClimbingMode(mode) ? profile.climbRateFeetPerMinute : profile.descentRateFeetPerMinute, isClimbingMode(mode) ? "climb" : "descent"),
+    } : undefined,
   });
   const selectTerminalWindAtBoundaryIfReached = (distance: number): void => {
     if (todInsideTerminalRing && projectedArrivalWind === undefined && Math.abs(distance - terminalBoundaryDistance) < 1e-7) projectedArrivalWind = selectTerminalWindAtBoundary();
@@ -243,11 +257,11 @@ const calculateProgressiveRoute = async (
     const nextAltitude = reachesTarget ? phaseTarget : currentAltitude + (climbing ? 1 : -1) * rate * predictedElapsed;
     const elapsed = calculateInterval(line, nextDistance, mode, currentAltitude, nextAltitude, phaseId, selectedWind);
     cursorDistance = nextDistance;
-    selectTerminalWindAtBoundaryIfReached(cursorDistance);
     const calculatedAltitude = currentAltitude + (climbing ? 1 : -1) * rate * elapsed;
     assertVerticalTargetReached(reachesTarget, calculatedAltitude, phaseTarget);
     currentAltitude = reachesTarget ? phaseTarget : calculatedAltitude;
     if (reachesTarget) await finishVerticalTarget(line, legIndex, tas);
+    selectTerminalWindAtBoundaryIfReached(cursorDistance);
     if (elapsed <= 0) throw new RouteWeatherSamplingError("A progressive route interval produced no positive time.");
   };
 
@@ -405,8 +419,14 @@ const selectProjectedTerminalWind = (input: {
   readonly currentAnswer: AloftPointAnswer;
   readonly courseDegTrue: number;
   readonly tasKnots: number;
+  readonly cruiseTasKnots: number;
+  readonly todDistance: number;
+  readonly preTodVerticalPhase?: PreTodVerticalPhase;
 }): SelectedArrivalWind => {
-  const projectedMinutes = estimateRemainingMinutes(input.lines, input.fromDistance, input.totalDistance, input.tasKnots, pointWind(input.currentAnswer));
+  const localWind = pointWind(input.currentAnswer);
+  const projectedMinutes = input.preTodVerticalPhase === undefined
+    ? estimateTerminalRemainingMinutes(input.lines, input.fromDistance, input.todDistance, input.totalDistance, input.cruiseTasKnots, input.tasKnots, localWind)
+    : estimateTerminalArrivalThroughVerticalPhase(input.lines, input.fromDistance, input.todDistance, input.totalDistance, input.cruiseTasKnots, input.tasKnots, localWind, input.preTodVerticalPhase);
   const projectedArrivalMs = input.nowMs + projectedMinutes * 60_000;
   const metar = input.metar;
   const surfaceWind = metar?.metar.wind;
@@ -449,6 +469,46 @@ const validateFinalArrivalWind = (
   const arrival = selectArrivalTafWind(taf, arrivalUtc, courseDegTrue, tasKnots);
   if (projected !== undefined && arrivalTafWindSelectionChanged(projected, arrival)) throw new RouteWeatherSamplingError("Completed arrival moved into a different destination TAF wind group; update the plan again for a consistent estimate.");
   return arrival;
+};
+
+const estimateTerminalRemainingMinutes = (
+  lines: readonly RouteLine[], from: number, tod: number, to: number, cruiseTas: number, descentTas: number, localWind: Wind,
+): number => lines.reduce((minutes, line) => {
+  const preTodStart = Math.max(from, line.startDistance), preTodEnd = Math.min(tod, to, line.endDistance);
+  const cruiseTasForLine = line.leg.sourceLeg.performanceOverrides?.cruiseTasKnots?.effectiveValue ?? cruiseTas;
+  const cruiseMinutes = estimateRemainingMinutes([line], preTodStart, preTodEnd, cruiseTasForLine, localWind);
+  const descentStart = Math.max(from, tod, line.startDistance), descentEnd = Math.min(to, line.endDistance);
+  return minutes + cruiseMinutes + estimateRemainingMinutes([line], descentStart, descentEnd, descentTas, localWind);
+}, 0);
+
+const estimateTerminalArrivalThroughVerticalPhase = (
+  lines: readonly RouteLine[], from: number, tod: number, to: number, cruiseTas: number, descentTas: number, localWind: Wind, phase: PreTodVerticalPhase,
+): number => {
+  const remainingPhaseMinutes = Math.abs(phase.targetAltitude - phase.currentAltitude) / phase.rateFeetPerMinute;
+  const verticalEstimate = estimateVerticalPhaseToDistance(lines, from, tod, phase.tasKnots, localWind, remainingPhaseMinutes);
+  return verticalEstimate.minutes
+    + estimateTerminalRemainingMinutes(lines, verticalEstimate.endDistance, tod, to, cruiseTas, descentTas, localWind);
+};
+
+const estimateVerticalPhaseToDistance = (
+  lines: readonly RouteLine[], from: number, limit: number, tasKnots: number, localWind: Wind, neededMinutes: number,
+): { readonly endDistance: number; readonly minutes: number } => {
+  const tas = knots(tasKnots);
+  if (!tas.ok) throw new RouteWeatherSamplingError("Vertical true airspeed is invalid.");
+  let elapsedMinutes = 0;
+  let cursor = from;
+  for (const line of lines) {
+    const start = Math.max(from, line.startDistance), end = Math.min(limit, line.endDistance);
+    if (end <= start + 1e-8) continue;
+    const triangle = solveWindTriangle(courseForLineInterval(line, start, end), tas.value, localWind);
+    if (!triangle.ok) throw new RouteWeatherSamplingError("Could not estimate terminal arrival during the active vertical phase.");
+    const segmentMinutes = (end - start) / triangle.value.groundspeed * 60;
+    const remainingMinutes = Math.max(0, neededMinutes - elapsedMinutes);
+    if (remainingMinutes <= segmentMinutes) return { endDistance: start + triangle.value.groundspeed * remainingMinutes / 60, minutes: neededMinutes };
+    elapsedMinutes += segmentMinutes;
+    cursor = end;
+  }
+  return { endDistance: cursor, minutes: elapsedMinutes };
 };
 
 const makeProgressiveSubleg = (line: RouteLine, startDistance: number, endDistance: number, phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number, id: string, phaseId: string, distance: number): AllocatedNavlogSubleg => {
