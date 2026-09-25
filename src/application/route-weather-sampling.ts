@@ -7,7 +7,7 @@ import { solveWindTriangle } from "../domain/wind-triangle";
 import type { EffectiveWindResolver } from "../domain/phase-planning";
 import type { PlanDraft, JsonValue } from "../domain/route";
 import type { AircraftProfile } from "../domain/aircraft";
-import type { Coordinate } from "../domain/coordinates";
+import { canonicalPointCoordinateDegrees, type Coordinate } from "../domain/coordinates";
 import { trace } from "../domain/calculation-trace";
 import { MAX_CHECKPOINTS_PER_PLAN } from "../services/storage/pilot-input-repository";
 import { selectArrivalTafWind, type SelectedArrivalWind } from "./arrival-taf-wind";
@@ -108,7 +108,7 @@ const buildWaypointTargets = (draft: PlanDraft, lines: readonly RouteLine[]): Wa
   coordinate: routePoint.coordinate,
   altitudeFeetMsl: aloftAltitudeAtWaypoint(draft, index),
 }));
-const queryAt = (target: WaypointTarget, plannedUtc: string): AloftPointQuery => ({ latitudeDeg: target.coordinate.latitude, longitudeDeg: target.coordinate.longitude, altitudeFeetMsl: Math.round(target.altitudeFeetMsl), plannedUtc });
+const queryAt = (target: WaypointTarget, plannedUtc: string): AloftPointQuery => ({ latitudeDeg: canonicalPointCoordinateDegrees(target.coordinate.latitude), longitudeDeg: canonicalPointCoordinateDegrees(target.coordinate.longitude), altitudeFeetMsl: Math.round(target.altitudeFeetMsl), plannedUtc });
 const fetchOnePointAnswer = async (client: RouteWeatherPointClient, query: AloftPointQuery): Promise<AloftPointAnswer> => {
   const answer = await client.fetchPoint(query);
   validateAnswer(query, answer);
@@ -356,7 +356,12 @@ const buildWeatherTraceInputs = (sourceSamples: readonly RouteWeatherSample[], r
     ...sample.answer.sources.flatMap((source) => [
       { name: `${source.stationId} source distance`, value: source.distanceNauticalMiles, unit: "nautical-miles" as const },
       { name: `${source.stationId} horizontal weight`, value: source.horizontalWeight, unit: "unitless" as const },
+      { name: `${source.stationId} wind lower altitude`, value: source.lowerAltitudeFeet, unit: "feet-msl" as const },
+      { name: `${source.stationId} wind upper altitude`, value: source.upperAltitudeFeet, unit: "feet-msl" as const },
       { name: `${source.stationId} vertical weight`, value: source.verticalWeight, unit: "unitless" as const },
+      ...(source.temperatureLowerAltitudeFeet === null ? [] : [{ name: `${source.stationId} temperature lower altitude`, value: source.temperatureLowerAltitudeFeet, unit: "feet-msl" as const }]),
+      ...(source.temperatureUpperAltitudeFeet === null ? [] : [{ name: `${source.stationId} temperature upper altitude`, value: source.temperatureUpperAltitudeFeet, unit: "feet-msl" as const }]),
+      ...(source.temperatureVerticalWeight === null ? [] : [{ name: `${source.stationId} temperature vertical weight`, value: source.temperatureVerticalWeight, unit: "unitless" as const }]),
     ]),
   ]),
   { name: "departure METAR station", value: metar.metar.icao, unit: "unitless" as const },
@@ -368,6 +373,12 @@ const buildWeatherTraceInputs = (sourceSamples: readonly RouteWeatherSample[], r
   { name: "destination TAF wind speed", value: arrival.effectiveWind.speedKt, unit: "knots" as const },
   { name: "destination TAF group", value: arrival.selectedGroup.kind, unit: "unitless" as const },
   { name: "destination TAF raw group", value: arrival.selectedGroup.raw, unit: "unitless" as const },
+  ...arrival.candidates.flatMap((candidate, index) => [
+    { name: `destination TAF candidate ${index + 1} group`, value: candidate.group.kind, unit: "unitless" as const },
+    { name: `destination TAF candidate ${index + 1} raw`, value: candidate.group.raw, unit: "unitless" as const },
+    { name: `destination TAF candidate ${index + 1} groundspeed`, value: candidate.groundspeedKt, unit: "knots" as const },
+    { name: `destination TAF candidate ${index + 1} selected`, value: candidate.group === arrival.selectedGroup, unit: "unitless" as const },
+  ]),
   { name: "destination terminal assumption", value: arrival.surfaceToPatternAssumption, unit: "unitless" as const },
 ];
 

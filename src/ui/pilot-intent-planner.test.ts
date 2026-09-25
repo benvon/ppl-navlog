@@ -3,7 +3,8 @@ import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { AirportLookup } from "../application/airport-lookup";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
-import type { MetarTransportClient, WindsTransportClient } from "../services/weather/winds-client";
+import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
+import type { AloftPointAnswer, AloftPointQuery } from "../../worker/api/contracts";
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
 import { renderPilotIntentPlanner } from "./pilot-intent-planner";
@@ -49,8 +50,13 @@ const ids = { next: () => `planner-id-${++idNumber}` };
 const clock = { now: () => new Date("2026-09-21T21:30:00.000Z") };
 const profile = aircraftProfile();
 
-function winds(overrides: Partial<WindsTransportClient & MetarTransportClient> = {}): WindsTransportClient & MetarTransportClient {
-  return { ...completeFlightWeatherClient, ...overrides };
+function winds(overrides: Partial<WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
+  return {
+    ...completeFlightWeatherClient,
+    fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
+    fetchTaf: async () => ({ stationIcao: "KJVL", issuedAt: "2026-09-21T20:00:00.000Z", validFrom: "2026-09-21T21:00:00.000Z", validUntil: "2026-09-22T03:00:00.000Z", rawTaf: "SYNTHETIC TAF", groups: [{ kind: "prevailing", fromUtc: "2026-09-21T21:00:00.000Z", untilUtc: "2026-09-22T03:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "SYNTHETIC prevailing" }], requestId: "55555555-5555-4555-8555-555555555555" }),
+    ...overrides,
+  };
 }
 
 async function settle(): Promise<void> {
@@ -205,6 +211,52 @@ describe("pilot intent planner", () => {
     expect(root.querySelector(".calculated-navlog")).toBeNull();
   });
 
+  it("updates from bounded point answers and endpoint weather without legacy discovery", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const callOrder: string[] = [];
+    const client = winds({
+      fetchPoint: async (query) => { callOrder.push("point"); return winds().fetchPoint(query); },
+      fetchMetar: async (icao) => { callOrder.push("metar"); return completeFlightWeatherClient.fetchMetar(icao); },
+      fetchTaf: async (icao) => { callOrder.push("taf"); return winds().fetchTaf(icao); },
+    });
+    const discovery = vi.spyOn(client, "discoverStations").mockRejectedValue(new Error("oversized legacy discovery response (651267 bytes)"));
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchTaf = vi.spyOn(client, "fetchTaf");
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "destination-taf-icao", "KJVL");
+    button(root, "Update plan").click();
+    await settle();
+
+    expect(repository.submissions).toHaveLength(1);
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
+    expect(fetchTaf).toHaveBeenCalledWith("KJVL");
+    expect(fetchPoint).toHaveBeenCalledTimes(2);
+    expect(callOrder).toEqual(["metar", "taf", "point", "point"]);
+    expect(discovery).not.toHaveBeenCalled();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
+    expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("SYNTHETIC TAF");
+    const groundspeed = root.querySelector<HTMLButtonElement>('button[data-inspect-field="groundspeed"]');
+    if (!groundspeed) throw new Error("Missing groundspeed inspection control.");
+    const displayedGroundspeed = groundspeed.textContent ?? "";
+    groundspeed.click();
+    await settle();
+    const inspector = root.querySelector(".calculation-inspector");
+    if (!inspector) throw new Error("Missing current calculation inspector.");
+    const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
+    if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
+    expect(Number(storedMatch[1]).toFixed(1)).toBe(Number(displayedGroundspeed).toFixed(1));
+    expect(inspector.textContent).toContain("BRL");
+    expect(inspector.textContent).toContain("wind lower altitude");
+    expect(inspector.textContent).toContain("horizontal weight");
+    expect(inspector.textContent).toContain("destination TAF candidate");
+    expect(inspector.textContent).toContain("SYNTHETIC prevailing");
+    expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
+  });
+
   it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
     const repository = new MemoryInputs();
     repository.profiles.push(profile);
@@ -227,8 +279,30 @@ describe("pilot intent planner", () => {
       "destination-taf-icao": "",
       "taxi-fuel": "0.8",
     });
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+  });
+
+  it("clears a successful current result when the destination TAF is invalid", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    let invalidTaf = false;
+    const client = winds({ fetchTaf: async () => {
+      const taf = await winds().fetchTaf("KJVL");
+      return invalidTaf ? { ...taf, stationIcao: "KORD" } : taf;
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "destination-taf-icao", "KJVL");
+    button(root, "Update plan").click();
+    await settle();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    edit(root, "plan-title", "TAF failure case");
+    invalidTaf = true;
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions.at(-1)?.rawFields["plan-title"]).toBe("TAF failure case");
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Destination TAF station does not match");
   });
 
   it("reopens the latest plan snapshot after blur autosave without losing fields on a later save", async () => {
@@ -417,8 +491,8 @@ describe("pilot intent planner", () => {
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(fetchForecast).not.toHaveBeenCalled();
-    expect(fetchMetar).not.toHaveBeenCalled();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(repository.submissions[0]?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
   });
 
@@ -629,27 +703,37 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(true);
   });
 
-  it("submits pilot inputs before the temporary route-weather limitation and keeps it through retries", async () => {
+  it("clears current evidence on edit or failure, retains submitted inputs, and recovers on success", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const client = winds();
-    const fetchForecast = vi.spyOn(client, "fetchForecast");
+    let failPoint = false;
+    const client = winds({ fetchPoint: async (query) => {
+      if (failPoint) throw new Error("point service unavailable");
+      return winds().fetchPoint(query);
+    } });
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
+    edit(root, "destination-taf-icao", "KJVL");
     button(root, "Update plan").click();
     await settle();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(repository.submissions).toHaveLength(1);
-    expect(repository.submissions[0]?.rawFields["departure-icao"]).toBe("KORD");
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
-    expect(fetchForecast).not.toHaveBeenCalled();
 
-    edit(root, "plan-title", "Edited after failure");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    edit(root, "plan-title", "Changed inputs");
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    failPoint = true;
     button(root, "Update plan").click();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
     expect(repository.submissions).toHaveLength(2);
+    expect(repository.submissions[1]?.rawFields["plan-title"]).toBe("Changed inputs");
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
+
+    failPoint = false;
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(3);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
   });
 
   it("preserves but does not use a saved legacy forecast period", async () => {
@@ -669,9 +753,9 @@ describe("pilot intent planner", () => {
     button(root, "Update plan").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(repository.submissions[0]?.rawFields["selected-forecast-period"]).toBe(COMPLETE_FLIGHT_FORECAST_VALID_AT);
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(discover).not.toHaveBeenCalled();
   });
 
@@ -685,10 +769,10 @@ describe("pilot intent planner", () => {
     button(root, "Update plan").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(fetchForecast).not.toHaveBeenCalled();
-    expect(fetchMetar).not.toHaveBeenCalled();
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
   });
 
   it("removes an override with a deleted checkpoint leg so the route can be updated", async () => {
@@ -743,8 +827,8 @@ describe("pilot intent planner", () => {
     button(root, "Update plan").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
 
     button(root, "New plan").click();
     await settle();
@@ -767,7 +851,8 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root);
     button(root, "Update plan").click();
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "New plan").click();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
     button(root, "Open Synthetic route").click();
@@ -794,7 +879,8 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     button(root, "Update plan").click();
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Route weather calculation is not available for this plan yet.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "Open Other plan").click();
     await settle();
     expect(input(root, "plan-title").value).toBe("Other plan");

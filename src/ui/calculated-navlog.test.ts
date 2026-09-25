@@ -3,7 +3,7 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 
 describe("calculated visual flight log", () => {
-  it("shows worksheet columns and visible interpolation disclosure without injecting weather markup", () => {
+  it("shows navlog values without exposing source weather evidence", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
@@ -20,9 +20,14 @@ describe("calculated visual flight log", () => {
         },
       },
     };
-    const rendered = renderCalculatedNavlog(revision);
+    const rendered = renderCalculatedNavlog(revision, { currentWeatherValidated: true });
     expect(rendered?.textContent).toContain("TC°");
-    expect(rendered?.textContent).toContain("Assumption explained");
+    expect(rendered?.textContent).toContain("Current weather validated for this calculation.");
+    expect(rendered?.textContent).not.toContain("Explanation");
+    expect(rendered?.textContent).not.toContain("Assumption explained");
+    expect(rendered?.textContent).not.toContain("METAR at field elevation");
+    expect(rendered?.textContent).not.toContain("Raw row evidence");
+    expect(rendered?.textContent).not.toContain("Phase boundaries and weather selection");
     expect(rendered?.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal");
     expect(rendered?.querySelector("unsafe")).toBeNull();
   });

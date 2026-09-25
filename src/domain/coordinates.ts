@@ -21,3 +21,10 @@ export const requireDistinctCoordinates = (first: Coordinate, second: Coordinate
   sameCoordinate(first, second)
     ? failure("IDENTICAL_COORDINATES", "Route endpoints must not have identical coordinates.")
     : success(undefined);
+
+/** Canonical precision accepted by the bounded winds point endpoint. */
+export const canonicalPointCoordinateDegrees = (value: number): number => {
+  const formatted = value.toFixed(10).replace(/(?:\.0+|(?:(\.\d*?[1-9]))0+)$/, "$1");
+  const normalized = Number(formatted);
+  return Object.is(normalized, -0) ? 0 : normalized;
+};

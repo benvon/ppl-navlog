@@ -1,23 +1,21 @@
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
-import { calculateCompletePlan } from "../application/complete-plan";
+import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
+import { resolveRouteWeather } from "../application/route-weather-sampling";
 import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
-import { routeDistanceMidpoint } from "../application/weather-station-reference";
 import { coordinate } from "../domain/coordinates";
-import { createWorkerWindsPlanWeatherResolver } from "../application/worker-winds-weather-resolver";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import type { PlanDraft, PlanRevision } from "../domain/route";
-import type { WindsTransportClient, MetarTransportClient } from "../services/weather/winds-client";
-import { WorkerWindsAdapter } from "../services/weather/winds-adapter";
+import type { WindsTransportClient, MetarTransportClient, TafTransportClient, AloftPointTransportClient } from "../services/weather/winds-client";
 import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
   readonly airportLookup: AirportLookup;
-  readonly winds: WindsTransportClient & MetarTransportClient;
+  readonly winds: WindsTransportClient & MetarTransportClient & TafTransportClient & AloftPointTransportClient;
   readonly ids: UseCaseIds;
   readonly clock: UseCaseClock;
 }
@@ -111,7 +109,7 @@ class PilotIntentPlanner {
     shell.append(this.renderProfileEditor(), form);
     if (this.result !== undefined) {
       const output = document.createElement("section"); output.dataset.currentResult = "true";
-      const navlog = renderCalculatedNavlog(this.result, { selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
+      const navlog = renderCalculatedNavlog(this.result, { currentWeatherValidated: true, selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
       if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
       shell.append(output);
     }
@@ -309,7 +307,7 @@ class PilotIntentPlanner {
     this.fields = { ...this.fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) };
     this.current = this.withIdentity({ ...(this.current ?? this.blankPlan()), checkpoints, cruiseAltitudeTexts, overrideReasons });
   }
-  private invalidate(): void { this.result = undefined; this.content.querySelector("[data-current-result]")?.remove(); }
+  private invalidate(): void { this.result = undefined; this.inspected = undefined; this.content.querySelector("[data-current-result]")?.remove(); }
   private clearRouteOverrides(): boolean {
     const hadOverrides = Object.entries(this.fields).some(([key, value]) =>
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
@@ -348,6 +346,7 @@ class PilotIntentPlanner {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
     this.result = undefined;
+    this.inspected = undefined;
     this.updating = true;
     this.render();
     try {
@@ -365,7 +364,7 @@ class PilotIntentPlanner {
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;
       this.updateError = "";
-      this.setStatus("Plan updated using current airport and weather context.");
+      this.setStatus("Plan updated with current route weather.");
     } catch (error) {
       this.fail(error, "update");
     } finally {
@@ -448,46 +447,36 @@ class PilotIntentPlanner {
     }
     return draft;
   }
+  private async fetchEndpointWeather(draft: PlanDraft) {
+    const departure = draft.route.points[0], destination = draft.route.points.at(-1);
+    if (departure?.kind !== "airport" || destination?.kind !== "airport") throw new Error("Route weather requires airport departure and destination endpoints.");
+    const departureIcao = draft.weatherSelection?.departureMetarIcao ?? departure.icao;
+    const destinationIcao = draft.weatherSelection?.destinationTafIcao ?? destination.icao;
+    const [departureMetar, destinationTaf] = await Promise.all([
+      this.dependencies.winds.fetchMetar(departureIcao), this.dependencies.winds.fetchTaf(destinationIcao),
+    ]);
+    return { departureMetar, destinationTaf };
+  }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
-    const forecastId = draft.weatherSelection?.forecastValidTimeUtc;
-    if (!forecastId) throw new Error("Route weather calculation is not available for this plan yet.");
-    const weatherResolver = createWorkerWindsPlanWeatherResolver(
-      new WorkerWindsAdapter(this.dependencies.winds),
-      {
-        stationSelectionCoordinate: routeDistanceMidpoint(draft.route),
-        weatherSnapshotId: this.dependencies.ids.next(),
-      },
-      this.dependencies.winds,
-    );
+    const { departureMetar, destinationTaf } = await this.fetchEndpointWeather(draft);
+    const solution = await resolveRouteWeather(draft, profile, {
+      fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
+    }, { departureMetar, destinationTaf });
     const calc = await calculateCompletePlan(draft, profile, {
-      weather: weatherResolver,
+      weather: { resolve: async (): Promise<CompletePlanWeather> => solution.weather },
       calculations: createFullNavlogCalculationEngine(),
     });
     if (calc.status === "blocked") throw new Error(calc.message);
-    requireFreshCurrentWeather(calc.weather.loadedWindsData?.provenance.forecast.cache);
-    if (calc.weather.warnings.some((warning) =>
-      warning.includes("could not be loaded") || warning.includes("was not usable"))) {
-      throw new Error("The selected METAR source is unavailable, stale, or unusable.");
-    }
     const snapshot = calc.calculationSnapshot as Record<string, unknown>;
-    if (snapshot.schema !== "complete-navlog/v1" || snapshot.status !== "calculated") {
-      throw new Error("The route cannot produce a complete flyable navlog.");
-    }
+    if (snapshot.schema !== "complete-navlog/v1" || snapshot.status !== "calculated") throw new Error("The route cannot produce a complete flyable navlog.");
     const now = this.dependencies.clock.now().toISOString();
     const current = this.current;
     if (!current) throw new Error("The active plan changed during calculation.");
     return {
-      schemaVersion: 1,
-      id: this.dependencies.ids.next(),
-      planId: current.id,
-      revisionNumber: 1,
-      reason: "initial-save",
-      createdAt: now,
-      draftSnapshot: draft,
-      aircraftProfileSnapshot: { profile, snapshottedAt: now },
-      weatherSnapshotIds: calc.weather.snapshotIds,
-      calculationSnapshot: calc.calculationSnapshot,
-      warnings: calc.warnings,
+      schemaVersion: 1, id: this.dependencies.ids.next(), planId: current.id, revisionNumber: 1,
+      reason: "initial-save", createdAt: now, draftSnapshot: draft,
+      aircraftProfileSnapshot: { profile, snapshottedAt: now }, weatherSnapshotIds: calc.weather.snapshotIds,
+      calculationSnapshot: calc.calculationSnapshot, warnings: calc.warnings,
     };
   }
   private fail(error: unknown, kind: "update" | "save" = "update"): void { this.result = undefined; const message = error instanceof Error ? error.message : "The requested action failed."; if (kind === "save") this.saveError = message; else this.updateError = message; this.setStatus(""); }
@@ -591,10 +580,6 @@ function parsePlannerCoordinateText(value: string) {
   if (!decimal) return compact;
   return coordinate(Number(decimal[1]), Number(decimal[2]));
 }
-function requireFreshCurrentWeather(cache: { readonly status: string; readonly freshnessRemainingSeconds: number } | undefined): void {
-  if (cache?.status === "stale_on_error" || (cache && cache.freshnessRemainingSeconds <= 0)) throw new Error("The selected winds forecast is stale; no updated plan was produced.");
-}
-
 function requiredFieldsError(fields: Readonly<Record<string, string>>): string | undefined {
   if ((fields["plan-title"] ?? "").trim().length > 120) return "Plan title must be 120 characters or fewer.";
   return ["plan-title", "departure-time", "departure-icao", "destination-icao"]

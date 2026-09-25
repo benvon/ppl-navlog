@@ -44,6 +44,15 @@ function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, r
   heading.textContent = selectionHeading(revision, selection, row);
   const value = selectedValue(row, selection.field);
   section.append(paragraph(`Stored unrounded value: ${displayValue(value)}.`));
+  if (["groundspeed", "estimatedTimeEnroute", "fuel"].includes(selection.field)) {
+    section.append(paragraph("Effective wind used for this row"));
+    appendTrace(section, nested(row.effectiveWind, "trace"));
+  }
+  if (selection.field === "estimatedTimeEnroute" || selection.field === "fuel") {
+    section.append(paragraph("Wind-triangle groundspeed used by this calculation"));
+    appendTrace(section, nested(nested(row, "traces"), "windTriangle"));
+  }
+  section.append(paragraph("Selected value calculation"));
   appendTrace(section, selectedTrace(row, selection.field));
   appendProvenance(section, selectedProvenance(row, selection.field));
   appendTextList(section, "Assumptions", row.assumptions);
@@ -60,7 +69,7 @@ function selectionHeading(revision: PlanRevision | undefined, selection: NavlogI
 
 function appendTrace(section: HTMLElement, trace: RecordValue | undefined): void {
   if (trace === undefined) {
-    section.append(paragraph("This value comes from route or phase allocation. Inspect the phase-boundary evidence in the navlog for its geometry and altitude inputs."));
+    section.append(paragraph("This value comes from route or phase allocation; no detailed trace was stored for it."));
   } else {
     renderTrace(section, trace);
   }

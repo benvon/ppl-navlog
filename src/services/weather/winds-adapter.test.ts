@@ -378,6 +378,42 @@ describe("WorkerWindsAdapter", () => {
     await expect(new WorkerWindsAdapter(new FakeWindsClient(discoveryPayload(), unadvertisedCycle)).load(input)).rejects.toMatchObject({ code: "INVALID_FORECAST" });
   });
 
+  it("fetches and strictly validates one point answer against its exact query", async () => {
+    const query = { latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 4500, plannedUtc: "2026-09-22T01:00:00.000Z" };
+    const answer = {
+      query, windFromDegTrue: 350.5, windSpeedKt: 14, temperatureC: -2, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-22T00:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06",
+      sources: [{ stationId: "BRL", latitudeDeg: 40.78, longitudeDeg: -91.12, distanceNauticalMiles: 1, horizontalWeight: 1, lowerAltitudeFeet: 3000, upperAltitudeFeet: 6000, verticalWeight: 0.5, temperatureLowerAltitudeFeet: 3000, temperatureUpperAltitudeFeet: 6000, temperatureVerticalWeight: 0.5 }],
+      method: "horizontal-vertical-vector", requestId: "11111111-1111-4111-8111-111111111111",
+    };
+    const client = new WorkerWindsClient({ fetch: async () => Response.json(answer) }, "https://navlog.example");
+    await expect(client.fetchPoint(query)).resolves.toMatchObject({ query, windSpeedKt: 14 });
+    const mismatched = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, query: { ...query, altitudeFeetMsl: 5000 } }) }, "https://navlog.example");
+    await expect(mismatched.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const invalidWeight = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, sources: [{ ...answer.sources[0], horizontalWeight: 2 }] }) }, "https://navlog.example");
+    await expect(invalidWeight.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const nullDirection = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, windFromDegTrue: null, windSpeedKt: 10 }) }, "https://navlog.example");
+    await expect(nullDirection.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const badWeightSum = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, sources: [{ ...answer.sources[0], horizontalWeight: 0.4 }] }) }, "https://navlog.example");
+    await expect(badWeightSum.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const tooManySources = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, sources: Array.from({ length: 4 }, (_, index) => ({ ...answer.sources[0]!, stationId: `BR${index}` })) }) }, "https://navlog.example");
+    await expect(tooManySources.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const incoherentTemperature = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, sources: [{ ...answer.sources[0], temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: 0.5 }] }) }, "https://navlog.example");
+    await expect(incoherentTemperature.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const preciseQuery = { ...query, latitudeDeg: 55.123456789012, longitudeDeg: -179.123456789012 };
+    const sentCoordinateLengths: number[] = [];
+    const preciseClient = new WorkerWindsClient({ fetch: async (input) => {
+      const url = new URL(String(input));
+      const lat = url.searchParams.get("lat")!, lon = url.searchParams.get("lon")!;
+      sentCoordinateLengths.push(lat.length, lon.length);
+      const sentQuery = { ...query, latitudeDeg: Number(lat), longitudeDeg: Number(lon) };
+      return Response.json({ ...answer, query: sentQuery });
+    } }, "https://navlog.example");
+    const preciseAnswer = await preciseClient.fetchPoint(preciseQuery);
+    expect(preciseAnswer.query).toMatchObject({ latitudeDeg: 55.123456789, longitudeDeg: -179.123456789 });
+    expect(Math.max(...sentCoordinateLengths)).toBeLessThanOrEqual(16);
+  });
+
   it("validates TAF transport station identity and every group field", async () => {
     const payload = { stationIcao: "KORD", issuedAt: "2026-09-22T00:00:00.000Z", validFrom: "2026-09-22T00:00:00.000Z", validUntil: "2026-09-23T00:00:00.000Z", rawTaf: "TAF KORD", requestId: "11111111-1111-4111-8111-111111111111", groups: [{ kind: "prevailing", fromUtc: "2026-09-22T00:00:00.000Z", untilUtc: "2026-09-23T00:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 10, gustKt: null, probabilityPercent: null, raw: "prevailing" }] };
     const valid = new WorkerWindsClient({ fetch: async () => Response.json(payload) }, "https://navlog.example");

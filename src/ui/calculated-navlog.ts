@@ -17,6 +17,7 @@ const cell = (content: string | HTMLElement): HTMLTableCellElement => {
 export interface CalculatedNavlogViewOptions {
   readonly onInspect?: (selection: NavlogInspectionSelection) => void;
   readonly selected?: NavlogInspectionSelection;
+  readonly currentWeatherValidated?: boolean;
 }
 
 export const renderCalculatedNavlog = (revision: PlanRevision, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
@@ -38,20 +39,25 @@ export const renderCalculatedNavlog = (revision: PlanRevision, options: Calculat
     section.append(message);
     return section;
   }
-  return renderCalculatedResult(section, snapshot, navlog, revision, options);
+  return renderCalculatedResult(section, navlog, revision, options);
 };
 
 const renderCalculatedResult = (
   section: HTMLElement,
-  snapshot: RecordValue,
   navlog: RecordValue,
   revision: PlanRevision,
   options: CalculatedNavlogViewOptions,
 ): HTMLElement => {
   const rows = navlog.rows as readonly RecordValue[];
+  if (options.currentWeatherValidated) {
+    const currentWeather = document.createElement("p");
+    currentWeather.className = "current-weather-status";
+    currentWeather.textContent = "Current weather validated for this calculation.";
+    section.append(currentWeather);
+  }
   const table = document.createElement("table");
   const caption = document.createElement("caption");
-  caption.textContent = "Calculated visual flight log — unrounded values are retained in each row's explanation";
+  caption.textContent = "Calculated visual flight log";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
   rows.forEach((row, index) => body.append(navlogRow(row, revision, index, options)));
@@ -67,8 +73,6 @@ const renderCalculatedResult = (
   if (usableFuel !== undefined) section.append(usableFuel);
   const warnings = revisionWarnings(revision);
   if (warnings !== undefined) section.append(warnings);
-  section.append(details("Phase boundaries and weather selection", { phaseAllocation: snapshot.phaseAllocation, weather: snapshot.weather }));
-  if (snapshot.weatherRefreshComparison !== undefined) section.append(details("Weather refresh comparison with parent revision", snapshot.weatherRefreshComparison));
   return section;
 };
 
@@ -103,7 +107,7 @@ const revisionWarnings = (revision: PlanRevision): HTMLElement | undefined => {
 const navlogHeader = (): HTMLTableSectionElement => {
   const head = document.createElement("thead");
   const row = document.createElement("tr");
-  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Fuel gal", "Explanation"].forEach((label) => {
+  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Fuel gal"].forEach((label) => {
     const heading = document.createElement("th");
     heading.scope = "col";
     heading.textContent = label;
@@ -118,9 +122,7 @@ const navlogRow = (row: RecordValue, revision: PlanRevision, rowIndex: number, o
   const subleg = nested(row, "subleg");
   const labels = sourceLabels(revision, subleg);
   const wind = nested(nested(row, "effectiveWind")?.wind, "effectiveValue");
-  const cumulative = nested(row, "cumulative");
-  const assumptions = stringArray(row.assumptions);
-  const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}${assumptions.length > 0 ? " · Assumption explained" : ""}`;
+  const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}`;
   const valueCell = (field: NavlogInspectionField, value: string): HTMLTableCellElement => {
     if (options.onInspect === undefined) return cell(value);
     const control = document.createElement("button");
@@ -139,7 +141,7 @@ const navlogRow = (row: RecordValue, revision: PlanRevision, rowIndex: number, o
     valueCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`), valueCell("windCorrectionAngle", number(row.windCorrectionAngle)), valueCell("trueHeading", number(row.trueHeading)),
     valueCell("variation", number(nested(row, "variation")?.effectiveValue)), valueCell("magneticHeading", number(row.magneticHeading)), valueCell("compassDeviation", number(row.compassDeviation)),
     valueCell("compassHeading", number(row.compassHeading)), valueCell("distance", number(subleg?.distance)), valueCell("groundspeed", number(row.groundspeed)), valueCell("estimatedTimeEnroute", number(row.estimatedTimeEnroute)),
-    valueCell("fuel", number(row.fuel)), cell(details("Raw row evidence", { assumptions, traces: row.traces, cumulative, appliedOverrides: row.appliedOverrides })),
+    valueCell("fuel", number(row.fuel)),
   );
   return tr;
 };
@@ -150,8 +152,6 @@ const sourceLabels = (revision: PlanRevision, subleg: RecordValue | undefined): 
   const to = revision.draftSnapshot.route.points.find((point) => point.id === source?.toPointId)?.name ?? "—";
   return { from, to };
 };
-
-const stringArray = (value: unknown): readonly string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
 const details = (label: string, value: unknown): HTMLDetailsElement => {
   const element = document.createElement("details");
