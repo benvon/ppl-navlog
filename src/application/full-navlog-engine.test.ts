@@ -61,6 +61,37 @@ const weather = (loaded = loadedWinds()): CompletePlanWeather => ({
 });
 
 describe("full navlog calculation engine", () => {
+  it("uses finalized progressive rows without running the whole-route allocator again", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const snapshot = { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [] }, phaseAllocation: { boundaries: [] } } as const;
+    const progressiveWeather: CompletePlanWeather = {
+      ...weather(),
+      loadedWindsData: undefined,
+      routeWeatherSamples: undefined,
+      progressiveCalculationSnapshot: snapshot,
+      phaseWindResolver: { resolveEffectiveWind: () => { throw new Error("Whole-route wind resolution must not run."); } },
+    };
+    const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: progressiveWeather });
+    expect(result.calculationSnapshot).toBe(snapshot);
+  });
+  it("fails closed when route weather samples have no finalized progressive snapshot", async () => {
+    const incompleteRouteWeather: CompletePlanWeather = {
+      ...weather(),
+      loadedWindsData: undefined,
+      routeWeatherSamples: [],
+      progressiveCalculationSnapshot: undefined,
+      phaseWindResolver: { resolveEffectiveWind: () => { throw new Error("Route samples must never be recalculated by the full-route engine."); } },
+    };
+    await expect(createFullNavlogCalculationEngine().calculate({
+      draft: { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" },
+      aircraftProfile: aircraftProfile(),
+      routeLegs: completeLegs(),
+      weather: incompleteRouteWeather,
+    })).rejects.toMatchObject({
+      name: "WeatherPhaseResolutionError",
+      message: "Route waypoint weather requires a finalized progressive calculation snapshot.",
+    });
+  });
   it("combines allocated phases with subleg weather and retains rows, boundaries, phase traces, and source provenance", async () => {
     const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: weather() });

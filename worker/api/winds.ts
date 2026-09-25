@@ -280,12 +280,19 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
   return forecasts;
 }
 
+function stationCoordinates(latitude: unknown, longitude: unknown): AirportCoordinates | null {
+  if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  return { latitudeDeg: latitude, longitudeDeg: longitude };
+}
+
 function stationEntry(value: unknown): StationCatalogEntry | null {
-  if (!isRecord(value) || !isFiniteNumber(value.lat) || !isFiniteNumber(value.lon) || value.lat < -90 || value.lat > 90 || value.lon < -180 || value.lon > 180) return null;
+  if (!isRecord(value)) return null;
+  const coordinates = stationCoordinates(value.lat, value.lon);
   const iataId = typeof value.iataId === 'string' && /^[A-Z0-9]{3}$/.test(value.iataId) ? value.iataId : null;
-  if (iataId === null) return null;
+  if (!coordinates || !iataId) return null;
   const name = typeof value.site === 'string' && value.site.length <= 200 ? value.site : null;
-  return { iataId, info: { name, coordinates: { latitudeDeg: value.lat, longitudeDeg: value.lon }, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
+  return { iataId, info: { name, coordinates, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
 }
 
 function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCatalog {

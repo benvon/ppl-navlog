@@ -44,7 +44,9 @@ export interface CompletePlanWeather {
   readonly arrivalTafWind?: SelectedArrivalWind;
   readonly departureMetarPayload?: MetarSuccessPayload;
   readonly destinationTafPayload?: TafAnswer;
-  /** Checked once against final navlog timing after the calculation pass. */
+  /** Finalized one-pass route calculation, produced while advancing through weather events. */
+  readonly progressiveCalculationSnapshot?: JsonValue;
+  /** Legacy calculation timing hook; progressive route results are already final. */
   readonly validateCalculatedTiming?: (calculationSnapshot: JsonValue) => string | undefined;
   readonly phaseWindResolver: EffectiveWindResolver;
   /** Immutable selected source data for per-subleg winds and teaching traces. */
@@ -142,7 +144,9 @@ const calculateFinalPlan = async (
   try {
     const calculation = await dependencies.calculations.calculate({ draft, aircraftProfile, routeLegs, weather });
     if (isInfeasiblePhaseSnapshot(calculation.calculationSnapshot)) return readyResult(routeLegs, weather, calculation.calculationSnapshot, [...weather.warnings, ...calculation.warnings]);
-    const timingError = weather.validateCalculatedTiming?.(calculation.calculationSnapshot);
+    const timingError = weather.progressiveCalculationSnapshot === undefined
+      ? weather.validateCalculatedTiming?.(calculation.calculationSnapshot)
+      : undefined;
     if (timingError !== undefined) return blocked("weather-unavailable", timingError, weather.warnings);
     return readyResult(routeLegs, weather, calculation.calculationSnapshot, [...weather.warnings, ...calculation.warnings]);
   } catch (error) {

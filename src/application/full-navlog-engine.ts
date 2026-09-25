@@ -10,7 +10,6 @@ import type { CompletePlanCalculationEngine, CompletePlanRouteLeg, CompletePlanW
 import { calculateNavlog, toNavlogCalculationSnapshot, type NavlogWindResolver } from "./navlog-calculation";
 import { allocateRoutePhases, type RoutePhaseAllocationInput, type RoutePhaseAllocationResult } from "./phase-allocation";
 import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "./phase-calculation-engine";
-import { createWaypointNavlogWindResolver } from "./route-weather-sampling";
 
 /**
  * The complete calculation engine. It composes only selected immutable weather
@@ -19,11 +18,13 @@ import { createWaypointNavlogWindResolver } from "./route-weather-sampling";
  */
 export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngine => ({
   calculate: async ({ draft, aircraftProfile, routeLegs, weather }) => {
+    if (weather.progressiveCalculationSnapshot !== undefined) {
+      return { calculationSnapshot: weather.progressiveCalculationSnapshot, warnings: weather.warnings };
+    }
     const routeSamples = weather.routeWeatherSamples;
     const loadedWinds = weather.loadedWindsData;
-    if (routeSamples === undefined && loadedWinds === undefined) {
-      throw new WeatherPhaseResolutionError("Complete navlog calculation requires immutable route waypoint answers or legacy loaded winds data.");
-    }
+    if (routeSamples !== undefined) throw new WeatherPhaseResolutionError("Route waypoint weather requires a finalized progressive calculation snapshot.");
+    if (loadedWinds === undefined) throw new WeatherPhaseResolutionError("Complete navlog calculation requires legacy loaded winds data when no finalized progressive snapshot is available.");
     const allocationInput = allocationInputFor(draft.descentTargetAltitudeFeetMsl.effectiveValue, aircraftProfile, routeLegs, weather);
     const allocation = allocateRoutePhases(requireValue(allocationInput));
     const allocatedPlan = requireValue(allocation);
@@ -41,9 +42,7 @@ export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngi
       })),
       aircraftProfile,
       fuelInputs: draft.fuelInputs,
-      windResolver: routeSamples !== undefined
-        ? createWaypointNavlogWindResolver(routeLegs, routeSamples, weather, aircraftProfile)
-        : navlogWindResolver(loadedWinds!),
+      windResolver: navlogWindResolver(loadedWinds),
     });
     const calculatedNavlog = requireValue(navlog);
     const navlogSnapshot = requireValue(toNavlogCalculationSnapshot(calculatedNavlog));

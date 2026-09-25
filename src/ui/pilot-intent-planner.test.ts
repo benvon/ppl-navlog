@@ -5,6 +5,8 @@ import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
 import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
 import type { AloftPointAnswer, AloftPointQuery } from "../../worker/api/contracts";
+import { coordinate, type Coordinate } from "../domain/coordinates";
+import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
 import { renderPilotIntentPlanner } from "./pilot-intent-planner";
@@ -103,6 +105,33 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
   select.value = profile.id;
   select.dispatchEvent(new Event("change", { bubbles: true }));
   await settle();
+}
+
+function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
+  expect(callOrder).toEqual(["metar", "taf", "point", "point", "point", "point"]);
+  expect(queries).toHaveLength(4);
+  const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
+  if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
+  const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
+  if (!routeGeometry.ok) throw new Error(routeGeometry.error.message);
+  const interiorDistances = queries.slice(1, -1).map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
+  expect(queries[0]?.latitudeDeg).toBeCloseTo(departure.value.latitude, 4);
+  expect(queries[0]?.longitudeDeg).toBeCloseTo(departure.value.longitude, 4);
+  expect(interiorDistances[0]).toBeGreaterThan(0);
+  expect(interiorDistances[0]).toBeLessThan(interiorDistances[1]!);
+  expect(interiorDistances[1]).toBeLessThan(routeGeometry.value.distance);
+  expect(queries[3]?.latitudeDeg).toBeCloseTo(destination.value.latitude, 4);
+  expect(queries[3]?.longitudeDeg).toBeCloseTo(destination.value.longitude, 4);
+}
+
+function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
+  const point = coordinate(query.latitudeDeg, query.longitudeDeg);
+  if (!point.ok) throw new Error(point.error.message);
+  const fromDeparture = calculateGreatCircleDistanceAndInitialCourse(departure, point.value);
+  const toDestination = calculateGreatCircleDistanceAndInitialCourse(point.value, destination);
+  if (!fromDeparture.ok || !toDestination.ok) throw new Error("A sampled weather event coordinate was invalid.");
+  expect(fromDeparture.value.distance + toDestination.value.distance).toBeCloseTo(routeDistance, 1);
+  return fromDeparture.value.distance;
 }
 
 describe("pilot intent planner", () => {
@@ -214,8 +243,9 @@ describe("pilot intent planner", () => {
   it("updates from bounded point answers and endpoint weather without legacy discovery", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const callOrder: string[] = [];
+    const pointQueries: AloftPointQuery[] = [];
     const client = winds({
-      fetchPoint: async (query) => { callOrder.push("point"); return winds().fetchPoint(query); },
+      fetchPoint: async (query) => { callOrder.push("point"); pointQueries.push(query); return winds().fetchPoint(query); },
       fetchMetar: async (icao) => { callOrder.push("metar"); return completeFlightWeatherClient.fetchMetar(icao); },
       fetchTaf: async (icao) => { callOrder.push("taf"); return winds().fetchTaf(icao); },
     });
@@ -232,8 +262,8 @@ describe("pilot intent planner", () => {
     expect(repository.submissions).toHaveLength(1);
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
     expect(fetchTaf).toHaveBeenCalledWith("KJVL");
-    expect(fetchPoint).toHaveBeenCalledTimes(2);
-    expect(callOrder).toEqual(["metar", "taf", "point", "point"]);
+    expect(fetchPoint).toHaveBeenCalledTimes(4);
+    assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
     expect(discovery).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
@@ -250,10 +280,20 @@ describe("pilot intent planner", () => {
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
     expect(Number(storedMatch[1]).toFixed(1)).toBe(Number(displayedGroundspeed).toFixed(1));
     expect(inspector.textContent).toContain("BRL");
-    expect(inspector.textContent).toContain("wind lower altitude");
+    expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
+    expect(inspector.textContent).toContain("KORD");
     expect(inspector.textContent).toContain("horizontal weight");
-    expect(inspector.textContent).toContain("destination TAF candidate");
-    expect(inspector.textContent).toContain("SYNTHETIC prevailing");
+    groundspeed.click();
+    await settle();
+    const terminalGroundspeed = [...root.querySelectorAll<HTMLButtonElement>('button[data-inspect-field="groundspeed"]')].at(-1);
+    if (!terminalGroundspeed) throw new Error("Missing terminal groundspeed inspection control.");
+    terminalGroundspeed.click();
+    await settle();
+    const terminalInspector = root.querySelector(".calculation-inspector");
+    if (!terminalInspector) throw new Error("Missing terminal calculation inspector.");
+    expect(terminalInspector.textContent).toContain("TAF candidate 1 selected");
+    expect(terminalInspector.textContent).toContain("horizontal weight");
+    expect(terminalInspector.textContent).toContain("SYNTHETIC prevailing");
     expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
   });
 

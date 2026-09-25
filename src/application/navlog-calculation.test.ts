@@ -8,7 +8,7 @@ import { feetMsl, nauticalMiles, signedDegrees, trueCourse } from "../domain/uni
 import { wind } from "../domain/wind";
 import type { AircraftProfile } from "../domain/aircraft";
 import { isJsonValue } from "../services/storage/validation";
-import { calculateNavlog, toNavlogCalculationSnapshot, type AllocatedNavlogSubleg, type NavlogSourceLeg, type ResolvedNavlogWind } from "./navlog-calculation";
+import { calculateNavlog, calculateNavlogRow, createNavlogCalculationSession, createNavlogCalculationState, finalizeNavlog, toNavlogCalculationSnapshot, type AllocatedNavlogSubleg, type NavlogSourceLeg, type ResolvedNavlogWind } from "./navlog-calculation";
 
 const value = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T => {
   if (!result.ok) throw new Error("Expected a valid test value.");
@@ -98,6 +98,56 @@ const windValue = (overridden = false): ResolvedNavlogWind => {
 };
 
 describe("navlog calculation", () => {
+  it("finalizes each progressive interval once, carries cumulative state, and summarizes the finalized rows", () => {
+    const base = {
+      routeLegs: [sourceLeg()], aircraftProfile: profile(),
+      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      windResolver: { resolveEffectiveWind: () => success(windValue()) },
+    };
+    const session = createNavlogCalculationSession(base);
+    expect(session.ok).toBe(true);
+    if (!session.ok) throw new Error(session.error.message);
+    const firstInterval = subleg("pilot-waypoint-a", "cruise", 10);
+    const secondInterval: AllocatedNavlogSubleg = {
+      ...subleg("generated-tod", "descent", 5),
+      routeStartDistance: value(nauticalMiles(10)),
+      routeEndDistance: value(nauticalMiles(15)),
+      start: value(coordinate(42, -88.8)),
+      end: value(coordinate(42, -88.7)),
+    };
+    let state = createNavlogCalculationState();
+    let firstWindCalls = 0;
+    const first = calculateNavlogRow(session.value, state, firstInterval, {
+      resolveEffectiveWind: () => { firstWindCalls += 1; return success(windValue()); },
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.error.message);
+    state = first.value.state;
+    expect(firstWindCalls).toBe(1);
+    expect(first.value.row.cumulative.routeDistance).toBe(10);
+
+    let secondWindCalls = 0;
+    const second = calculateNavlogRow(session.value, state, secondInterval, {
+      resolveEffectiveWind: () => { secondWindCalls += 1; return success(windValue()); },
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error(second.error.message);
+    state = second.value.state;
+    expect(secondWindCalls).toBe(1);
+    expect(second.value.row.cumulative.routeDistance).toBe(15);
+    expect(second.value.row.cumulative.estimatedTimeEnroute).toBeCloseTo(
+      first.value.row.estimatedTimeEnroute + second.value.row.estimatedTimeEnroute,
+      10,
+    );
+
+    const finalized = finalizeNavlog(session.value, state);
+    expect(finalized.ok).toBe(true);
+    if (!finalized.ok) throw new Error(finalized.error.message);
+    expect(finalized.value.rows).toEqual([first.value.row, second.value.row]);
+    expect(finalized.value.fuelSummary.enrouteFuel).toBeCloseTo(first.value.row.fuel + second.value.row.fuel, 10);
+    expect(finalized.value.fuelSummary.descentFuel).toBe(second.value.row.fuel);
+  });
+
   it("calculates complete PHAK-style rows and keeps taxi, reserve, phase, and cumulative fuel distinct", () => {
     const result = calculateNavlog({
       allocatedSublegs: [subleg("climb", "climb", 5), subleg("cruise", "cruise", 10), subleg("descent", "descent", 5)],
