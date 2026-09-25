@@ -208,7 +208,7 @@ const isTafPayload = (value: unknown): value is TafAnswer => isRecord(value) &&
 const isRequestId = (value: unknown): value is string => isString(value, 128) && /^[0-9a-f-]{8,128}$/i.test(value);
 
 const POINT_QUERY_KEYS = ["latitudeDeg", "longitudeDeg", "altitudeFeetMsl", "plannedUtc"] as const;
-const POINT_SOURCE_KEYS = ["stationId", "latitudeDeg", "longitudeDeg", "distanceNauticalMiles", "horizontalWeight", "lowerAltitudeFeet", "upperAltitudeFeet", "verticalWeight", "temperatureLowerAltitudeFeet", "temperatureUpperAltitudeFeet", "temperatureVerticalWeight"] as const;
+const POINT_SOURCE_KEYS = ["stationId", "latitudeDeg", "longitudeDeg", "distanceNauticalMiles", "horizontalWeight", "lowerAltitudeFeet", "upperAltitudeFeet", "verticalWeight", "lowerWindFromDegTrue", "lowerWindSpeedKt", "upperWindFromDegTrue", "upperWindSpeedKt", "temperatureLowerAltitudeFeet", "temperatureUpperAltitudeFeet", "temperatureVerticalWeight", "temperatureLowerC", "temperatureUpperC"] as const;
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 const isAloftPointQuery = (value: unknown): value is AloftPointQuery => isRecord(value) && hasExactKeys(value, POINT_QUERY_KEYS) &&
   isBoundedNumber(value.latitudeDeg, -90, 90) && isBoundedNumber(value.longitudeDeg, -180, 180) &&
@@ -216,12 +216,13 @@ const isAloftPointQuery = (value: unknown): value is AloftPointQuery => isRecord
 const isPointSourceIdentity = (value: Record<string, unknown>): boolean => typeof value.stationId === "string" && /^[A-Z0-9]{3}$/.test(value.stationId) &&
   isBoundedNumber(value.latitudeDeg, -90, 90) && isBoundedNumber(value.longitudeDeg, -180, 180) && isBoundedNumber(value.distanceNauticalMiles, 0, 100);
 const isPointWindWeights = (value: Record<string, unknown>): boolean => isBoundedNumber(value.horizontalWeight, 0, 1) &&
-  isBoundedInteger(value.lowerAltitudeFeet, 0, 53000) && isBoundedInteger(value.upperAltitudeFeet, value.lowerAltitudeFeet as number, 53000) && isBoundedNumber(value.verticalWeight, 0, 1);
+  isBoundedInteger(value.lowerAltitudeFeet, 0, 53000) && isBoundedInteger(value.upperAltitudeFeet, value.lowerAltitudeFeet as number, 53000) && isBoundedNumber(value.verticalWeight, 0, 1) &&
+  isPointWind(value.lowerWindFromDegTrue, value.lowerWindSpeedKt) && isPointWind(value.upperWindFromDegTrue, value.upperWindSpeedKt);
 const isPointTemperatureWeights = (value: Record<string, unknown>): boolean => {
-  if (value.temperatureLowerAltitudeFeet === null && value.temperatureUpperAltitudeFeet === null && value.temperatureVerticalWeight === null) return true;
+  if ([value.temperatureLowerAltitudeFeet, value.temperatureUpperAltitudeFeet, value.temperatureVerticalWeight, value.temperatureLowerC, value.temperatureUpperC].every((item) => item === null)) return true;
   return isBoundedInteger(value.temperatureLowerAltitudeFeet, 0, 53000) &&
     isBoundedInteger(value.temperatureUpperAltitudeFeet, value.temperatureLowerAltitudeFeet as number, 53000) &&
-    isBoundedNumber(value.temperatureVerticalWeight, 0, 1);
+    isBoundedNumber(value.temperatureVerticalWeight, 0, 1) && isBoundedNumber(value.temperatureLowerC, -100, 100) && isBoundedNumber(value.temperatureUpperC, -100, 100);
 };
 const isAloftSourceWeight = (value: unknown): value is AloftSourceWeight => isRecord(value) && hasExactKeys(value, POINT_SOURCE_KEYS) &&
   isPointSourceIdentity(value) && isPointWindWeights(value) && isPointTemperatureWeights(value);

@@ -3,6 +3,7 @@ export type TraceUnit =
   | "degrees-magnetic"
   | "degrees-compass"
   | "degrees"
+  | "celsius"
   | "knots"
   | "nautical-miles"
   | "feet-msl"

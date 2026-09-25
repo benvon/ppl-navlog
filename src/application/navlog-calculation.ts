@@ -60,6 +60,8 @@ export interface NavlogSourceLeg {
     readonly variation: PlanningValue<SignedDegrees>;
     readonly trace: CalculationTrace;
   };
+  /** Progressive routes may refresh WMM at each generated subleg midpoint. */
+  readonly resolveMagneticVariation?: (subleg: AllocatedNavlogSubleg) => NavlogSourceLeg["magneticVariation"];
 }
 
 export interface NavlogCalculationInput {
@@ -260,7 +262,8 @@ const calculateRow = (
   if (!resolvedWind.ok) return propagateFailure(resolvedWind);
   const validSurfaceInterpolation = validateSurfaceInterpolation(resolvedWind.value.surfaceToAloftInterpolation);
   if (!validSurfaceInterpolation.ok) return propagateFailure(validSurfaceInterpolation);
-  return calculateHeadingAndFuelRow(subleg, sourceLeg, profile, performance.value, resolvedWind.value);
+  const magneticVariation = sourceLeg.resolveMagneticVariation?.(subleg) ?? sourceLeg.magneticVariation;
+  return calculateHeadingAndFuelRow(subleg, profile, performance.value, resolvedWind.value, magneticVariation);
 };
 
 const missingSourceLeg = (subleg: AllocatedNavlogSubleg): DomainResult<never> =>
@@ -270,14 +273,14 @@ const missingSourceLeg = (subleg: AllocatedNavlogSubleg): DomainResult<never> =>
 
 const calculateHeadingAndFuelRow = (
   subleg: AllocatedNavlogSubleg,
-  sourceLeg: NavlogSourceLeg,
   profile: AircraftProfile,
   performance: { readonly trueAirspeed: PlanningValue<Knots>; readonly fuelFlow: PlanningValue<GallonsPerHour> },
   effectiveWind: ResolvedNavlogWind,
+  magneticVariation: NavlogSourceLeg["magneticVariation"],
 ): DomainResult<NavlogRowWithoutCumulative> => {
   const windTriangle = solveWindTriangle(subleg.trueCourse, performance.trueAirspeed.effectiveValue, effectiveWind.wind.effectiveValue);
   if (!windTriangle.ok) return propagateFailure(windTriangle);
-  const magnetic = convertTrueToMagneticHeading(windTriangle.value.trueHeading, sourceLeg.magneticVariation.variation.effectiveValue);
+  const magnetic = convertTrueToMagneticHeading(windTriangle.value.trueHeading, magneticVariation.variation.effectiveValue);
   if (!magnetic.ok) return propagateFailure(magnetic);
   const deviation = deviationFor(profile, magnetic.value.heading);
   if (!deviation.ok) return propagateFailure(deviation);
@@ -287,13 +290,13 @@ const calculateHeadingAndFuelRow = (
   if (!ete.ok) return propagateFailure(ete);
   const fuel = calculateFuelForDuration(ete.value.duration, performance.fuelFlow.effectiveValue);
   if (!fuel.ok) return propagateFailure(fuel);
-  return success(rowWithoutCumulative(subleg, sourceLeg, performance, effectiveWind, windTriangle.value, magnetic.value, deviation.value, compass.value, ete.value, fuel.value));
+  return success(rowWithoutCumulative(subleg, performance, magneticVariation, effectiveWind, windTriangle.value, magnetic.value, deviation.value, compass.value, ete.value, fuel.value));
 };
 
 const rowWithoutCumulative = (
   subleg: AllocatedNavlogSubleg,
-  sourceLeg: NavlogSourceLeg,
   performance: { readonly trueAirspeed: PlanningValue<Knots>; readonly fuelFlow: PlanningValue<GallonsPerHour> },
+  magneticVariation: NavlogSourceLeg["magneticVariation"],
   effectiveWind: ResolvedNavlogWind,
   windTriangle: ReturnType<typeof solveWindTriangle> extends DomainResult<infer T> ? T : never,
   magnetic: ReturnType<typeof convertTrueToMagneticHeading> extends DomainResult<infer T> ? T : never,
@@ -306,12 +309,12 @@ const rowWithoutCumulative = (
   return {
     subleg, effectiveWind, trueAirspeed: performance.trueAirspeed, fuelFlow: performance.fuelFlow,
     windCorrectionAngle: windTriangle.windCorrectionAngle, trueHeading: windTriangle.trueHeading,
-    variation: sourceLeg.magneticVariation.variation, magneticHeading: magnetic.heading,
+    variation: magneticVariation.variation, magneticHeading: magnetic.heading,
     compassDeviation: deviation.deviation, compassHeading: compass.heading, groundspeed: windTriangle.groundspeed,
     estimatedTimeEnroute: ete.duration, fuel: fuel.fuel, assumptions,
-    appliedOverrides: appliedOverrides(effectiveWind.wind, performance.trueAirspeed, performance.fuelFlow, sourceLeg.magneticVariation.variation),
+    appliedOverrides: appliedOverrides(effectiveWind.wind, performance.trueAirspeed, performance.fuelFlow, magneticVariation.variation),
     traces: {
-      effectiveWind: effectiveWind.trace, windTriangle: windTriangle.trace, magneticVariation: sourceLeg.magneticVariation.trace,
+      effectiveWind: effectiveWind.trace, windTriangle: windTriangle.trace, magneticVariation: magneticVariation.trace,
       trueToMagnetic: magnetic.trace, compassDeviation: deviation.trace, magneticToCompass: compass.trace,
       estimatedTimeEnroute: ete.trace, fuel: fuel.trace,
     },

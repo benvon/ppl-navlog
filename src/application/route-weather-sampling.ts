@@ -121,7 +121,15 @@ const calculateProgressiveRoute = async (
   const { descentTas, descentMinutes, todDistance } = descentPlan;
 
   const session = createNavlogCalculationSession({
-    routeLegs: routeLegs.map((leg) => ({ sourceLeg: leg.sourceLeg, magneticVariation: leg.magneticVariation })),
+    routeLegs: routeLegs.map((leg) => ({
+      sourceLeg: leg.sourceLeg,
+      magneticVariation: leg.magneticVariation,
+      resolveMagneticVariation: (subleg) => segmentMagneticVariation(
+        leg,
+        subleg,
+        new Date(Date.parse(draft.departureTimeUtc) + state.cumulativeMinutes * 60_000),
+      ),
+    })),
     aircraftProfile: profile,
     fuelInputs: draft.fuelInputs,
     windResolver: { resolveEffectiveWind: () => failure("INVALID_WIND_SAMPLING", "A progressive event resolver is required for every row.") },
@@ -198,10 +206,11 @@ const calculateProgressiveRoute = async (
     const phaseEventDistance = verticalEventDistance(nextWaypointDistance, todRequested, todDistance, cursorDistance, mode, totalDistance);
     const terminal = cursorDistance >= totalDistance - TERMINAL_PATTERN_DISTANCE_NM;
     let selectedWind = intervalWind(mode, currentAltitude, phaseTarget, terminal);
-    let triangle = requiredVerticalTriangle(line, tas, selectedWind);
-    const neededMinutes = Math.abs(phaseTarget - currentAltitude) / rate;
-    const neededDistance = triangle.groundspeed * neededMinutes / 60;
     const remainingToEvent = phaseEventDistance - cursorDistance;
+    const neededMinutes = Math.abs(phaseTarget - currentAltitude) / rate;
+    const estimate = verticalDistanceEstimate(line, tas, selectedWind, neededMinutes, remainingToEvent);
+    let triangle = estimate.triangle;
+    const neededDistance = estimate.distance;
     const reachesTarget = neededDistance <= remainingToEvent + 1e-8;
     const segmentDistance = reachesTarget ? neededDistance : remainingToEvent;
     if (!reachesTarget) ({ selectedWind, triangle } = refineVerticalWind(line, selectedWind, triangle, tas, climbing, rate, segmentDistance, terminal));
@@ -227,10 +236,20 @@ const calculateProgressiveRoute = async (
     !todDone && tod > cursor + 1e-8 ? tod : Number.POSITIVE_INFINITY,
     phase === "descent" && cursor < total - TERMINAL_PATTERN_DISTANCE_NM - 1e-8 ? total - TERMINAL_PATTERN_DISTANCE_NM : Number.POSITIVE_INFINITY,
   );
-  const requiredVerticalTriangle = (line: RouteLine, tas: Knots, localWind: Wind) => {
-    const result = solveWindTriangle(line.leg.trueCourse, tas, localWind);
+  const requiredVerticalTriangle = (line: RouteLine, tas: Knots, localWind: Wind, endDistance: number) => {
+    const course = courseForLineInterval(line, cursorDistance, endDistance);
+    const result = solveWindTriangle(course, tas, localWind);
     if (!result.ok) throw new RouteWeatherSamplingError("Progressive vertical phase cannot produce a valid groundspeed.");
     return result.value;
+  };
+  const verticalDistanceEstimate = (line: RouteLine, tas: Knots, localWind: Wind, durationMinutes: number, remainingDistance: number) => {
+    let triangle = requiredVerticalTriangle(line, tas, localWind, cursorDistance + remainingDistance);
+    let distance = triangle.groundspeed * durationMinutes / 60;
+    for (let iteration = 0; iteration < 3; iteration += 1) {
+      triangle = requiredVerticalTriangle(line, tas, localWind, cursorDistance + Math.min(distance, remainingDistance));
+      distance = triangle.groundspeed * durationMinutes / 60;
+    }
+    return { triangle, distance };
   };
   const refineVerticalWind = (
     line: RouteLine, initialWind: Wind, initialTriangle: ReturnType<typeof requiredVerticalTriangle>, tas: Knots,
@@ -240,7 +259,7 @@ const calculateProgressiveRoute = async (
     for (let iteration = 0; iteration < 3; iteration += 1) {
       const predicted = currentAltitude + (climbing ? 1 : -1) * rate * (distance / triangle.groundspeed * 60);
       selectedWind = intervalWind(mode, currentAltitude, predicted, terminal);
-      triangle = requiredVerticalTriangle(line, tas, selectedWind);
+      triangle = requiredVerticalTriangle(line, tas, selectedWind, cursorDistance + distance);
     }
     return { selectedWind, triangle };
   };
@@ -339,7 +358,33 @@ const makeProgressiveSubleg = (line: RouteLine, startDistance: number, endDistan
   const routeStartDistance = nauticalMiles(startDistance), routeEndDistance = nauticalMiles(endDistance);
   if (!routeStartDistance.ok || !routeEndDistance.ok) throw new RouteWeatherSamplingError("Progressive route distance is invalid.");
   const base = { id, sourceLegId: line.leg.sourceLeg.id, phase, start, end, distance: checkedDistance.value };
-  return { ...base, phaseId, trueCourse: line.leg.trueCourse, routeStartDistance: routeStartDistance.value, routeEndDistance: routeEndDistance.value, startingAltitude: startingAltitude.value, endingAltitude: endingAltitude.value, selectedCruiseAltitude: selected.value };
+  return { ...base, phaseId, trueCourse: courseForLineInterval(line, startDistance, endDistance), routeStartDistance: routeStartDistance.value, routeEndDistance: routeEndDistance.value, startingAltitude: startingAltitude.value, endingAltitude: endingAltitude.value, selectedCruiseAltitude: selected.value };
+};
+
+const courseForLineInterval = (line: RouteLine, startDistance: number, endDistance: number) => {
+  const result = calculateGreatCircleDistanceAndInitialCourse(coordinateAtLineDistance(line, startDistance), coordinateAtLineDistance(line, endDistance));
+  if (!result.ok) throw new RouteWeatherSamplingError(result.error.message);
+  return result.value.initialTrueCourse;
+};
+
+const segmentMagneticVariation = (leg: CompletePlanRouteLeg, subleg: AllocatedNavlogSubleg, date: Date): CompletePlanRouteLeg["magneticVariation"] => {
+  const geometry = calculateGreatCircleDistanceAndInitialCourse(subleg.start, subleg.end);
+  if (!geometry.ok) throw new RouteWeatherSamplingError(geometry.error.message);
+  const midpointDistance = nauticalMiles(geometry.value.distance / 2);
+  if (!midpointDistance.ok) throw new RouteWeatherSamplingError(midpointDistance.error.message);
+  const midpoint = pointAlongGreatCircle(subleg.start, geometry.value.initialTrueCourse, midpointDistance.value);
+  if (!midpoint.ok) throw new RouteWeatherSamplingError(midpoint.error.message);
+  const calculated = calculatePlanningMagneticVariation({
+    coordinate: midpoint.value,
+    date,
+    altitudeFeetMsl: (subleg.startingAltitude + subleg.endingAltitude) / 2,
+  });
+  const base = leg.magneticVariation.variation;
+  if (base.override === undefined) return calculated;
+  return {
+    ...calculated,
+    variation: { ...calculated.variation, effectiveValue: base.effectiveValue, override: base.override },
+  };
 };
 
 interface DepartureBlendEvidence { readonly stationIcao: string; readonly aloftRequestId: string; readonly aloftLatitudeDeg: number; readonly aloftLongitudeDeg: number; readonly fieldElevationFeetMsl: number; readonly aloftAltitudeFeetMsl: number; readonly midpointAltitudeFeetMsl: number; readonly fraction: number; readonly directionFromDegTrue: number; readonly speedKt: number; }
@@ -393,9 +438,15 @@ const progressiveSourceTraceInputs = (source: AloftPointAnswer["sources"][number
   { name: `${source.stationId} lower altitude`, value: source.lowerAltitudeFeet, unit: "feet-msl" as const },
   { name: `${source.stationId} upper altitude`, value: source.upperAltitudeFeet, unit: "feet-msl" as const },
   { name: `${source.stationId} vertical weight`, value: source.verticalWeight, unit: "unitless" as const },
+  { name: `${source.stationId} lower wind from`, value: source.lowerWindFromDegTrue ?? 0, unit: "degrees-true" as const },
+  { name: `${source.stationId} lower wind speed`, value: source.lowerWindSpeedKt, unit: "knots" as const },
+  { name: `${source.stationId} upper wind from`, value: source.upperWindFromDegTrue ?? 0, unit: "degrees-true" as const },
+  { name: `${source.stationId} upper wind speed`, value: source.upperWindSpeedKt, unit: "knots" as const },
   ...(source.temperatureLowerAltitudeFeet === null ? [] : [{ name: `${source.stationId} temperature lower altitude`, value: source.temperatureLowerAltitudeFeet, unit: "feet-msl" as const }]),
   ...(source.temperatureUpperAltitudeFeet === null ? [] : [{ name: `${source.stationId} temperature upper altitude`, value: source.temperatureUpperAltitudeFeet, unit: "feet-msl" as const }]),
   ...(source.temperatureVerticalWeight === null ? [] : [{ name: `${source.stationId} temperature vertical weight`, value: source.temperatureVerticalWeight, unit: "unitless" as const }]),
+  ...(source.temperatureLowerC === null ? [] : [{ name: `${source.stationId} lower temperature`, value: source.temperatureLowerC, unit: "celsius" as const }]),
+  ...(source.temperatureUpperC === null ? [] : [{ name: `${source.stationId} upper temperature`, value: source.temperatureUpperC, unit: "celsius" as const }]),
 ];
 const departureBlendTraceInputs = (blend?: DepartureBlendEvidence) => blend === undefined ? [] : [
   { name: "departure METAR station", value: blend.stationIcao, unit: "unitless" as const },
@@ -439,9 +490,10 @@ const estimateRemainingMinutes = (lines: readonly RouteLine[], from: number, to:
   if (!checkedTas.ok) throw new RouteWeatherSamplingError("Descent true airspeed is invalid.");
   let minutes = 0;
   for (const line of lines) {
-    const segmentDistance = Math.max(0, Math.min(to, line.endDistance) - Math.max(from, line.startDistance));
-    if (segmentDistance === 0) continue;
-    const triangle = solveWindTriangle(line.leg.trueCourse, checkedTas.value, localWind);
+    const segmentStart = Math.max(from, line.startDistance), segmentEnd = Math.min(to, line.endDistance);
+    const segmentDistance = Math.max(0, segmentEnd - segmentStart);
+    if (segmentDistance <= 1e-8) continue;
+    const triangle = solveWindTriangle(courseForLineInterval(line, segmentStart, segmentEnd), checkedTas.value, localWind);
     if (!triangle.ok) throw new RouteWeatherSamplingError("Could not estimate destination arrival from top-of-descent weather.");
     minutes += segmentDistance / triangle.value.groundspeed * 60;
   }

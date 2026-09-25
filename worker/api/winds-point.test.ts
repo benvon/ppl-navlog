@@ -63,7 +63,7 @@ describe('winds point request', () => {
     expect(answer.temperatureC).toBe(12.5);
     expect(answer.sources).toHaveLength(2);
     expect(answer.sources.reduce((sum, source) => sum + source.horizontalWeight, 0)).toBeCloseTo(1);
-    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 6000, upperAltitudeFeet: 9000, verticalWeight: 0.5, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 9000, temperatureVerticalWeight: 0.5 });
+    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 6000, upperAltitudeFeet: 9000, verticalWeight: 0.5, lowerWindFromDegTrue: 350, lowerWindSpeedKt: 20, upperWindFromDegTrue: 350, upperWindSpeedKt: 20, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 9000, temperatureVerticalWeight: 0.5, temperatureLowerC: 15, temperatureUpperC: 10 });
     expect(answer.useFrom <= answer.query.plannedUtc && answer.query.plannedUtc < answer.useUntil).toBe(true);
   });
 
@@ -79,7 +79,7 @@ describe('winds point request', () => {
     const answer = await adapterFor().getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 4500, plannedUtc: '2026-09-22T01:00:00.000Z' });
     expect(answer.windSpeedKt).toBeGreaterThan(19);
     expect(answer.temperatureC).toBeNull();
-    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 3000, upperAltitudeFeet: 6000, verticalWeight: 0.5, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null });
+    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 3000, upperAltitudeFeet: 6000, verticalWeight: 0.5, lowerWindFromDegTrue: 350, lowerWindSpeedKt: 20, upperWindFromDegTrue: 350, upperWindSpeedKt: 20, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null });
   });
 
   it('records temperature bounds independently from wind bounds', async () => {
@@ -88,7 +88,7 @@ describe('winds point request', () => {
     const answer = await adapterFor({ product: async (cycle) => new Response(sourceForCycle(cycle)) }).getWindsPoint({ latitudeDeg: 42.5, longitudeDeg: -89, altitudeFeetMsl: 10_000, plannedUtc: '2026-09-22T01:00:00.000Z' });
     expect(answer.temperatureC).toBeCloseTo(8.3333, 3);
     expect(answer.sources).toHaveLength(1);
-    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 9000, upperAltitudeFeet: 12_000, verticalWeight: 1 / 3, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 12_000, temperatureVerticalWeight: 2 / 3 });
+    expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 9000, upperAltitudeFeet: 12_000, verticalWeight: 1 / 3, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 12_000, temperatureVerticalWeight: 2 / 3, temperatureLowerC: 15, temperatureUpperC: 5 });
   });
 
   it('rejects unavailable cycles, out-of-coverage points, unsupported altitude, and stale product data', async () => {
@@ -140,7 +140,7 @@ describe('winds point request', () => {
       catalog: () => catalogResponse(regionCatalog)
     });
     await expect(adapter.getWindsPoint({ latitudeDeg: 21.3, longitudeDeg: -157.9, altitudeFeetMsl: 4500, plannedUtc: '2026-09-25T01:00:00.000Z' }))
-      .resolves.toMatchObject({ forecastCycle: '06', temperatureC: null, sources: expect.arrayContaining([expect.objectContaining({ stationId: 'LNY', temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null })]) });
+      .resolves.toMatchObject({ forecastCycle: '06', temperatureC: null, sources: expect.arrayContaining([expect.objectContaining({ stationId: 'LNY', temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null })]) });
   });
 
   it('ignores forecast rows without usable exact catalog identities', async () => {

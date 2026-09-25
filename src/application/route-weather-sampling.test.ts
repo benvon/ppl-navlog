@@ -31,7 +31,7 @@ const taf = (shiftAt = "2029-09-21T16:00:00.000Z"): TafAnswer => ({
 });
 const answer = (query: AloftPointQuery, direction: number, speed: number, useUntil = periodEnd, useFrom = departure, issuedAt = departure): AloftPointAnswer => ({
   query, windFromDegTrue: direction, windSpeedKt: speed, temperatureC: null, issuedAt, useFrom, useUntil,
-  forecastCycle: "06", sources: [{ stationId: "BRL", latitudeDeg: 40.7, longitudeDeg: -91.1, distanceNauticalMiles: 30, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 1, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null }],
+  forecastCycle: "06", sources: [{ stationId: "BRL", latitudeDeg: 40.7, longitudeDeg: -91.1, distanceNauticalMiles: 30, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 1, lowerWindFromDegTrue: direction, lowerWindSpeedKt: speed, upperWindFromDegTrue: direction, upperWindSpeedKt: speed, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null }],
   method: "station-level", requestId: `point-${query.latitudeDeg.toFixed(3)}-${query.longitudeDeg.toFixed(3)}`,
 });
 const endpoints = { departureMetar: metar(), destinationTaf: taf() };
@@ -50,7 +50,7 @@ async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query
 
 const navRows = (result: Awaited<ReturnType<typeof planWith>>["result"]) => {
   if (result.status !== "ready") throw new Error(result.message);
-  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly subleg: { readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number } }[] } };
+  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly trueHeading: number; readonly variation: { readonly effectiveValue: number; readonly provenance: { readonly recordedAt: string } }; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly traces: { readonly magneticVariation: { readonly inputs: readonly { readonly name: string; readonly value: number }[] } }; readonly subleg: { readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number; readonly trueCourse: number; readonly start: { readonly latitude: number; readonly longitude: number }; readonly end: { readonly latitude: number; readonly longitude: number } } }[] } };
   return snapshot.navlog.rows;
 };
 const assertTodCallUsesFixedAirspeedGeometry = (draft: ReturnType<typeof planDraft>, queries: readonly AloftPointQuery[]) => {
@@ -78,6 +78,8 @@ const assertProgressiveSnapshotEvidence = (result: Awaited<ReturnType<typeof pla
   expect(snapshotText).toContain("TOD no-wind placement distance");
   const climbRow = navRows(result).find((row) => row.subleg.phase === "climb");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("departure surface-to-aloft blend fraction");
+  expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("BRL lower wind speed");
+  expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("BRL upper wind from");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("KORD");
 };
 const assertProgressiveCallContract = (draft: ReturnType<typeof planDraft>, outcome: Awaited<ReturnType<typeof planWith>>) => {
@@ -148,6 +150,38 @@ describe("route waypoint weather sampling", () => {
     const projected = solution.weather.phaseWindResolver.resolveEffectiveWind({ phase: "descent", start: midpoint.value, courseDegreesTrue: geometry.value.initialTrueCourse, startingAltitudeFeetMsl: 4_500, targetAltitudeFeetMsl: 3_000, estimatedDistanceNauticalMiles: distance.value, iteration: 1 });
     expect(queries).toHaveLength(4);
     expect(projected.ok && projected.value.directionFrom).toBeCloseTo(270, 0);
+  });
+
+  it("recalculates course and WMM variation at every generated segment on a curved high-latitude route", async () => {
+    const base = planDraft();
+    const start = asCoordinate(68, -65), end = asCoordinate(70, -45);
+    const geometry = calculateGreatCircleDistanceAndInitialCourse(start, end);
+    if (!geometry.ok) throw new Error(geometry.error.message);
+    const points = [{ ...base.route.points[0]!, coordinate: start }, { ...base.route.points.at(-1)!, coordinate: end }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const { result } = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270);
+    const rows = navRows(result);
+    expect(rows.length).toBeGreaterThan(2);
+    const calculatedCourses = rows.map((row) => {
+      const course = calculateGreatCircleDistanceAndInitialCourse(asCoordinate(row.subleg.start.latitude, row.subleg.start.longitude), asCoordinate(row.subleg.end.latitude, row.subleg.end.longitude));
+      if (!course.ok) throw new Error(course.error.message);
+      expect(row.subleg.trueCourse).toBeCloseTo(course.value.initialTrueCourse, 8);
+      return row.subleg.trueCourse;
+    });
+    expect(new Set(calculatedCourses.map((course) => course.toFixed(4))).size).toBeGreaterThan(1);
+
+    const variationLocations = rows.map((row) => {
+      const get = (name: string) => row.traces.magneticVariation.inputs.find((input) => input.name === name)?.value;
+      return [get("latitude"), get("longitude"), get("altitude")];
+    });
+    expect(variationLocations.every((location) => location.every((value) => value !== undefined))).toBe(true);
+    expect(new Set(variationLocations.map((location) => `${location[0]?.toFixed(5)},${location[1]?.toFixed(5)},${location[2]}`)).size).toBe(rows.length);
+    rows.forEach((row) => {
+      const rowStartMinutes = row.cumulative.estimatedTimeEnroute - row.estimatedTimeEnroute;
+      expect(row.variation.provenance.recordedAt).toBe(new Date(Date.parse(departure) + rowStartMinutes * 60_000).toISOString());
+    });
+    const decimalYears = rows.map((row) => row.traces.magneticVariation.inputs.find((input) => input.name === "decimal year")?.value);
+    expect(decimalYears.every((year, index) => index === 0 || (year !== undefined && year >= (decimalYears[index - 1] ?? year)))).toBe(true);
   });
 
   it("rejects Worker-unsupported altitude and a departure altitude below field elevation before point requests", async () => {

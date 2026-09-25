@@ -382,7 +382,7 @@ describe("WorkerWindsAdapter", () => {
     const query = { latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 4500, plannedUtc: "2026-09-22T01:00:00.000Z" };
     const answer = {
       query, windFromDegTrue: 350.5, windSpeedKt: 14, temperatureC: -2, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-22T00:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06",
-      sources: [{ stationId: "BRL", latitudeDeg: 40.78, longitudeDeg: -91.12, distanceNauticalMiles: 1, horizontalWeight: 1, lowerAltitudeFeet: 3000, upperAltitudeFeet: 6000, verticalWeight: 0.5, temperatureLowerAltitudeFeet: 3000, temperatureUpperAltitudeFeet: 6000, temperatureVerticalWeight: 0.5 }],
+      sources: [{ stationId: "BRL", latitudeDeg: 40.78, longitudeDeg: -91.12, distanceNauticalMiles: 1, horizontalWeight: 1, lowerAltitudeFeet: 3000, upperAltitudeFeet: 6000, verticalWeight: 0.5, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 10, upperWindFromDegTrue: 280, upperWindSpeedKt: 15, temperatureLowerAltitudeFeet: 3000, temperatureUpperAltitudeFeet: 6000, temperatureVerticalWeight: 0.5, temperatureLowerC: 5, temperatureUpperC: 0 }],
       method: "horizontal-vertical-vector", requestId: "11111111-1111-4111-8111-111111111111",
     };
     const client = new WorkerWindsClient({ fetch: async () => Response.json(answer) }, "https://navlog.example");
