@@ -36,11 +36,11 @@ const answer = (query: AloftPointQuery, direction: number, speed: number, useUnt
 });
 const endpoints = { departureMetar: metar(), destinationTaf: taf() };
 
-async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query: AloftPointQuery) => number, options: { useUntil?: string | ((query: AloftPointQuery) => string); useFrom?: string | ((query: AloftPointQuery) => string); issuedAt?: string | ((query: AloftPointQuery) => string); destinationTaf?: TafAnswer; speed?: number } = {}) {
+async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query: AloftPointQuery) => number, options: { useUntil?: string | ((query: AloftPointQuery) => string); useFrom?: string | ((query: AloftPointQuery) => string); issuedAt?: string | ((query: AloftPointQuery) => string); destinationTaf?: TafAnswer; destinationMetar?: MetarSuccessPayload; speed?: number } = {}) {
   const queries: AloftPointQuery[] = [];
   const solution = await resolveRouteWeather(draft, aircraftProfile(), {
     async fetchPoint(query) { queries.push(query); return answer(query, directionAt(query), options.speed ?? 15, typeof options.useUntil === "function" ? options.useUntil(query) : options.useUntil, typeof options.useFrom === "function" ? options.useFrom(query) : options.useFrom, typeof options.issuedAt === "function" ? options.issuedAt(query) : options.issuedAt); },
-  }, { ...endpoints, destinationTaf: options.destinationTaf ?? taf() });
+  }, { ...endpoints, destinationTaf: options.destinationTaf ?? taf(), ...(options.destinationMetar === undefined ? {} : { destinationMetar: options.destinationMetar }) });
   const result = await calculateCompletePlan(draft, aircraftProfile(), {
     weather: { resolve: async () => solution.weather },
     calculations: createFullNavlogCalculationEngine(),
@@ -284,6 +284,90 @@ describe("route waypoint weather sampling", () => {
     expect(terminalRows.length).toBeGreaterThan(0);
     expect(terminalRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("TAF"))).toBe(true);
     expect(JSON.stringify(terminalRows.map((row) => row.effectiveWind.trace.inputs))).toContain("destination TAF selected group until");
+  });
+
+  it("uses a fresh destination METAR for a feasible TOD inside the five mile ring without adding a point call", async () => {
+    const baseDraft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...baseDraft, weatherSelection: { ...baseDraft.weatherSelection, departureMetarIcao: "KMSN", destinationTafIcao: "KMSN", destinationMetarIcao: "KMSN" } };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const baseMetar = metar(270);
+    const destinationMetar: MetarSuccessPayload = { ...baseMetar, metar: { ...baseMetar.metar, icao: "KJVL", metarRaw: "METAR KJVL 211200Z 27010KT" } };
+    const queries: AloftPointQuery[] = [];
+    const solution = await resolveRouteWeather(draft, profile, { async fetchPoint(query) { queries.push(query); return answer(query, 270, 15); } }, { ...endpoints, destinationMetar });
+    const result = await calculateCompletePlan(draft, profile, { weather: { resolve: async () => solution.weather }, calculations: createFullNavlogCalculationEngine() });
+    expect(queries).toHaveLength(draft.route.points.length + 2);
+    expect(solution.sampledPoints).toHaveLength(draft.route.points.length + 2);
+    const descentRows = navRows(result).filter((row) => row.subleg.phase === "descent");
+    expect(descentRows.length).toBeGreaterThan(0);
+    expect(descentRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("Destination METAR"))).toBe(true);
+    expect(descentRows.at(-1)?.subleg.endingAltitude).toBe(draft.descentTargetAltitudeFeetMsl.effectiveValue);
+    const metarEvidence = JSON.stringify({ provenance: solution.weather.provenance, rowTraces: descentRows.map((row) => row.effectiveWind.trace.inputs) });
+    expect(metarEvidence).toContain("metar-request");
+    expect(metarEvidence).toContain("destination METAR observed at");
+    expect(metarEvidence).toContain("destination METAR cache status");
+  });
+
+  it("accepts only the actual destination or explicitly selected destination METAR alternate", async () => {
+    const base = { ...planDraft(), departureTimeUtc: departure };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const draft = { ...base, weatherSelection: { ...base.weatherSelection, destinationMetarIcao: "KMSN" } };
+    const baseMetar = metar(270);
+    const selectedAlternate: MetarSuccessPayload = { ...baseMetar, metar: { ...baseMetar.metar, icao: "KMSN" } };
+    const solution = await resolveRouteWeather(draft, profile, { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationMetar: selectedAlternate });
+    expect(solution.weather.arrivalTafWind).toMatchObject({ source: "metar", stationIcao: "KMSN" });
+  });
+
+  it("falls back to the arrival-time TAF when destination METAR is stale at projected arrival", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const baseMetar = metar(270);
+    const destinationMetar: MetarSuccessPayload = { ...baseMetar, metar: { ...baseMetar.metar, icao: "KJVL", observedAt: "2029-09-21T09:00:00.000Z" } };
+    const solution = await resolveRouteWeather(draft, profile, { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationMetar });
+    const result = await calculateCompletePlan(draft, profile, { weather: { resolve: async () => solution.weather }, calculations: createFullNavlogCalculationEngine() });
+    expect(result.status).toBe("ready");
+    const descentRows = navRows(result).filter((row) => row.subleg.phase === "descent");
+    expect(descentRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("Destination TAF"))).toBe(true);
+  });
+
+  it("rejects a within-ring descent that cannot reach pattern target at the configured descent rate", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const baseMetar = metar(90);
+    const destinationMetar: MetarSuccessPayload = {
+      ...baseMetar,
+      metar: { ...baseMetar.metar, icao: "KJVL", wind: { ...baseMetar.metar.wind, speedKt: 90 }, metarRaw: "METAR KJVL 211200Z 09090KT" },
+    };
+    await expect(resolveRouteWeather(draft, profile, { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationMetar })).rejects.toThrow(/cannot reach the destination target altitude/i);
+  });
+
+  it("blocks when the selected destination METAR expires before actual arrival", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 1_500 };
+    const baseMetar = metar(270);
+    const destinationMetar: MetarSuccessPayload = {
+      ...baseMetar,
+      metar: { ...baseMetar.metar, icao: "KJVL", observedAt: "2029-09-21T10:59:00.000Z", wind: { ...baseMetar.metar.wind, speedKt: 80 }, metarRaw: "METAR KJVL 211059Z 27080KT" },
+    };
+    await expect(resolveRouteWeather(draft, profile, { async fetchPoint(query) { return answer(query, 270, 15); } }, { ...endpoints, destinationMetar })).rejects.toThrow(/no longer fresh through the completed arrival/i);
+  });
+
+  it("selects terminal wind at route start when the entire route is inside the five mile ring", async () => {
+    const base = planDraft();
+    const departurePoint = { ...base.route.points[0]!, elevationFeetMsl: 2_900 };
+    const destinationPoint = { ...base.route.points.at(-1)!, coordinate: asCoordinate(41.99, -87.9073), elevationFeetMsl: 2_900 };
+    const route = { ...base.route, points: [departurePoint, destinationPoint], legs: [{ id: "short-leg", fromPointId: departurePoint.id, toPointId: destinationPoint.id, cruiseAltitudeFeetMsl: 3_100 }] };
+    const draft = { ...base, departureTimeUtc: departure, route, descentTargetAltitudeFeetMsl: { ...base.descentTargetAltitudeFeetMsl, effectiveValue: 3_000 } };
+    const profile = { ...aircraftProfile(), descentRateFeetPerMinute: 500 };
+    const baseMetar = metar(270);
+    const destinationMetar: MetarSuccessPayload = { ...baseMetar, metar: { ...baseMetar.metar, icao: "KJVL" } };
+    const queries: AloftPointQuery[] = [];
+    const solution = await resolveRouteWeather(draft, profile, { async fetchPoint(query) { queries.push(query); return answer(query, 270, 15); } }, { ...endpoints, destinationMetar });
+    const result = await calculateCompletePlan(draft, profile, { weather: { resolve: async () => solution.weather }, calculations: createFullNavlogCalculationEngine() });
+    expect(result.status).toBe("ready");
+    expect(queries).toHaveLength(4);
+    const terminalRows = navRows(result).filter((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("Destination"));
+    expect(terminalRows.length).toBeGreaterThan(0);
+    expect(terminalRows.every((row) => row.effectiveWind.wind.provenance.sourceLabel.includes("METAR"))).toBe(true);
   });
 
   it("rejects a destination target equal to the final cruise altitude before point requests", async () => {

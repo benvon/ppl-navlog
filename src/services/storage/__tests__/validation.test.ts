@@ -64,11 +64,13 @@ describe("storage model validation", () => {
     const weatherSelection = { forecastValidTimeUtc: "2026-10-01T12:00:00.000Z", selectedAtUtc: timestamp };
     expect(validatePlanDraft({ ...planDraft(), weatherSelection }, fixedNow)).toBe(true);
     expect(validatePlanDraft({ ...planDraft(), weatherSelection: { departureMetarIcao: "KORD", destinationTafIcao: "KJVL" } }, fixedNow)).toBe(true);
+    expect(validatePlanDraft({ ...planDraft(), weatherSelection: { destinationMetarIcao: "KMSN" } }, fixedNow)).toBe(true);
     expect(validatePlanDraft({ ...planDraft(), weatherSelection: {} }, fixedNow)).toBe(true);
     expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { ...weatherSelection, forecastValidTimeUtc: "not-utc" } }, fixedNow)).toThrow(/forecastValidTimeUtc/u);
     expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { ...weatherSelection, selectedAtUtc: "2030-01-01T00:00:00.000Z" } }, fixedNow)).toThrow(/future/u);
     expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { departureMetarIcao: "KOR" } }, fixedNow)).toThrow(/departureMetarIcao/u);
     expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { destinationTafIcao: "KJVL " } }, fixedNow)).toThrow(/destinationTafIcao/u);
+    expect(() => validatePlanDraft({ ...planDraft(), weatherSelection: { destinationMetarIcao: "KMSN " } }, fixedNow)).toThrow(/destinationMetarIcao/u);
   });
 
   it("rejects malformed per-leg overrides and invalid checkpoint route structures", () => {

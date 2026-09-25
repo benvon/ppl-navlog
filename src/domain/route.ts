@@ -50,10 +50,12 @@ export interface PlanFuelInputs {
 
 /** Endpoint source choices and optional legacy weather selectors for old snapshots. */
 export interface PlanWeatherSelection {
-  /** Pilot-selected endpoint source when the airport's exact ICAO is unavailable. */
+  /** Pilot alternate used only when the departure airport has no METAR or ICAO identifier. */
   readonly departureMetarIcao?: string;
-  /** Pilot-selected endpoint source when the airport's exact ICAO is unavailable. */
+  /** Pilot alternate used only when the destination airport has no TAF or ICAO identifier. */
   readonly destinationTafIcao?: string;
+  /** Pilot-selected destination METAR alternate, queried only when destination has no METAR. */
+  readonly destinationMetarIcao?: string;
   /** Legacy fields retained only while older persisted plans are migrated. */
   readonly forecastValidTimeUtc?: string;
   readonly selectedAtUtc?: string;

@@ -10,7 +10,7 @@ import type { AircraftProfile } from "../domain/aircraft";
 import { canonicalPointCoordinateDegrees, type Coordinate } from "../domain/coordinates";
 import { trace } from "../domain/calculation-trace";
 import { MAX_CHECKPOINTS_PER_PLAN } from "../services/storage/pilot-input-repository";
-import { arrivalTafWindSelectionChanged, selectArrivalTafWind, type SelectedArrivalWind } from "./arrival-taf-wind";
+import { arrivalTafWindSelectionChanged, selectArrivalMetarWind, selectArrivalTafWind, type SelectedArrivalWind } from "./arrival-taf-wind";
 import { calculatePlanningMagneticVariation } from "./magnetic-variation";
 import type { CompletePlanRouteLeg, CompletePlanWeather, RouteWeatherSample } from "./complete-plan";
 import { calculateNavlogRow, createNavlogCalculationSession, createNavlogCalculationState, finalizeNavlog, type AllocatedNavlogSubleg, type NavlogWindResolver } from "./navlog-calculation";
@@ -63,7 +63,7 @@ export const resolveRouteWeather = async (
   draft: PlanDraft,
   profile: AircraftProfile,
   pointClient: RouteWeatherPointClient,
-  endpoints: { readonly departureMetar: MetarSuccessPayload; readonly destinationTaf: TafAnswer },
+  endpoints: { readonly departureMetar: MetarSuccessPayload; readonly destinationTaf: TafAnswer; readonly destinationMetar?: MetarSuccessPayload },
 ): Promise<RouteWeatherSolution> => {
   const prepared = prepareRouteWeatherInputs(draft, endpoints);
   const progressive = await calculateProgressiveRoute(draft, profile, pointClient, prepared, endpoints);
@@ -91,8 +91,8 @@ const prepareRouteWeatherInputs = (
   const departure = routeLegs[0]!.start, destination = routeLegs.at(-1)!.end;
   if (departure.kind !== "airport" || destination.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires airport departure and destination endpoints.");
   validateDepartureMetar(draft, departure, endpoints.departureMetar);
-  const selectedDestinationIcao = draft.weatherSelection?.destinationTafIcao ?? destination.icao;
-  if (endpoints.destinationTaf.stationIcao !== selectedDestinationIcao) throw new RouteWeatherSamplingError("Destination TAF station does not match the selected destination source.");
+  const allowedDestinationTafIcaos = new Set([destination.icao, draft.weatherSelection?.destinationTafIcao].filter((icao): icao is string => icao !== undefined));
+  if (!allowedDestinationTafIcaos.has(endpoints.destinationTaf.stationIcao)) throw new RouteWeatherSamplingError("Destination TAF station does not match the destination or selected alternate source.");
   const targets = buildWaypointTargets(draft, lines);
   return { routeLegs, lines, totalDistance, targets };
 };
@@ -109,7 +109,7 @@ const calculateProgressiveRoute = async (
   profile: AircraftProfile,
   client: RouteWeatherPointClient,
   prepared: PreparedRouteWeatherInputs,
-  endpoints: { readonly departureMetar: MetarSuccessPayload; readonly destinationTaf: TafAnswer },
+  endpoints: { readonly departureMetar: MetarSuccessPayload; readonly destinationTaf: TafAnswer; readonly destinationMetar?: MetarSuccessPayload },
 ): Promise<ProgressiveWeatherResult> => {
   const { routeLegs, lines, totalDistance } = prepared;
   const departure = routeLegs[0]!.start;
@@ -148,6 +148,8 @@ const calculateProgressiveRoute = async (
   let phaseTarget = firstTargetAltitude;
   let phaseId = mode === "climb" ? "departure-climb" : "route-cruise-1";
   let projectedArrivalWind: SelectedArrivalWind | undefined;
+  const terminalBoundaryDistance = totalDistance - TERMINAL_PATTERN_DISTANCE_NM;
+  const todInsideTerminalRing = todDistance >= terminalBoundaryDistance - 1e-8;
   let tocRequested = mode === "cruise";
   let todRequested = descentMinutes === 0;
   let rowSequence = 0;
@@ -190,13 +192,35 @@ const calculateProgressiveRoute = async (
     const todTarget: WaypointTarget = { routeDistance: todDistance, coordinate: todCoordinate, altitudeFeetMsl: finalCruiseAltitude };
     await fetchAt(todTarget, "generated top of descent");
     todRequested = true;
-    const projectedMinutes = estimateRemainingMinutes(lines, todDistance, totalDistance, descentTas, pointWind(currentAnswer));
-    projectedArrivalWind = selectArrivalTafWind(endpoints.destinationTaf, new Date(finalArrivalMs() + projectedMinutes * 60_000).toISOString(), routeLegs.at(-1)!.trueCourse, descentTas);
+    if (!todInsideTerminalRing) {
+      const projectedMinutes = estimateRemainingMinutes(lines, todDistance, totalDistance, descentTas, pointWind(currentAnswer));
+      projectedArrivalWind = selectArrivalTafWind(endpoints.destinationTaf, new Date(finalArrivalMs() + projectedMinutes * 60_000).toISOString(), routeLegs.at(-1)!.trueCourse, descentTas);
+    } else if (projectedArrivalWind === undefined) projectedArrivalWind = selectTerminalWindAtBoundary();
     if (Math.abs(currentAltitude - finalCruiseAltitude) > 1) throw new RouteWeatherSamplingError("Aircraft has not reached the selected cruise altitude at the fixed top-of-descent point.");
     mode = "descent";
     phaseTarget = finalTargetAltitude;
     phaseId = "arrival-descent";
   };
+
+  const destination = routeLegs.at(-1)!.end;
+  if (destination.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires an airport destination.");
+  const allowedDestinationMetarIcaos = new Set([destination.icao, draft.weatherSelection?.destinationMetarIcao].filter((icao): icao is string => icao !== undefined));
+  const selectTerminalWindAtBoundary = (): SelectedArrivalWind => selectProjectedTerminalWind({
+    taf: endpoints.destinationTaf,
+    metar: endpoints.destinationMetar,
+    allowedMetarIcaos: allowedDestinationMetarIcaos,
+    lines,
+    totalDistance,
+    fromDistance: terminalBoundaryDistance,
+    nowMs: finalArrivalMs(),
+    currentAnswer,
+    courseDegTrue: routeLegs.at(-1)!.trueCourse,
+    tasKnots: descentTas,
+  });
+  const selectTerminalWindAtBoundaryIfReached = (distance: number): void => {
+    if (todInsideTerminalRing && projectedArrivalWind === undefined && Math.abs(distance - terminalBoundaryDistance) < 1e-7) projectedArrivalWind = selectTerminalWindAtBoundary();
+  };
+  if (todInsideTerminalRing && terminalBoundaryDistance <= 1e-8) projectedArrivalWind = selectTerminalWindAtBoundary();
 
   const processVerticalInterval = async (line: RouteLine, legIndex: number, nextWaypointDistance: number): Promise<void> => {
     assertNotAtUnfetchedTod(todRequested, cursorDistance, todDistance);
@@ -219,6 +243,7 @@ const calculateProgressiveRoute = async (
     const nextAltitude = reachesTarget ? phaseTarget : currentAltitude + (climbing ? 1 : -1) * rate * predictedElapsed;
     const elapsed = calculateInterval(line, nextDistance, mode, currentAltitude, nextAltitude, phaseId, selectedWind);
     cursorDistance = nextDistance;
+    selectTerminalWindAtBoundaryIfReached(cursorDistance);
     const calculatedAltitude = currentAltitude + (climbing ? 1 : -1) * rate * elapsed;
     assertVerticalTargetReached(reachesTarget, calculatedAltitude, phaseTarget);
     currentAltitude = reachesTarget ? phaseTarget : calculatedAltitude;
@@ -234,6 +259,7 @@ const calculateProgressiveRoute = async (
   const verticalEventDistance = (nextWaypoint: number, todDone: boolean, tod: number, cursor: number, phase: ProgressiveRouteMode, total: number): number => Math.min(
     nextWaypoint,
     !todDone && tod > cursor + 1e-8 ? tod : Number.POSITIVE_INFINITY,
+    todInsideTerminalRing && projectedArrivalWind === undefined && cursor < terminalBoundaryDistance - 1e-8 ? terminalBoundaryDistance : Number.POSITIVE_INFINITY,
     phase === "descent" && cursor < total - TERMINAL_PATTERN_DISTANCE_NM - 1e-8 ? total - TERMINAL_PATTERN_DISTANCE_NM : Number.POSITIVE_INFINITY,
   );
   const requiredVerticalTriangle = (line: RouteLine, tas: Knots, localWind: Wind, endDistance: number) => {
@@ -278,21 +304,34 @@ const calculateProgressiveRoute = async (
 
   const advanceEventInterval = async (line: RouteLine, legIndex: number): Promise<void> => {
     const nextWaypointDistance = line.endDistance;
-    const todCanStartHere = !todRequested && todDistance >= cursorDistance - 1e-8 && todDistance <= nextWaypointDistance + 1e-8 && !isClimbOrTransition(mode);
-    if (todCanStartHere) {
-      if (todDistance > cursorDistance + 1e-8) calculateInterval(line, todDistance, "cruise", currentAltitude, currentAltitude, `${phaseId}:to-tod`);
-      cursorDistance = todDistance;
-      await requestTopOfDescent(line);
-      return;
-    }
+    if (await advanceToTerminalBoundaryBeforeTod(line, nextWaypointDistance)) return;
+    if (await requestTodIfHere(line, nextWaypointDistance)) return;
     if (isVerticalMode(mode)) {
       await processVerticalInterval(line, legIndex, nextWaypointDistance);
       return;
     }
-    const nextDistance = nextCruiseEventDistance(cursorDistance, nextWaypointDistance, todDistance, todRequested, totalDistance, projectedArrivalWind !== undefined);
+    const nextDistance = Math.min(nextCruiseEventDistance(cursorDistance, nextWaypointDistance, todDistance, todRequested, totalDistance, projectedArrivalWind !== undefined), todInsideTerminalRing && projectedArrivalWind === undefined && cursorDistance < terminalBoundaryDistance - 1e-8 ? terminalBoundaryDistance : Number.POSITIVE_INFINITY);
     calculateInterval(line, nextDistance, "cruise", currentAltitude, currentAltitude, phaseId);
     cursorDistance = nextDistance;
+    selectTerminalWindAtBoundaryIfReached(cursorDistance);
     if (!todRequested && Math.abs(cursorDistance - todDistance) < 1e-7) await requestTopOfDescent(line);
+  };
+
+  const advanceToTerminalBoundaryBeforeTod = async (line: RouteLine, nextWaypointDistance: number): Promise<boolean> => {
+    if (!todInsideTerminalRing || projectedArrivalWind !== undefined || terminalBoundaryDistance <= cursorDistance + 1e-8 || terminalBoundaryDistance >= nextWaypointDistance - 1e-8 || isClimbOrTransition(mode)) return false;
+    calculateInterval(line, terminalBoundaryDistance, "cruise", currentAltitude, currentAltitude, `${phaseId}:to-terminal-boundary`);
+    cursorDistance = terminalBoundaryDistance;
+    projectedArrivalWind = selectTerminalWindAtBoundary();
+    return true;
+  };
+
+  const requestTodIfHere = async (line: RouteLine, nextWaypointDistance: number): Promise<boolean> => {
+    const canStart = !todRequested && todDistance >= cursorDistance - 1e-8 && todDistance <= nextWaypointDistance + 1e-8 && !isClimbOrTransition(mode);
+    if (!canStart) return false;
+    if (todDistance > cursorDistance + 1e-8) calculateInterval(line, todDistance, "cruise", currentAltitude, currentAltitude, `${phaseId}:to-tod`);
+    cursorDistance = todDistance;
+    await requestTopOfDescent(line);
+    return true;
   };
 
   const fetchPilotWaypoint = async (waypointIndex: number): Promise<void> => {
@@ -326,8 +365,7 @@ const calculateProgressiveRoute = async (
 
   if (!todRequested) throw new RouteWeatherSamplingError("The generated top of descent was not reached in route order.");
   if (Math.abs(currentAltitude - finalTargetAltitude) > 1) throw new RouteWeatherSamplingError("The selected descent rate and true airspeed cannot reach the destination target altitude.");
-  const arrival = selectArrivalTafWind(endpoints.destinationTaf, new Date(finalArrivalMs()).toISOString(), routeLegs.at(-1)!.trueCourse, profile.descentTasKnots);
-  if (projectedArrivalWind !== undefined && arrivalTafWindSelectionChanged(projectedArrivalWind, arrival)) throw new RouteWeatherSamplingError("Completed arrival moved into a different destination TAF wind group; update the plan again for a consistent estimate.");
+  const arrival = validateFinalArrivalWind(projectedArrivalWind, endpoints.destinationTaf, endpoints.destinationMetar, allowedDestinationMetarIcaos, new Date(finalArrivalMs()).toISOString(), routeLegs.at(-1)!.trueCourse, profile.descentTasKnots);
   const navlog = finalizeNavlog(session.value, state);
   if (!navlog.ok) throw new RouteWeatherSamplingError(navlog.error.message);
   const snapshot = jsonValue({
@@ -348,6 +386,69 @@ const createFixedAirspeedDescentPlan = (finalCruise: number, target: number, dis
   const tod = minutes === 0 ? Number.POSITIVE_INFINITY : distance - tas * minutes / 60;
   if (tod < 0) throw new RouteWeatherSamplingError("Fixed-airspeed top of descent falls before the route starts; the selected descent cannot fit.");
   return { descentTas: tas, descentMinutes: minutes, todDistance: tod };
+};
+
+const isFreshDestinationMetar = (metar: MetarSuccessPayload | undefined, allowedIcaos: ReadonlySet<string>, arrivalMs: number): metar is MetarSuccessPayload => {
+  if (metar === undefined) return false;
+  const observed = metar.metar.observedAt === null ? Number.NaN : Date.parse(metar.metar.observedAt);
+  return allowedIcaos.has(metar.metar.icao) && Number.isFinite(observed) && observed <= arrivalMs && arrivalMs - observed <= MAX_METAR_AGE_MS && metar.provenance.cache.status !== "stale_on_error" && metar.provenance.cache.freshnessRemainingSeconds > 0 && metarWind(metar) !== null;
+};
+
+const selectProjectedTerminalWind = (input: {
+  readonly taf: TafAnswer;
+  readonly metar: MetarSuccessPayload | undefined;
+  readonly allowedMetarIcaos: ReadonlySet<string>;
+  readonly lines: readonly RouteLine[];
+  readonly totalDistance: number;
+  readonly fromDistance: number;
+  readonly nowMs: number;
+  readonly currentAnswer: AloftPointAnswer;
+  readonly courseDegTrue: number;
+  readonly tasKnots: number;
+}): SelectedArrivalWind => {
+  const projectedMinutes = estimateRemainingMinutes(input.lines, input.fromDistance, input.totalDistance, input.tasKnots, pointWind(input.currentAnswer));
+  const projectedArrivalMs = input.nowMs + projectedMinutes * 60_000;
+  const metar = input.metar;
+  const surfaceWind = metar?.metar.wind;
+  if (isFreshDestinationMetar(metar, input.allowedMetarIcaos, projectedArrivalMs) && surfaceWind !== undefined && surfaceWind.directionType !== "variable") {
+    return selectArrivalMetarWind({
+      icao: metar.metar.icao,
+      requestId: metar.requestId,
+      reportSource: metar.metar.source,
+      fetchedAt: metar.metar.fetchedAt,
+      observedAt: metar.metar.observedAt!,
+      raw: metar.metar.metarRaw,
+      cacheProvenance: {
+        status: metar.provenance.cache.status,
+        source: metar.provenance.cache.source,
+        freshnessRemainingSeconds: metar.provenance.cache.freshnessRemainingSeconds,
+        fetchedAt: metar.provenance.cache.fetchedAt,
+        expiresAt: metar.provenance.cache.expiresAt,
+      },
+      directionType: surfaceWind.directionType,
+      directionFromDegTrue: surfaceWind.directionDegTrue,
+      speedKt: surfaceWind.speedKt,
+    }, input.courseDegTrue, input.tasKnots);
+  }
+  return selectArrivalTafWind(input.taf, new Date(projectedArrivalMs).toISOString(), input.courseDegTrue, input.tasKnots);
+};
+
+const validateFinalArrivalWind = (
+  projected: SelectedArrivalWind | undefined,
+  taf: TafAnswer,
+  metar: MetarSuccessPayload | undefined,
+  allowedMetarIcaos: ReadonlySet<string>,
+  arrivalUtc: string,
+  courseDegTrue: number,
+  tasKnots: number,
+): SelectedArrivalWind => {
+  if (projected?.source === "metar") {
+    if (!isFreshDestinationMetar(metar, allowedMetarIcaos, Date.parse(arrivalUtc))) throw new RouteWeatherSamplingError("Destination METAR is no longer fresh through the completed arrival; update the plan again for a consistent estimate.");
+    return projected;
+  }
+  const arrival = selectArrivalTafWind(taf, arrivalUtc, courseDegTrue, tasKnots);
+  if (projected !== undefined && arrivalTafWindSelectionChanged(projected, arrival)) throw new RouteWeatherSamplingError("Completed arrival moved into a different destination TAF wind group; update the plan again for a consistent estimate.");
+  return arrival;
 };
 
 const makeProgressiveSubleg = (line: RouteLine, startDistance: number, endDistance: number, phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number, id: string, phaseId: string, distance: number): AllocatedNavlogSubleg => {
@@ -415,19 +516,21 @@ const progressiveResolvedWind = (answer: AloftPointAnswer, value: Wind, arrival?
     ...answer.sources.flatMap(progressiveSourceTraceInputs),
     ...departureBlendTraceInputs(blend),
     ...arrivalTraceInputs(arrival),
-  ], [], { name: "effective wind from", value: value.directionFrom, unit: "degrees-true" }, arrival === undefined ? "The current interval uses the point report fetched at its starting route event." : "Worst-case active destination TAF wind is applied to the terminal 5 NM.");
+  ], [], { name: "effective wind from", value: value.directionFrom, unit: "degrees-true" }, arrival === undefined ? "The current interval uses the point report fetched at its starting route event." : `${arrival.source === "metar" ? "Destination METAR" : "Worst-case active destination TAF"} wind is applied to the terminal 5 NM.`);
   return success({ wind: windValue, trace: windTrace });
 };
 
 const progressiveWindFormula = (arrival?: SelectedArrivalWind, blend?: DepartureBlendEvidence): string =>
-  arrival !== undefined ? "progressive-destination-taf-wind" : blend !== undefined ? "departure-surface-to-aloft-wind" : "progressive-route-point-wind";
+  arrival !== undefined
+    ? arrival.source === "metar" ? "progressive-destination-metar-wind" : "progressive-destination-taf-wind"
+    : blend !== undefined ? "departure-surface-to-aloft-wind" : "progressive-route-point-wind";
 const progressiveWindMetadata = (answer: AloftPointAnswer, arrival?: SelectedArrivalWind, blend?: DepartureBlendEvidence) => ({
   origin: arrival !== undefined || blend !== undefined ? "interpolated" as const : "external-data" as const,
   provenance: {
-    sourceId: arrival !== undefined ? `destination-taf:${arrival.selectedGroup.fromUtc}` : `route-point:${answer.requestId}`,
-    sourceLabel: arrival !== undefined ? `Destination TAF ${arrival.selectedGroup.kind} wind` : blend !== undefined ? "Departure METAR and aloft point blend" : "Most recent progressive winds-aloft point",
-    sourceVersion: arrival !== undefined ? `${arrival.selectedGroup.fromUtc} to ${arrival.selectedGroup.untilUtc}` : `${answer.method}; cycle ${answer.forecastCycle}`,
-    recordedAt: arrival !== undefined ? arrival.selectedGroup.fromUtc : answer.issuedAt,
+    sourceId: arrival !== undefined ? arrival.source === "metar" ? `destination-metar:${arrival.requestId}` : `destination-taf:${arrival.selectedGroup.fromUtc}` : `route-point:${answer.requestId}`,
+    sourceLabel: arrival !== undefined ? `Destination ${arrival.source === "metar" ? "METAR" : `TAF ${arrival.selectedGroup.kind}`} wind` : blend !== undefined ? "Departure METAR and aloft point blend" : "Most recent progressive winds-aloft point",
+    sourceVersion: arrival !== undefined ? arrival.source === "metar" ? arrival.raw : `${arrival.selectedGroup.fromUtc} to ${arrival.selectedGroup.untilUtc}` : `${answer.method}; cycle ${answer.forecastCycle}`,
+    recordedAt: arrival !== undefined ? arrival.source === "metar" ? arrival.observedAt : arrival.selectedGroup.fromUtc : answer.issuedAt,
   },
   explanation: { formulaId: progressiveWindFormula(arrival, blend), formulaVersion: "v1" },
 });
@@ -460,7 +563,19 @@ const departureBlendTraceInputs = (blend?: DepartureBlendEvidence) => blend === 
   { name: "departure climb midpoint altitude", value: blend.midpointAltitudeFeetMsl, unit: "feet-msl" as const },
   { name: "departure surface-to-aloft blend fraction", value: blend.fraction, unit: "unitless" as const },
 ];
-const arrivalTraceInputs = (arrival?: SelectedArrivalWind) => arrival === undefined ? [] : [
+const arrivalTraceInputs = (arrival?: SelectedArrivalWind) => arrival === undefined ? [] : arrival.source === "metar" ? [
+  { name: "destination METAR station", value: arrival.stationIcao, unit: "unitless" as const },
+  { name: "destination METAR request id", value: arrival.requestId, unit: "unitless" as const },
+  { name: "destination METAR report source", value: arrival.reportSource, unit: "unitless" as const },
+  { name: "destination METAR fetched at", value: arrival.fetchedAt, unit: "unitless" as const },
+  { name: "destination METAR observed at", value: arrival.observedAt, unit: "unitless" as const },
+  { name: "destination METAR raw", value: arrival.raw, unit: "unitless" as const },
+  { name: "destination METAR cache status", value: arrival.cacheProvenance.status, unit: "unitless" as const },
+  { name: "destination METAR cache source", value: arrival.cacheProvenance.source, unit: "unitless" as const },
+  { name: "destination METAR cache freshness remaining seconds", value: arrival.cacheProvenance.freshnessRemainingSeconds, unit: "unitless" as const },
+  { name: "destination METAR wind from", value: arrival.effectiveWind.directionFromDegTrue, unit: "degrees-true" as const },
+  { name: "destination METAR wind speed", value: arrival.effectiveWind.speedKt, unit: "knots" as const },
+] : [
   { name: "destination TAF selected group kind", value: arrival.selectedGroup.kind, unit: "unitless" as const },
   { name: "destination TAF selected group from", value: arrival.selectedGroup.fromUtc, unit: "unitless" as const },
   { name: "destination TAF selected group until", value: arrival.selectedGroup.untilUtc, unit: "unitless" as const },
@@ -609,12 +724,12 @@ const pointAnswerCoversQuery = (query: AloftPointQuery, answer: AloftPointAnswer
 };
 
 const validateDepartureMetar = (draft: PlanDraft, departure: Extract<CompletePlanRouteLeg["start"], { kind: "airport" }>, metar: MetarSuccessPayload): void => {
-  const expectedIcao = draft.weatherSelection?.departureMetarIcao ?? draft.weatherSelection?.surfaceWeatherIcao ?? departure.icao;
-  if (!isFreshDepartureMetar(metar, expectedIcao, Date.parse(draft.departureTimeUtc))) throw new RouteWeatherSamplingError("A fresh, identity-matched departure METAR is required for the departure surface anchor.");
+  const allowedIcaos = new Set([departure.icao, draft.weatherSelection?.departureMetarIcao, draft.weatherSelection?.surfaceWeatherIcao].filter((icao): icao is string => icao !== undefined));
+  if (!isFreshDepartureMetar(metar, allowedIcaos, Date.parse(draft.departureTimeUtc))) throw new RouteWeatherSamplingError("A fresh, identity-matched departure METAR is required for the departure surface anchor.");
 };
-const isFreshDepartureMetar = (metar: MetarSuccessPayload, expectedIcao: string, departureMs: number): boolean => {
+const isFreshDepartureMetar = (metar: MetarSuccessPayload, allowedIcaos: ReadonlySet<string>, departureMs: number): boolean => {
   const observed = metar.metar.observedAt === null ? Number.NaN : Date.parse(metar.metar.observedAt);
-  return metar.metar.icao === expectedIcao && Number.isFinite(observed) && observed <= departureMs && departureMs - observed <= MAX_METAR_AGE_MS && metar.provenance.cache.status !== "stale_on_error" && metar.provenance.cache.freshnessRemainingSeconds > 0 && metarWind(metar) !== null;
+  return allowedIcaos.has(metar.metar.icao) && Number.isFinite(observed) && observed <= departureMs && departureMs - observed <= MAX_METAR_AGE_MS && metar.provenance.cache.status !== "stale_on_error" && metar.provenance.cache.freshnessRemainingSeconds > 0 && metarWind(metar) !== null;
 };
 
 const weatherFor = (

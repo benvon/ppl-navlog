@@ -10,6 +10,7 @@ import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
 import { renderPilotIntentPlanner } from "./pilot-intent-planner";
+import { WindsClientError } from "../services/weather/winds-client";
 
 class MemoryInputs implements PilotInputRepository {
   readonly plans: PilotInputPlan[] = [];
@@ -55,11 +56,17 @@ const profile = aircraftProfile();
 function winds(overrides: Partial<WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
   return {
     ...completeFlightWeatherClient,
+    fetchMetar: async (icao) => {
+      const payload = await completeFlightWeatherClient.fetchMetar(icao);
+      return { ...payload, metar: { ...payload.metar, icao }, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache, key: `synthetic-metar:${icao}` } } };
+    },
     fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12, upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0, temperatureLowerC: 3, temperatureUpperC: 3 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
     fetchTaf: async () => ({ stationIcao: "KJVL", issuedAt: "2026-09-21T20:00:00.000Z", validFrom: "2026-09-21T21:00:00.000Z", validUntil: "2026-09-22T03:00:00.000Z", rawTaf: "SYNTHETIC TAF", groups: [{ kind: "prevailing", fromUtc: "2026-09-21T21:00:00.000Z", untilUtc: "2026-09-22T03:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "SYNTHETIC prevailing" }], requestId: "55555555-5555-4555-8555-555555555555" }),
     ...overrides,
   };
 }
+
+function noMetar(): WindsClientError { return new WindsClientError("API_FAILURE", "no METAR data", undefined, "upstream_no_data"); }
 
 async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -108,7 +115,7 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
 }
 
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
-  expect(callOrder).toEqual(["metar", "taf", "point", "point", "point", "point"]);
+  expect(callOrder).toEqual(["metar", "taf", "metar", "point", "point", "point", "point"]);
   expect(queries).toHaveLength(4);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
@@ -261,6 +268,7 @@ describe("pilot intent planner", () => {
 
     expect(repository.submissions).toHaveLength(1);
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
+    expect(fetchMetar).toHaveBeenCalledWith("KJVL");
     expect(fetchTaf).toHaveBeenCalledWith("KJVL");
     expect(fetchPoint).toHaveBeenCalledTimes(4);
     assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
@@ -295,6 +303,117 @@ describe("pilot intent planner", () => {
     expect(terminalInspector.textContent).toContain("horizontal weight");
     expect(terminalInspector.textContent).toContain("SYNTHETIC prevailing");
     expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
+  });
+
+  it("uses a pilot destination METAR alternate only after an explicit no-data response", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const requests: string[] = [];
+    const client = winds({ fetchMetar: async (icao) => {
+      requests.push(icao);
+      if (icao === "KJVL") throw noMetar();
+      const payload = await winds().fetchMetar(icao);
+      return payload;
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "destination-metar-icao", "KMSN", true);
+    button(root, "Update plan").click();
+    await settle();
+    expect(requests).toEqual(["KORD", "KJVL", "KMSN"]);
+    expect(repository.submissions.at(-1)?.rawFields["destination-metar-icao"]).toBe("KMSN");
+  });
+
+  it("uses each primary airport report before any entered endpoint alternate", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const metarRequests: string[] = [], tafRequests: string[] = [];
+    const client = winds({
+      fetchMetar: async (icao) => { metarRequests.push(icao); return winds().fetchMetar(icao); },
+      fetchTaf: async (icao) => { tafRequests.push(icao); return winds().fetchTaf(icao); },
+    });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "departure-metar-icao", "KMSN");
+    edit(root, "destination-taf-icao", "KMKE");
+    edit(root, "destination-metar-icao", "KMSN");
+    button(root, "Update plan").click();
+    await settle();
+    expect(metarRequests).toEqual(["KORD", "KJVL"]);
+    expect(tafRequests).toEqual(["KJVL"]);
+    expect(repository.submissions.at(-1)?.rawFields).toMatchObject({ "departure-metar-icao": "KMSN", "destination-taf-icao": "KMKE", "destination-metar-icao": "KMSN" });
+  });
+
+  it("uses the separately entered alternates for all endpoint products after typed no-data", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const metarRequests: string[] = [], tafRequests: string[] = [];
+    const client = winds({
+      fetchMetar: async (icao) => {
+        metarRequests.push(icao);
+        if (icao === "KORD" || icao === "KJVL") throw noMetar();
+        return winds().fetchMetar(icao);
+      },
+      fetchTaf: async (icao) => {
+        tafRequests.push(icao);
+        if (icao === "KJVL") throw noMetar();
+        return { ...(await winds().fetchTaf("KJVL")), stationIcao: icao };
+      },
+    });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root);
+    edit(root, "departure-metar-icao", "KMSN");
+    edit(root, "destination-taf-icao", "KMKE");
+    edit(root, "destination-metar-icao", "KMSN");
+    button(root, "Update plan").click();
+    await settle();
+    expect(metarRequests).toEqual(["KORD", "KJVL", "KMSN", "KMSN"]);
+    expect(tafRequests).toEqual(["KJVL", "KMKE"]);
+  });
+
+  it("does not substitute a destination METAR alternate when the destination METAR is merely stale", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const requests: string[] = [];
+    const client = winds({ fetchMetar: async (icao) => {
+      requests.push(icao);
+      const payload = await winds().fetchMetar(icao);
+      if (icao !== "KJVL") return payload;
+      return { ...payload, metar: { ...payload.metar, fetchedAt: "2026-09-21T16:00:00.000Z", observedAt: "2026-09-21T15:55:00.000Z" }, provenance: { ...payload.provenance, fetchedAt: "2026-09-21T16:00:00.000Z", cache: { ...payload.provenance.cache, status: "stale_on_error", freshnessRemainingSeconds: 0 } } };
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "destination-metar-icao", "KMSN");
+    button(root, "Update plan").click();
+    await settle();
+    expect(requests).toEqual(["KORD", "KJVL"]);
+  });
+
+  it("does not substitute a destination METAR alternate after a transport failure", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const requests: string[] = [];
+    const client = winds({ fetchMetar: async (icao) => {
+      requests.push(icao);
+      if (icao === "KJVL") throw new WindsClientError("TRANSPORT_FAILURE", "request failed");
+      return winds().fetchMetar(icao);
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    edit(root, "destination-metar-icao", "KMSN");
+    button(root, "Update plan").click();
+    await settle();
+    expect(requests).toEqual(["KORD", "KJVL"]);
+    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
+  });
+
+  it("allows destination TAF fallback when no destination METAR or alternate is available", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const client = winds({ fetchMetar: async (icao) => {
+      if (icao === "KJVL") throw noMetar();
+      return winds().fetchMetar(icao);
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
   });
 
   it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {

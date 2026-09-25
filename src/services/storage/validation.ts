@@ -386,6 +386,7 @@ function validateWeatherSelection(value: unknown, issues: ValidationIssue[], now
   validateOptionalUtcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
   validateOptionalWeatherIcao(value.departureMetarIcao, "$.weatherSelection.departureMetarIcao", issues);
   validateOptionalWeatherIcao(value.destinationTafIcao, "$.weatherSelection.destinationTafIcao", issues);
+  validateOptionalWeatherIcao(value.destinationMetarIcao, "$.weatherSelection.destinationMetarIcao", issues);
   validateOptionalWeatherIcao(value.surfaceWeatherIcao, "$.weatherSelection.surfaceWeatherIcao", issues);
 }
 

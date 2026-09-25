@@ -47,6 +47,7 @@ export class WindsClientError extends Error {
     readonly code: "INVALID_INPUT" | "TRANSPORT_FAILURE" | "INVALID_RESPONSE" | "API_FAILURE",
     message: string,
     readonly requestId?: string,
+    readonly apiCode?: ApiErrorCode,
   ) {
     super(message);
     this.name = "WindsClientError";
@@ -443,7 +444,7 @@ export class WorkerWindsClient implements WindsTransportClient, MetarTransportCl
       const payload = await readBoundedJson(response);
       if (!response.ok) {
         if (isErrorPayload(payload)) {
-          throw new WindsClientError("API_FAILURE", `Winds API request failed: ${payload.code}.`, payload.requestId);
+          throw new WindsClientError("API_FAILURE", `Winds API request failed: ${payload.code}.`, payload.requestId, payload.code);
         }
         throw new WindsClientError("INVALID_RESPONSE", "Winds API returned an unsuccessful response without a valid error contract.");
       }
