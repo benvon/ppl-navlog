@@ -246,7 +246,8 @@ describe("pilot intent planner", () => {
     expect(picker).not.toBeNull();
     picker.value = "2026-09-26T20:30";
     picker.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(input(root, "departure-time").value).toBe("2026-09-27T01:30");
+    const expectedUtc = new Date(2026, 8, 26, 20, 30).toISOString().slice(0, 16);
+    expect(input(root, "departure-time").value).toBe(expectedUtc);
     expect(root.querySelector('[data-utc-format]')?.textContent).toContain("YYYY-MM-DDTHH:mm");
     expect(root.querySelector('[data-current-clock]')?.textContent).toContain("UTC");
   });
