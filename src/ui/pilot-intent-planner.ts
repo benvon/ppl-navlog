@@ -45,7 +45,7 @@ class PilotIntentPlanner {
   private updateError = "";
   private saveError = "";
   private profileDraftDirty = false;
-  private readonly confirmedOverrides = new Set<number>();
+  private readonly openOverrideEditors = new Set<number>();
   private updating = false;
   private savingProfile = false;
   private saveQueue: Promise<void> = Promise.resolve();
@@ -102,7 +102,7 @@ class PilotIntentPlanner {
     this.profiles.forEach((p) => profile.append(new Option(p.name, p.id, false, p.id === this.current?.selectedProfileId)));
     profile.addEventListener("change", () => {
       if (this.result) this.activateStage("aircraft");
-      this.confirmedOverrides.clear();
+      this.openOverrideEditors.clear();
       const selected = this.profiles.find((candidate) => candidate.id === profile.value);
       if (this.current) {
         const next = {
@@ -121,7 +121,7 @@ class PilotIntentPlanner {
     profileLabel.append(profile);
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.arrival, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.fields[input.name] = input.value; this.captureStructured(form); if (input.name.startsWith("override-tas-")) { const index = Number(input.name.slice("override-tas-".length)); this.confirmedOverrides.delete(index); const confirmation = form.querySelector<HTMLInputElement>(`[data-override-confirmation="${index}"]`); if (confirmation) confirmation.checked = false; } this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.fields[input.name] = input.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.captureStructured(form); void this.persist(); });
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
@@ -262,11 +262,27 @@ class PilotIntentPlanner {
     });
     const altitudeSection = document.createElement("section"); altitudeSection.append(this.el("h3", "Cruise altitude per leg (feet MSL)"));
     (this.current?.cruiseAltitudeTexts ?? ["4500"]).forEach((alt, index) => {
-      altitudeSection.append(this.input(`altitude-${index}`, `Leg ${index + 1} cruise altitude`, alt), this.input(`override-tas-${index}`, `Leg ${index + 1} TAS override (kt, optional)`, this.fields[`override-tas-${index}`] ?? ""), this.input(`override-reason-${index}`, `Leg ${index + 1} override reason`, this.current?.overrideReasons[`tas-${index}`] ?? ""));
-      const explanation = document.createElement("p"); explanation.textContent = "A TAS override replaces aircraft cruise TAS for this leg and changes groundspeed, time, and fuel estimates. Review the calculated impact before using the plan."; altitudeSection.append(explanation);
-      const label = document.createElement("label"); const confirmation = document.createElement("input"); confirmation.type = "checkbox"; confirmation.dataset.overrideConfirmation = String(index); confirmation.checked = this.confirmedOverrides.has(index);
-      confirmation.addEventListener("change", () => { if (confirmation.checked) this.confirmedOverrides.add(index); else this.confirmedOverrides.delete(index); this.refreshUpdateGate(); });
-      label.append(confirmation, ` I understand the effect of a TAS override on leg ${index + 1}.`); altitudeSection.append(label);
+      const leg = document.createElement("div"); leg.className = "leg-inputs";
+      leg.append(this.input(`altitude-${index}`, `Leg ${index + 1} cruise altitude`, alt));
+      const override = this.fields[`override-tas-${index}`]?.trim() ?? "";
+      const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
+      const summary = document.createElement("p"); summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
+      leg.append(summary);
+      if (override || this.openOverrideEditors.has(index)) {
+        leg.append(this.input(`override-tas-${index}`, `Leg ${index + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${index}`, `Leg ${index + 1} override reason`, this.current?.overrideReasons[`tas-${index}`] ?? ""));
+        const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${index + 1}`;
+        restore.addEventListener("click", () => {
+          delete this.fields[`override-tas-${index}`]; delete this.fields[`override-reason-${index}`];
+          if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${index}`]; this.current = { ...this.current, overrideReasons: reasons }; }
+          this.openOverrideEditors.delete(index); this.invalidate(); this.render(); void this.persist();
+        });
+        leg.append(restore);
+      } else {
+        const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${index + 1}`;
+        reveal.addEventListener("click", () => { this.openOverrideEditors.add(index); this.render(); });
+        leg.append(reveal);
+      }
+      altitudeSection.append(leg);
     });
     wrapper.append(checkpoints, altitudeSection); return wrapper;
   }
@@ -343,7 +359,7 @@ class PilotIntentPlanner {
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...this.fields }, title: this.fields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
   private newPlan(): void {
     if (this.updating || this.savingProfile) return;
-    this.confirmedOverrides.clear();
+    this.openOverrideEditors.clear();
     this.fields = { ...initialFields };
     this.current = this.blankPlan();
     this.result = undefined;
@@ -364,7 +380,7 @@ class PilotIntentPlanner {
       this.fail(new Error("Saved plan no longer exists."));
       return;
     }
-    this.confirmedOverrides.clear();
+    this.openOverrideEditors.clear();
     this.current = plan;
     this.fields = restorePilotFields(plan.rawFields);
     this.result = undefined;
@@ -390,7 +406,7 @@ class PilotIntentPlanner {
     const hadOverrides = Object.entries(this.fields).some(([key, value]) =>
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
     ) || Object.values(this.current?.overrideReasons ?? {}).some((reason) => reason.trim() !== "");
-    this.confirmedOverrides.clear();
+    this.openOverrideEditors.clear();
     this.fields = Object.fromEntries(Object.entries(this.fields).filter(([key]) => !/^override-(?:tas|reason)-\d+$/.test(key)));
     if (this.current) this.current = { ...this.current, overrideReasons: {} };
     return hadOverrides;
@@ -416,7 +432,7 @@ class PilotIntentPlanner {
     // Do not replace the editor while focus leaves a field.
   }
   private localError(): string | undefined {
-    return validateLocalInputs(this.fields, this.current, this.profiles, this.profileDraftDirty, this.confirmedOverrides);
+    return validateLocalInputs(this.fields, this.current, this.profiles, this.profileDraftDirty);
   }
 
   private async update(): Promise<void> {
@@ -563,7 +579,7 @@ class PilotIntentPlanner {
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
-      const message = fieldErrorFor(input.name, this.fields, this.confirmedOverrides, this.current, this.profiles);
+      const message = fieldErrorFor(input.name, this.fields, this.current, this.profiles);
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
@@ -711,14 +727,14 @@ function requiredFieldsError(fields: Readonly<Record<string, string>>): string |
   return ["plan-title", "departure-time", "departure-icao", "destination-icao"]
     .some((key) => (fields[key] ?? "").trim() === "") ? "Enter a title, departure time, and both airports." : undefined;
 }
-function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[], profileDraftDirty: boolean, confirmedOverrides: ReadonlySet<number>): string | undefined {
+function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[], profileDraftDirty: boolean): string | undefined {
   const checks = [
     profileDraftDirty ? "Save the edited aircraft profile first." : undefined,
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
     fuelError(fields), fuelAboardError(fields, plan, profiles), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
     metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), tasOverrideError(plan, fields),
-    overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
+    overrideReasonError(plan, fields),
   ];
   return checks.find((message) => message !== undefined);
 }
@@ -776,15 +792,8 @@ function overrideReasonError(plan: PilotInputPlan | undefined, fields: Readonly<
   }
   return undefined;
 }
-function overrideConfirmationError(fields: Readonly<Record<string, string>>, confirmed: ReadonlySet<number>): string | undefined {
-  for (const [key, value] of Object.entries(fields)) {
-    const match = /^override-tas-(\d+)$/.exec(key);
-    if (match && value.trim() !== "" && !confirmed.has(Number(match[1]))) return `Confirm the effect of the TAS override for leg ${Number(match[1]) + 1}.`;
-  }
-  return undefined;
-}
-function fieldErrorFor(name: string, fields: Readonly<Record<string, string>>, confirmed: ReadonlySet<number>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[]): string | undefined {
-  return simpleFieldError(name, fields) ?? (name === "fuel-aboard" ? fuelAboardError(fields, plan, profiles) : undefined) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields, confirmed);
+function fieldErrorFor(name: string, fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[]): string | undefined {
+  return simpleFieldError(name, fields) ?? (name === "fuel-aboard" ? fuelAboardError(fields, plan, profiles) : undefined) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields);
 }
 function simpleFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";
@@ -810,19 +819,18 @@ function checkpointFieldError(name: string, fields: Readonly<Record<string, stri
   }
   return undefined;
 }
-function legFieldError(name: string, fields: Readonly<Record<string, string>>, confirmed: ReadonlySet<number>): string | undefined {
+function legFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";
-  return altitudeFieldError(name, value) ?? overrideValueFieldError(name, value, confirmed) ?? overrideReasonFieldError(name, fields);
+  return altitudeFieldError(name, value) ?? overrideValueFieldError(name, value) ?? overrideReasonFieldError(name, fields);
 }
 function altitudeFieldError(name: string, value: string): string | undefined {
   const altitude = /^altitude-(\d+)$/.exec(name);
   return altitude && !(value.trim() && Number.isFinite(Number(value)) && Number(value) > 0) ? "Enter a positive feet-MSL altitude." : undefined;
 }
-function overrideValueFieldError(name: string, value: string, confirmed: ReadonlySet<number>): string | undefined {
+function overrideValueFieldError(name: string, value: string): string | undefined {
   const override = /^override-tas-(\d+)$/.exec(name);
   if (override && value.trim()) {
     if (!Number.isFinite(Number(value)) || Number(value) <= 0) return "Cruise TAS override must be a positive number of knots.";
-    return confirmed.has(Number(override[1])) ? undefined : `Confirm the effect of the TAS override for leg ${Number(override[1]) + 1}.`;
   }
   return undefined;
 }

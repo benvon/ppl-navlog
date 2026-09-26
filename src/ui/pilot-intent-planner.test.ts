@@ -790,6 +790,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
+    button(root, "Override TAS for leg 1").click();
     edit(root, "override-tas-0", "-5");
     expect(button(root, "Update plan").disabled).toBe(true);
     expect(root.textContent).toContain("Leg 1 TAS override must be a positive number of knots.");
@@ -798,7 +799,7 @@ describe("pilot intent planner", () => {
     expect(repository.submissions).toHaveLength(0);
   });
 
-  it("requires override acknowledgement per plan and clears it when the override changes", async () => {
+  it("reveals TAS editing only on request, retains a reason, and restores the aircraft default", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const fields = {
       "plan-title": "First plan", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
@@ -814,28 +815,23 @@ describe("pilot intent planner", () => {
       updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
     });
     const root = await mount(repository);
+    expect(root.querySelector("[name='override-tas-0']")).toBeNull();
+    expect(root.querySelector("input[type='checkbox']")).toBeNull();
+    button(root, "Override TAS for leg 1").click();
     edit(root, "override-tas-0", "100", true);
+    expect(button(root, "Update plan").disabled).toBe(true);
     edit(root, "override-reason-0", "Training comparison", true);
     await settle();
-    const acknowledgement = root.querySelector<HTMLInputElement>("input[type='checkbox']");
-    expect(acknowledgement).not.toBeNull();
-    expect(button(root, "Update plan").disabled).toBe(true);
-    expect(root.textContent).toContain("Confirm the effect of the TAS override for leg 1.");
-    acknowledgement!.checked = true;
-    acknowledgement!.dispatchEvent(new Event("change", { bubbles: true }));
     expect(button(root, "Update plan").disabled).toBe(false);
-
-    edit(root, "override-tas-0", "104", true);
-    await settle();
-    expect(root.querySelector<HTMLInputElement>("input[type='checkbox']")?.checked).toBe(false);
-    expect(button(root, "Update plan").disabled).toBe(true);
-    root.querySelector<HTMLInputElement>("input[type='checkbox']")!.checked = true;
-    root.querySelector<HTMLInputElement>("input[type='checkbox']")!.dispatchEvent(new Event("change", { bubbles: true }));
     choosePlan(root, "Second plan");
     await settle();
     expect(input(root, "plan-title").value).toBe("Second plan");
-    expect(root.querySelector<HTMLInputElement>("input[type='checkbox']")?.checked).toBe(false);
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(input(root, "override-tas-0").value).toBe("102");
+    expect(root.textContent).toContain("Overridden TAS");
+    button(root, "Restore aircraft default for leg 1").click();
+    await settle();
+    expect(root.querySelector("[name='override-tas-0']")).toBeNull();
+    expect(repository.plans.at(-1)?.rawFields["override-tas-0"]).toBeUndefined();
   });
 
   it("clears current evidence on edit or failure, retains submitted inputs, and recovers on success", async () => {
@@ -945,10 +941,10 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     button(root, "Add checkpoint").click();
     await settle();
-    expect(input(root, "override-tas-0").value).toBe("");
-    expect(input(root, "override-reason-0").value).toBe("");
-    expect(input(root, "override-tas-1").value).toBe("");
-    expect(input(root, "override-reason-1").value).toBe("");
+    expect(root.querySelector("[name='override-tas-0']")).toBeNull();
+    expect(root.querySelector("[name='override-reason-0']")).toBeNull();
+    expect(root.querySelector("[name='override-tas-1']")).toBeNull();
+    expect(root.querySelector("[name='override-reason-1']")).toBeNull();
     expect(repository.plans.at(-1)?.overrideReasons).toEqual({});
     expect(repository.plans.at(-1)?.rawFields).not.toHaveProperty("override-tas-0");
     expect(root.querySelector("[role='status']")?.textContent).toContain("overrides and reasons were cleared");
