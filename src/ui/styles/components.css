@@ -11,6 +11,19 @@ body {
   background: var(--color-surface);
   font-weight: 600;
 }
+
+.current-clock {
+  display: grid;
+  gap: 0.2rem;
+  width: fit-content;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-utc-format] { margin: 0; color: var(--color-muted); font-size: 0.875rem; }
 .navlog-fuel-warning,
 .navlog-warnings {
   padding: var(--space-2);

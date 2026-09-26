@@ -11,6 +11,7 @@ import { renderCalculationInspector, type NavlogInspectionSelection } from "./ca
 import type { PlanDraft, PlanRevision } from "../domain/route";
 import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
+import { localDateTimeToUtcText, utcTextToLocalDateTime } from "./departure-time";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
@@ -50,6 +51,7 @@ class PilotIntentPlanner {
   private saveQueue: Promise<void> = Promise.resolve();
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
+  private clockTimer?: number;
 
   constructor(private readonly root: HTMLElement, private readonly dependencies: PilotIntentPlannerDependencies) {
     this.status.setAttribute("role", "status");
@@ -94,6 +96,7 @@ class PilotIntentPlanner {
       const group = routeFieldGroup(name, groups);
       group.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
+    this.appendDepartureTimeControls(groups.timing);
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
     const profile = document.createElement("select"); profile.name = "selectedProfileId"; profile.append(new Option("Choose profile", ""));
     this.profiles.forEach((p) => profile.append(new Option(p.name, p.id, false, p.id === this.current?.selectedProfileId)));
@@ -133,6 +136,51 @@ class PilotIntentPlanner {
     this.refreshUpdateGate();
     if (this.updating || this.savingProfile) shell.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button").forEach((control) => { control.disabled = true; });
     if (this.root.firstChild === null) this.root.append(this.content); else if (!this.root.contains(this.content)) this.root.replaceChildren(this.content);
+    this.startClock();
+  }
+
+  private appendDepartureTimeControls(group: HTMLElement): void {
+    const utcInput = group.querySelector<HTMLInputElement>('[name="departure-time"]')!;
+    const hint = document.createElement("p"); hint.dataset.utcFormat = "true"; hint.id = "departure-utc-format";
+    hint.textContent = "UTC format: YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-26T18:30.";
+    utcInput.setAttribute("aria-describedby", `departure-time-error ${hint.id}`);
+    const localLabel = document.createElement("label"); localLabel.textContent = "Choose local departure date and time ";
+    const picker = document.createElement("input"); picker.type = "datetime-local"; picker.name = "departure-local";
+    picker.value = utcTextToLocalDateTime(this.fields["departure-time"] ?? "") ?? "";
+    const localError = document.createElement("span"); localError.className = "field-error"; localError.setAttribute("aria-live", "polite");
+    picker.addEventListener("change", () => {
+      const converted = localDateTimeToUtcText(picker.value);
+      localError.textContent = converted.ok ? "" : converted.reason;
+      if (!converted.ok) return;
+      utcInput.value = converted.utcText;
+      utcInput.dispatchEvent(new Event("input", { bubbles: true }));
+      utcInput.dispatchEvent(new Event("blur", { bubbles: true }));
+    });
+    utcInput.addEventListener("input", () => { picker.value = utcTextToLocalDateTime(utcInput.value) ?? ""; localError.textContent = ""; });
+    localLabel.append(picker, localError);
+    const clock = document.createElement("div"); clock.dataset.currentClock = "true"; clock.className = "current-clock";
+    group.append(hint, localLabel, clock);
+    this.updateClock(clock);
+  }
+
+  private updateClock(clock: HTMLElement): void {
+    const now = new Date();
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const offsetMinutes = -now.getTimezoneOffset();
+    const offset = `${offsetMinutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMinutes) % 60).padStart(2, "0")}`;
+    const local = utcTextToLocalDateTime(now.toISOString().slice(0, 16))?.replace("T", " ") ?? "—";
+    clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}`));
+  }
+
+  private clockLine(value: string): HTMLElement { const line = document.createElement("div"); line.textContent = value; return line; }
+
+  private startClock(): void {
+    if (this.clockTimer !== undefined || !this.root.isConnected) return;
+    this.clockTimer = window.setInterval(() => {
+      if (!this.root.isConnected) { window.clearInterval(this.clockTimer); this.clockTimer = undefined; return; }
+      const clock = this.content.querySelector<HTMLElement>("[data-current-clock]");
+      if (clock) this.updateClock(clock);
+    }, 1000);
   }
 
   private stage(name: keyof typeof this.stageOpen, label: string, ...contents: HTMLElement[]): HTMLDetailsElement {
@@ -678,7 +726,7 @@ function profileError(plan: PilotInputPlan | undefined, profiles: readonly Aircr
   return !plan?.selectedProfileId || !profiles.some((profile) => profile.id === plan.selectedProfileId) ? "Select a saved aircraft profile." : undefined;
 }
 function departureTimeError(value: string): string | undefined {
-  try { localUtcTextToIso(value); return undefined; } catch { return "Enter a valid planned departure time in UTC."; }
+  try { localUtcTextToIso(value); return undefined; } catch { return "Enter a valid UTC time as YYYY-MM-DDTHH:mm, for example 2026-09-26T18:30."; }
 }
 function fuelError(fields: Readonly<Record<string, string>>): string | undefined {
   return (["taxi-fuel", "reserve-fuel"] as const).some((key) => { const value = fields[key] ?? ""; return value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) < 0; })

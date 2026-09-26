@@ -197,6 +197,28 @@ describe("pilot intent planner", () => {
     expect(input(root, "fuel-aboard").value).toBe("20");
   });
 
+  it("constructs UTC from a local picker and keeps a visible format hint", async () => {
+    const root = await mount(new MemoryInputs());
+    const picker = root.querySelector<HTMLInputElement>('[name="departure-local"]')!;
+    expect(picker).not.toBeNull();
+    picker.value = "2026-09-26T20:30";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(input(root, "departure-time").value).toBe("2026-09-27T01:30");
+    expect(root.querySelector('[data-utc-format]')?.textContent).toContain("YYYY-MM-DDTHH:mm");
+    expect(root.querySelector('[data-current-clock]')?.textContent).toContain("UTC");
+  });
+
+  it("preserves invalid UTC text and leaves the local picker unset", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "departure-time", "2026-09-27T01:", true);
+    await settle();
+    expect(input(root, "departure-time").value).toBe("2026-09-27T01:");
+    expect(root.querySelector<HTMLInputElement>('[name="departure-local"]')?.value).toBe("");
+    expect(root.querySelector("#departure-time-error")?.textContent).toContain("YYYY-MM-DDTHH:mm");
+    expect(repository.plans.at(-1)?.rawFields["departure-time"]).toBe("2026-09-27T01:");
+  });
+
   it("shows repository initialization failure in the planner", async () => {
     const repository = new MemoryInputs(); repository.failInitialize = true;
     const root = await mount(repository);
