@@ -39,6 +39,7 @@ const parent = (): PlanRevision => ({
   draftSnapshot: {
     ...planRevision().draftSnapshot,
     departureTimeUtc: "2026-09-21T18:00:00.000Z",
+    fuelInputs: { ...planRevision().draftSnapshot.fuelInputs, fuelAboardGallons: 20 },
     weatherSelection: { forecastValidTimeUtc: "2026-09-21T12:00:00.000Z", selectedAtUtc: "2026-09-21T12:00:00.000Z" },
   },
 });

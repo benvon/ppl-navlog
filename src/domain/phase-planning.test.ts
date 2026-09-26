@@ -7,7 +7,7 @@ import { assessProfileFeasibility, calculateConvergedVerticalPhase, calculateFue
 import { calculateClimbToTopOfClimb, calculateDescentFromTopOfDescent } from "./phase-route-planning";
 import { calculateAltitudeTransition } from "./phase-transitions";
 import { failure } from "./errors";
-import { feetMsl, gallons, nauticalMiles, trueCourse } from "./units";
+import { feetMsl, gallons, nauticalMiles, signedGallons, trueCourse } from "./units";
 import { wind } from "./wind";
 
 const value = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T => {
@@ -327,6 +327,24 @@ describe("fuel summary", () => {
     expect(result.requiredFuel).toBe(13.5);
     expect(result.sufficientUsableFuel).toBe(false);
     expect(result.usableFuelDifference).toBe(-1.5);
+  });
+
+  it("matches the aboard-fuel acceptance balances and reserve outcomes", () => {
+    const complete = value(calculateFuelSummary({
+      taxiRunupFuel: value(gallons(1)), climbFuel: value(gallons(0)), transitionFuel: value(gallons(0)),
+      cruiseFuel: value(gallons(8)), descentFuel: value(gallons(0)), reserveFuel: value(gallons(5)),
+      fuelAboard: value(gallons(30)), fuelAfterTaxi: value(signedGallons(29)), estimatedArrivalFuel: value(signedGallons(21)),
+      runningFuelBalances: [value(signedGallons(29)), value(signedGallons(21))],
+    }));
+    expect(complete).toMatchObject({ fuelAboard: 30, fuelAfterTaxi: 29, estimatedArrivalFuel: 21, reserveMargin: 16, reserveShortfall: 0, sufficientAboardFuel: true });
+
+    const short = value(calculateFuelSummary({
+      taxiRunupFuel: value(gallons(1)), climbFuel: value(gallons(0)), transitionFuel: value(gallons(0)),
+      cruiseFuel: value(gallons(8)), descentFuel: value(gallons(0)), reserveFuel: value(gallons(3)),
+      fuelAboard: value(gallons(10)), fuelAfterTaxi: value(signedGallons(9)), estimatedArrivalFuel: value(signedGallons(1)),
+      runningFuelBalances: [value(signedGallons(9)), value(signedGallons(1))],
+    }));
+    expect(short).toMatchObject({ fuelAfterTaxi: 9, estimatedArrivalFuel: 1, reserveMargin: -2, reserveShortfall: 2, sufficientAboardFuel: false });
   });
 
   it("allows a fuel summary without a usable-fuel comparison", () => {

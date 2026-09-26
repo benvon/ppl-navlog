@@ -150,6 +150,10 @@ describe("plan draft use cases", () => {
 
     expect(() => createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [] }, ids("route-1"))).toThrow(/each route leg/iu);
     expect(() => createPlanDraft({ title: "", departureTimeUtc: "not-a-date", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: -1, reserveFuelGallons: 0, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-2", "plan-2"), fixedClock)).toThrow(/fuel/iu);
+    expect(() => createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, fuelAboardGallons: Number.NaN, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-3", "plan-3"), fixedClock)).toThrow(/aboard/iu);
+    expect(() => createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, fuelAboardGallons: -1, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-4", "plan-4"), fixedClock)).toThrow(/aboard/iu);
+    const incompleteDraft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-5", "plan-5"), fixedClock);
+    expect(incompleteDraft.fuelInputs).not.toHaveProperty("fuelAboardGallons");
     expect(() => applyCruiseTasOverride(draft, profile, "missing-leg", 0, undefined, fixedClock)).toThrow(/positive/iu);
     await expect(saveDraftRevision(new MemoryPersistence(), draft, { ...profile, id: "wrong-aircraft" }, ids("revision-1"), fixedClock)).rejects.toThrow(/does not match/iu);
     await expect(reopenPlanRevision(new MemoryPersistence(), "missing-revision")).rejects.toThrow(/no longer available/iu);

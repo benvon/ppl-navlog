@@ -26,6 +26,7 @@ const answer = (query: AloftPointQuery, direction: number, speed: number, useUnt
   method: "station-level", requestId: `point-${query.latitudeDeg.toFixed(3)}-${query.longitudeDeg.toFixed(3)}`,
 });
 const endpoints = { departureMetar: metar() };
+const routePlanDraft = () => { const draft = planDraft(); return { ...draft, fuelInputs: { ...draft.fuelInputs, fuelAboardGallons: 20 } }; };
 
 async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query: AloftPointQuery) => number, options: { useUntil?: string | ((query: AloftPointQuery) => string); useFrom?: string | ((query: AloftPointQuery) => string); issuedAt?: string | ((query: AloftPointQuery) => string); speed?: number; profile?: ReturnType<typeof aircraftProfile>; rejectDestination?: boolean } = {}) {
   const queries: AloftPointQuery[] = [];
@@ -93,13 +94,13 @@ const assertProgressiveCallContract = (draft: ReturnType<typeof planDraft>, outc
 
 describe("route waypoint weather sampling", () => {
   it("makes one call at every interval start and generated TOC/TOD in route order", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const outcome = await planWith(draft, () => 270);
     assertProgressiveCallContract(draft, outcome);
   });
 
   it("uses a point's weather only for intervals starting at that event", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const result = await planWith(draft, (query) => query.longitudeDeg < -88.2 ? 270 : 90);
     const rows = navRows(result.result);
 
@@ -112,7 +113,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("uses generated TOD weather for the final descent through arrival", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const reference = await planWith(draft, () => 270);
     const todQuery = reference.queries[3]!;
     const destination = draft.route.points.at(-1)!.coordinate;
@@ -133,7 +134,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("does not request destination winds and uses the preceding TOD sample through arrival", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const outcome = await planWith(draft, () => 280, { rejectDestination: true });
     expect(outcome.result).toMatchObject({ status: "ready" });
     expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - draft.route.points.at(-1)!.coordinate.latitude) < 0.001 && Math.abs(query.longitudeDeg - draft.route.points.at(-1)!.coordinate.longitude) < 0.001)).toBe(false);
@@ -143,14 +144,14 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("does not require an aloft period at the destination", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const outcome = await planWith(draft, () => 270, { rejectDestination: true, useUntil: periodEnd });
     expect(outcome.result).toMatchObject({ status: "ready" });
     expect(navRows(outcome.result).some((row) => row.subleg.phase === "descent")).toBe(true);
   });
 
   it("does not let waypoint B weather change the already calculated A-to-B interval", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const run = (checkpointDirection: number) => planWith(draft, (query) => {
       const checkpoint = draft.route.points[1]!.coordinate;
       const atCheckpoint = Math.abs(query.latitudeDeg - checkpoint.latitude) < 0.001 && Math.abs(query.longitudeDeg - checkpoint.longitude) < 0.001;
@@ -166,7 +167,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("projects generated phase positions correctly across a high-latitude antimeridian leg", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const start = asCoordinate(71, -179), end = asCoordinate(71, 179);
     const geometry = calculateGreatCircleDistanceAndInitialCourse(start, end);
     if (!geometry.ok) throw new Error(geometry.error.message);
@@ -186,7 +187,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("recalculates course and WMM variation at every generated segment on a curved high-latitude route", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const start = asCoordinate(68, -65), end = asCoordinate(70, -45);
     const geometry = calculateGreatCircleDistanceAndInitialCourse(start, end);
     if (!geometry.ok) throw new Error(geometry.error.message);
@@ -218,7 +219,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("rejects Worker-unsupported altitude and a departure altitude below field elevation before point requests", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     let requests = 0;
     const client = { async fetchPoint(query: AloftPointQuery) { requests += 1; return answer(query, 270, 10); } };
     const tooHigh = { ...base, departureTimeUtc: departure, route: { ...base.route, legs: base.route.legs.map((leg) => ({ ...leg, cruiseAltitudeFeetMsl: 53_001 })) } };
@@ -229,7 +230,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("rejects an impossible destination descent target and invalid descent TAS before point requests", async () => {
-    const base = { ...planDraft(), departureTimeUtc: departure };
+    const base = { ...routePlanDraft(), departureTimeUtc: departure };
     let requests = 0;
     const client = { async fetchPoint(query: AloftPointQuery) { requests += 1; return answer(query, 270, 10); } };
     const aboveCruise = { ...base, descentTargetAltitudeFeetMsl: { ...base.descentTargetAltitudeFeetMsl, effectiveValue: 5_000 } };
@@ -239,7 +240,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("uses departure METAR and aloft wind together to place TOC, and aloft wind changes the result", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const run = (direction: number) => resolveRouteWeather(draft, aircraftProfile(), {
       async fetchPoint(query) {
         const isDeparture = Math.abs(query.latitudeDeg - draft.route.points[0]!.coordinate.latitude) < 0.001 && Math.abs(query.longitudeDeg - draft.route.points[0]!.coordinate.longitude) < 0.001;
@@ -254,7 +255,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("carries an unfinished climb through a pilot waypoint and changes weather only after its request", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, legs: base.route.legs.map((leg, index) => index === 1 ? { ...leg, cruiseAltitudeFeetMsl: 5_500 } : leg) } };
     const { queries, result } = await planWith(draft, (query) => query.longitudeDeg < -88.2 ? 350 : 10);
     const rows = navRows(result);
@@ -268,7 +269,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("continues blending departure METAR wind after an early waypoint while still below the aloft sample altitude", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const earlyCheckpoint = { ...base.route.points[1]!, coordinate: asCoordinate(41.95, -87.98) };
     const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, points: [base.route.points[0]!, earlyCheckpoint, base.route.points[2]!] } };
     const run = (checkpointDirection: number) => planWith(draft, (query) =>
@@ -297,7 +298,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("uses the projected climb-start position without adding its already-traveled phase distance", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, legs: base.route.legs.map((leg, index) => index === 1 ? { ...leg, cruiseAltitudeFeetMsl: 5_500 } : leg) } };
     const { result } = await planWith(draft, (query) => query.longitudeDeg < -87.91 ? 270 : 90);
     if (result.status !== "ready") throw new Error(result.message);
@@ -308,14 +309,14 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("retains bounded endpoint source provenance in the calculated snapshot", async () => {
-    const { result } = await planWith({ ...planDraft(), departureTimeUtc: departure }, () => 270);
+    const { result } = await planWith({ ...routePlanDraft(), departureTimeUtc: departure }, () => 270);
     expect(result).toMatchObject({ calculationSnapshot: { weather: { endpointSources: {
       departureMetar: { stationIcao: "KORD", requestId: "metar-request", observedAt: departure, cache: { status: "upstream_refresh" } },
     } } } });
   });
 
   it("rejects a destination target equal to the final cruise altitude before point requests", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const cruiseAltitude = base.route.legs.at(-1)!.cruiseAltitudeFeetMsl;
     const draft = {
       ...base,
@@ -329,7 +330,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("blocks when the starting point report expires before the completed outgoing interval", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const dependencies = {
       weather: { resolve: async () => (await resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) { return answer(query, query.longitudeDeg < -88.5 ? 270 : 90, 30, new Date(Date.parse(query.plannedUtc) + 1_000).toISOString()); } }, endpoints)).weather },
       calculations: createFullNavlogCalculationEngine(),
@@ -339,7 +340,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("does not require interpolation or coverage from a future waypoint report", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const twoPointRoute = { ...base.route, points: [base.route.points[0]!, base.route.points.at(-1)!], legs: [base.route.legs[0]!] };
     const draft = { ...base, departureTimeUtc: departure, route: { ...twoPointRoute, legs: [{ ...twoPointRoute.legs[0]!, toPointId: twoPointRoute.points[1]!.id }] } };
     await expect(planWith(draft, () => 270, {
@@ -350,7 +351,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("does not request the next waypoint until the current answer resolves", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const pending: { query: AloftPointQuery; resolve: (answer: AloftPointAnswer) => void }[] = [];
     const operation = resolveRouteWeather(draft, aircraftProfile(), { fetchPoint(query) { return new Promise((resolve) => pending.push({ query, resolve })); } }, endpoints);
     expect(pending).toHaveLength(1);
@@ -364,7 +365,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("uses returned preceding waypoint wind to choose the following query UTC", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const run = async (secondWaypointDirection: number) => {
       const queries: AloftPointQuery[] = [];
       await resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) {
@@ -382,7 +383,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("fails the whole update when any waypoint has no supported point forecast", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: departure };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     let requests = 0;
     await expect(resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) {
       requests += 1;
@@ -394,7 +395,7 @@ describe("route waypoint weather sampling", () => {
   });
 
   it("fails before calling the point API when route waypoint count exceeds the existing plan limit", async () => {
-    const base = planDraft();
+    const base = routePlanDraft();
     const points = Array.from({ length: 28 }, (_, index) => ({
       kind: index === 0 || index === 27 ? "airport" as const : "checkpoint" as const,
       id: `p-${index}`, name: `p-${index}`, icao: index === 0 ? "KORD" : "KJVL",

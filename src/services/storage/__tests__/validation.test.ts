@@ -59,6 +59,15 @@ describe("storage model validation", () => {
     expect(validatePlanDraft(planDraft(), new Date("2027-01-01T00:00:00.000Z"))).toBe(true);
   });
 
+  it("preserves old drafts without aboard fuel and validates aboard fuel when present", () => {
+    const fixedNow = new Date("2027-01-01T00:00:00.000Z");
+    const legacyFuelInputs = { taxiRunupFuelGallons: 0, reserveFuelGallons: 3 };
+    expect(validatePlanDraft({ ...planDraft(), fuelInputs: legacyFuelInputs }, fixedNow)).toBe(true);
+    expect(validatePlanDraft({ ...planDraft(), fuelInputs: { ...planDraft().fuelInputs, fuelAboardGallons: 0 } }, fixedNow)).toBe(true);
+    expect(() => validatePlanDraft({ ...planDraft(), fuelInputs: { ...planDraft().fuelInputs, fuelAboardGallons: -1 } }, fixedNow)).toThrow(/fuelAboardGallons/u);
+    expect(() => validatePlanDraft({ ...planDraft(), fuelInputs: { ...planDraft().fuelInputs, fuelAboardGallons: "30" } }, fixedNow)).toThrow(/fuelAboardGallons/u);
+  });
+
   it("validates optional endpoint sources and legacy weather selection fields", () => {
     const fixedNow = new Date("2027-01-01T00:00:00.000Z");
     const weatherSelection = { forecastValidTimeUtc: "2026-10-01T12:00:00.000Z", selectedAtUtc: timestamp };

@@ -5,7 +5,7 @@ import { propagateFailure, failure, success, type DomainResult } from "../domain
 import { convertMagneticToCompassHeading, convertTrueToMagneticHeading } from "../domain/heading-conversion";
 import type { PlanningOverride, PlanningValue } from "../domain/planning-value";
 import { calculateFuelSummary } from "../domain/phase-planning";
-import type { JsonValue, UserRouteLeg } from "../domain/route";
+import type { JsonValue, PlanFuelInputs, UserRouteLeg } from "../domain/route";
 import { calculateEstimatedTimeEnroute, calculateFuelForDuration } from "../domain/time-fuel";
 import {
   feetMsl,
@@ -20,6 +20,8 @@ import {
   type Minutes,
   type NauticalMiles,
   type SignedDegrees,
+  type SignedGallons,
+  signedGallons,
 } from "../domain/units";
 import type { Wind } from "../domain/wind";
 import { solveWindTriangle } from "../domain/wind-triangle";
@@ -69,6 +71,7 @@ export interface NavlogCalculationInput {
   readonly routeLegs: readonly NavlogSourceLeg[];
   readonly aircraftProfile: AircraftProfile;
   readonly fuelInputs: {
+    readonly fuelAboardGallons?: number;
     readonly taxiRunupFuelGallons: number;
     readonly reserveFuelGallons: number;
   };
@@ -84,6 +87,8 @@ export interface NavlogCalculationSession {
   readonly aircraftProfile: AircraftProfile;
   readonly taxiRunupFuel: Gallons;
   readonly reserveFuel: Gallons;
+  readonly fuelAboard: Gallons;
+  readonly fuelAfterTaxi: SignedGallons;
   readonly usableFuel?: Gallons;
   readonly windResolver: NavlogWindResolver;
 }
@@ -129,6 +134,7 @@ export interface NavlogCalculationRow {
     readonly enrouteFuel: Gallons;
     readonly requiredFuelWithTaxiRunup: Gallons;
     readonly requiredFuelWithTaxiRunupAndReserve: Gallons;
+    readonly fuelRemaining: SignedGallons;
   };
   /** User-facing disclosure, not a warning hidden in a diagnostic-only trace. */
   readonly assumptions: readonly string[];
@@ -153,19 +159,45 @@ export interface NavlogCalculationResult {
   readonly warnings: readonly string[];
 }
 
+/** Validates pilot fuel inputs before weather retrieval or row calculation. */
+export const validateNavlogFuelInputs = (fuelInputs: PlanFuelInputs, profile: AircraftProfile): DomainResult<true> => {
+  if (fuelInputs.fuelAboardGallons === undefined) return failure("OUT_OF_RANGE", "Fuel aboard is required for a fresh calculation.");
+  const fuelAboard = gallons(fuelInputs.fuelAboardGallons);
+  if (!fuelAboard.ok) return propagateFailure(fuelAboard);
+  const taxiRunup = gallons(fuelInputs.taxiRunupFuelGallons);
+  if (!taxiRunup.ok) return propagateFailure(taxiRunup);
+  const reserve = gallons(fuelInputs.reserveFuelGallons);
+  if (!reserve.ok) return propagateFailure(reserve);
+  if (profile.usableFuelGallons !== undefined) {
+    const capacity = gallons(profile.usableFuelGallons);
+    if (!capacity.ok) return propagateFailure(capacity);
+    if (fuelAboard.value > capacity.value) return failure("OUT_OF_RANGE", "Fuel aboard exceeds aircraft usable fuel capacity.", { fuelAboard: fuelAboard.value, usableFuel: capacity.value });
+  }
+  return success(true);
+};
+
 /** Prepares stable calculation inputs before a progressive row sequence begins. */
 export const createNavlogCalculationSession = (input: NavlogCalculationSessionInput): DomainResult<NavlogCalculationSession> => {
+  const validFuelInputs = validateNavlogFuelInputs(input.fuelInputs, input.aircraftProfile);
+  if (!validFuelInputs.ok) return propagateFailure(validFuelInputs);
   const taxiRunupFuel = gallons(input.fuelInputs.taxiRunupFuelGallons);
   if (!taxiRunupFuel.ok) return propagateFailure(taxiRunupFuel);
   const reserveFuel = gallons(input.fuelInputs.reserveFuelGallons);
   if (!reserveFuel.ok) return propagateFailure(reserveFuel);
+  if (input.fuelInputs.fuelAboardGallons === undefined) return failure("OUT_OF_RANGE", "Fuel aboard is required for a fresh calculation.");
+  const fuelAboard = gallons(input.fuelInputs.fuelAboardGallons);
+  if (!fuelAboard.ok) return propagateFailure(fuelAboard);
   const usableFuelResult = input.aircraftProfile.usableFuelGallons === undefined ? undefined : gallons(input.aircraftProfile.usableFuelGallons);
   if (usableFuelResult !== undefined && !usableFuelResult.ok) return propagateFailure(usableFuelResult);
+  const fuelAfterTaxi = signedGallons(fuelAboard.value - taxiRunupFuel.value);
+  if (!fuelAfterTaxi.ok) return propagateFailure(fuelAfterTaxi);
   return success({
     routeLegs: new Map(input.routeLegs.map((routeLeg) => [routeLeg.sourceLeg.id, routeLeg])),
     aircraftProfile: input.aircraftProfile,
     taxiRunupFuel: taxiRunupFuel.value,
     reserveFuel: reserveFuel.value,
+    fuelAboard: fuelAboard.value,
+    fuelAfterTaxi: fuelAfterTaxi.value,
     ...(usableFuelResult === undefined ? {} : { usableFuel: usableFuelResult.value }),
     windResolver: input.windResolver,
   });
@@ -193,7 +225,9 @@ export const calculateNavlogRow = (
   if (!duration.ok) return propagateFailure(duration);
   const enrouteFuel = gallons(state.cumulativeEnrouteFuel + calculated.value.fuel);
   if (!enrouteFuel.ok) return propagateFailure(enrouteFuel);
-  const cumulative = cumulativeValues(distance.value, duration.value, enrouteFuel.value, session.taxiRunupFuel, session.reserveFuel);
+  const fuelRemaining = signedGallons(session.fuelAfterTaxi - enrouteFuel.value);
+  if (!fuelRemaining.ok) return propagateFailure(fuelRemaining);
+  const cumulative = cumulativeValues(distance.value, duration.value, enrouteFuel.value, session.taxiRunupFuel, session.reserveFuel, fuelRemaining.value);
   if (!cumulative.ok) return propagateFailure(cumulative);
   const row = { ...calculated.value, cumulative: cumulative.value };
   const nextState: NavlogCalculationState = {
@@ -218,6 +252,12 @@ export const finalizeNavlog = (
     phaseFuel[phaseFuelBucket(row.subleg.phase)].push(row.fuel);
     warnings.push(...(row.effectiveWind.warnings ?? []), ...row.assumptions);
   }
+  const lowestFuelBalance = state.rows.reduce<number>(
+    (lowest, row) => Math.min(lowest, row.cumulative.fuelRemaining),
+    session.fuelAfterTaxi,
+  );
+  const fuelExhaustionDeficit = gallons(Math.max(0, -lowestFuelBalance));
+  if (!fuelExhaustionDeficit.ok) return propagateFailure(fuelExhaustionDeficit);
   const summary = calculateFuelSummary({
     taxiRunupFuel: session.taxiRunupFuel,
     climbFuel: sumGallons(phaseFuel.climb),
@@ -225,6 +265,11 @@ export const finalizeNavlog = (
     cruiseFuel: sumGallons(phaseFuel.cruise),
     descentFuel: sumGallons(phaseFuel.descent),
     reserveFuel: session.reserveFuel,
+    fuelAboard: session.fuelAboard,
+    fuelAfterTaxi: session.fuelAfterTaxi,
+    estimatedArrivalFuel: state.rows.at(-1)?.cumulative.fuelRemaining ?? session.fuelAfterTaxi,
+    fuelExhaustionDeficit: fuelExhaustionDeficit.value,
+    runningFuelBalances: [session.fuelAfterTaxi, ...state.rows.map((row) => row.cumulative.fuelRemaining)],
     ...(session.usableFuel === undefined ? {} : { usableFuel: session.usableFuel }),
   });
   if (!summary.ok) return propagateFailure(summary);
@@ -327,6 +372,7 @@ const cumulativeValues = (
   enrouteFuel: number,
   taxiRunupFuel: Gallons,
   reserveFuel: Gallons,
+  fuelRemaining: SignedGallons,
 ): DomainResult<NavlogCalculationRow["cumulative"]> => {
   const checkedDistance = nauticalMiles(distance);
   if (!checkedDistance.ok) return propagateFailure(checkedDistance);
@@ -338,7 +384,7 @@ const cumulativeValues = (
   if (!withTaxi.ok) return propagateFailure(withTaxi);
   const withReserve = gallons(withTaxi.value + reserveFuel);
   if (!withReserve.ok) return propagateFailure(withReserve);
-  return success({ routeDistance: checkedDistance.value, estimatedTimeEnroute: checkedDuration.value, enrouteFuel: checkedEnrouteFuel.value, requiredFuelWithTaxiRunup: withTaxi.value, requiredFuelWithTaxiRunupAndReserve: withReserve.value });
+  return success({ routeDistance: checkedDistance.value, estimatedTimeEnroute: checkedDuration.value, enrouteFuel: checkedEnrouteFuel.value, requiredFuelWithTaxiRunup: withTaxi.value, requiredFuelWithTaxiRunupAndReserve: withReserve.value, fuelRemaining });
 };
 
 /**

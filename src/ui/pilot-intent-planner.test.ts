@@ -99,6 +99,7 @@ async function mount(repository: MemoryInputs, client = winds(), airportLookup: 
 async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Promise<void> {
   edit(root, "plan-title", "Synthetic route");
   edit(root, "departure-time", "2026-09-21T22:00");
+  edit(root, "fuel-aboard", "20");
   edit(root, "taxi-fuel", "0.8");
   edit(root, "reserve-fuel", "3");
   edit(root, "descent-target", "1800");
@@ -158,6 +159,58 @@ describe("pilot intent planner", () => {
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(button(root, "Update plan").disabled).toBe(true);
+  });
+
+  it("saves an incomplete aboard-fuel working copy but gates Update until a valid value within capacity is entered", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    edit(root, "fuel-aboard", "", true);
+    await settle();
+    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("");
+    expect(repository.submissions).toHaveLength(0);
+    expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("Enter a finite, nonnegative");
+
+    edit(root, "fuel-aboard", "24");
+    expect(button(root, "Update plan").disabled).toBe(false);
+    edit(root, "fuel-aboard", "24.01");
+    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("exceeds usable capacity");
+    edit(root, "fuel-aboard", "not-a-number");
+    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("finite, nonnegative");
+    edit(root, "fuel-aboard", "not-a-number", true);
+    await settle();
+    expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("not-a-number");
+    expect(repository.submissions).toHaveLength(0);
+    edit(root, "fuel-aboard", "-0.1");
+    expect(button(root, "Update plan").disabled).toBe(true);
+    edit(root, "fuel-aboard", "0");
+    expect(button(root, "Update plan").disabled).toBe(false);
+  });
+
+  it("restores a legacy plan without fuel aboard as blank and preserves its other literal inputs", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({ id: "legacy-fuel", title: "Legacy", rawFields: { "plan-title": "Legacy", "departure-icao": "1C8", "taxi-fuel": "1.25" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    const root = await mount(repository);
+    expect(input(root, "fuel-aboard").value).toBe("");
+    expect(input(root, "departure-icao").value).toBe("1C8");
+    expect(input(root, "taxi-fuel").value).toBe("1.25");
+    expect(button(root, "Update plan").disabled).toBe(true);
+  });
+
+  it("allows an entered aboard amount above 24 gallons when the profile has no capacity value", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push({ ...profile, usableFuelGallons: undefined });
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    edit(root, "fuel-aboard", "99");
+    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(root.querySelector("#fuel-aboard-error")?.textContent).toBe("");
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("capacity comparison unavailable");
   });
 
   it("hides obsolete destination weather choices while preserving saved pilot fields", async () => {
@@ -284,6 +337,7 @@ describe("pilot intent planner", () => {
     repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
+    edit(root, "fuel-aboard", "020.00");
     edit(root, "departure-metar-icao", "KORD", true);
     await settle();
 
@@ -297,6 +351,7 @@ describe("pilot intent planner", () => {
     expect(repository.submissions).toHaveLength(1);
     expect(repository.submissions[0]?.rawFields).toMatchObject({
       "plan-title": "Synthetic route",
+      "fuel-aboard": "020.00",
       "departure-metar-icao": "KORD",
       "taxi-fuel": "0.8",
     });
@@ -437,7 +492,7 @@ describe("pilot intent planner", () => {
     const now = "2026-09-21T21:30:00.000Z";
     const initial: PilotInputPlan = {
       id: "checkpoint-limit", title: "Checkpoint limit", rawFields: {
-        "plan-title": "Checkpoint limit", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "plan-title": "Checkpoint limit", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "", "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: Array.from({ length: 24 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })),
@@ -514,7 +569,7 @@ describe("pilot intent planner", () => {
   it("treats restored profile text that differs from the selected profile as an unsaved draft", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const rawFields = {
-      "plan-title": "Profile draft route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "plan-title": "Profile draft route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
       "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT, "profile-cruiseTasKnots": "102",
     };
@@ -548,7 +603,7 @@ describe("pilot intent planner", () => {
     const alternateProfile: AircraftProfile = { ...profile, id: "aircraft-2", name: "Alternate Cessna", cruiseTasKnots: 102 };
     repository.profiles.push(profile, alternateProfile);
     const rawFields = {
-      "plan-title": "Profile choice route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "plan-title": "Profile choice route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
       "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT, "profile-profile-name": alternateProfile.name,
       "profile-cruiseTasKnots": "102", "profile-cruiseFuelFlowGallonsPerHour": "6",
@@ -665,7 +720,7 @@ describe("pilot intent planner", () => {
   it("requires override acknowledgement per plan and clears it when the override changes", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const fields = {
-      "plan-title": "First plan", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "plan-title": "First plan", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
       "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
     };
@@ -740,7 +795,7 @@ describe("pilot intent planner", () => {
     const discover = vi.spyOn(client, "discoverStations");
     repository.plans.push({
       id: "legacy-period-plan", title: "Legacy period route", rawFields: {
-        "plan-title": "Legacy period route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "plan-title": "Legacy period route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
         "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"],
@@ -776,7 +831,7 @@ describe("pilot intent planner", () => {
   it("removes an override with a deleted checkpoint leg so the route can be updated", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const fields = {
-      "plan-title": "Checkpoint route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "plan-title": "Checkpoint route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
       "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT, "override-tas-1": "102", "override-reason-1": "Leg 2 test",
     };
@@ -797,7 +852,7 @@ describe("pilot intent planner", () => {
   it("clears TAS overrides and reasons with a visible notice when adding a checkpoint", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const fields = {
-      "plan-title": "Override route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "plan-title": "Override route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
       "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT, "override-tas-0": "102", "override-reason-0": "Study comparison",
     };
@@ -863,7 +918,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const firstPlan: PilotInputPlan = {
       id: "first-plan", title: "First plan", rawFields: {
-        "plan-title": "First plan", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "plan-title": "First plan", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
         "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"],

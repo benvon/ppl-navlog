@@ -20,10 +20,10 @@ export interface PilotIntentPlannerDependencies {
   readonly clock: UseCaseClock;
 }
 
-const fieldNames = ["plan-title", "departure-time", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
+const fieldNames = ["plan-title", "departure-time", "fuel-aboard", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
 type FieldName = typeof fieldNames[number];
 const initialFields: Readonly<Record<FieldName, string>> = {
-  "plan-title": "New study route", "departure-time": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
+  "plan-title": "New study route", "departure-time": "", "fuel-aboard": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
   "departure-icao": "", "destination-icao": "", "departure-metar-icao": "",
 };
 
@@ -75,7 +75,7 @@ class PilotIntentPlanner {
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
-      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
+      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "fuel-aboard": "Fuel aboard before taxi/run-up (gal; pilot input)", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
       form.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
@@ -393,6 +393,7 @@ class PilotIntentPlanner {
       departureTimeUtc,
       route,
       selectedAircraftProfileId: profile.id,
+      fuelAboardGallons: Number(raw["fuel-aboard"]),
       taxiRunupFuelGallons: Number(raw["taxi-fuel"]),
       reserveFuelGallons: Number(raw["reserve-fuel"]),
       descentTargetAltitudeFeetMsl: raw["descent-target"]?.trim()
@@ -474,7 +475,7 @@ class PilotIntentPlanner {
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
-      const message = fieldErrorFor(input.name, this.fields, this.confirmedOverrides);
+      const message = fieldErrorFor(input.name, this.fields, this.confirmedOverrides, this.current, this.profiles);
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
@@ -619,7 +620,7 @@ function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: Pil
     profileDraftDirty ? "Save the edited aircraft profile first." : undefined,
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
-    fuelError(fields), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
+    fuelError(fields), fuelAboardError(fields, plan, profiles), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
     metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
   ];
@@ -634,6 +635,14 @@ function departureTimeError(value: string): string | undefined {
 function fuelError(fields: Readonly<Record<string, string>>): string | undefined {
   return (["taxi-fuel", "reserve-fuel"] as const).some((key) => { const value = fields[key] ?? ""; return value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) < 0; })
     ? "Enter nonnegative taxi/run-up and reserve fuel values." : undefined;
+}
+function fuelAboardError(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[]): string | undefined {
+  const raw = fields["fuel-aboard"] ?? "";
+  const aboard = Number(raw);
+  if (raw.trim() === "" || !Number.isFinite(aboard) || aboard < 0) return "Enter a finite, nonnegative fuel-aboard amount in gallons.";
+  const profile = profiles.find((candidate) => candidate.id === plan?.selectedProfileId);
+  if (profile?.usableFuelGallons !== undefined && aboard > profile.usableFuelGallons) return `Fuel aboard exceeds usable capacity of ${profile.usableFuelGallons} gal.`;
+  return undefined;
 }
 function descentTargetError(value: string): string | undefined { return value.trim() && !Number.isFinite(Number(value)) ? "Descent target must be a finite altitude." : undefined; }
 function altitudeError(plan: PilotInputPlan | undefined): string | undefined {
@@ -678,8 +687,8 @@ function overrideConfirmationError(fields: Readonly<Record<string, string>>, con
   }
   return undefined;
 }
-function fieldErrorFor(name: string, fields: Readonly<Record<string, string>>, confirmed: ReadonlySet<number>): string | undefined {
-  return simpleFieldError(name, fields) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields, confirmed);
+function fieldErrorFor(name: string, fields: Readonly<Record<string, string>>, confirmed: ReadonlySet<number>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[]): string | undefined {
+  return simpleFieldError(name, fields) ?? (name === "fuel-aboard" ? fuelAboardError(fields, plan, profiles) : undefined) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields, confirmed);
 }
 function simpleFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";

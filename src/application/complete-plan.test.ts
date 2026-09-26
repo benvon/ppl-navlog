@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { failure, success } from "../domain/errors";
 import { wind } from "../domain/wind";
@@ -28,9 +28,14 @@ const dependencies = (overrides: Partial<CompletePlanDependencies> = {}): Comple
   ...overrides,
 });
 
+const completeDraft = () => ({
+  ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z",
+  fuelInputs: { ...planDraft().fuelInputs, fuelAboardGallons: 20 },
+});
+
 describe("complete plan orchestration", () => {
   it("composes route geometry, profile, selected weather, WMM variation, and the phase-calculation seam", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies());
 
     expect(result).toMatchObject({
@@ -44,7 +49,7 @@ describe("complete plan orchestration", () => {
   });
 
   it("fails closed when selected forecast data or magnetic data cannot be resolved", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const weatherUnavailable = await calculateCompletePlan(draft, aircraftProfile(), dependencies({ weather: { resolve: async () => { throw new Error("Winds source unavailable."); } } }));
     expect(weatherUnavailable).toMatchObject({ status: "blocked", reason: "weather-unavailable", message: "Winds source unavailable." });
 
@@ -56,8 +61,24 @@ describe("complete plan orchestration", () => {
     expect(magneticUnavailable).toMatchObject({ status: "blocked", reason: "magnetic-unavailable" });
   });
 
+  it("blocks invalid fuel before weather resolution and accepts fuel equal to usable capacity", async () => {
+    const weatherResolve = vi.fn(dependencies().weather.resolve);
+    const deps = dependencies({ weather: { resolve: weatherResolve } });
+    const missingFuel = { ...completeDraft(), fuelInputs: { taxiRunupFuelGallons: 0, reserveFuelGallons: 3 } };
+    expect(await calculateCompletePlan(missingFuel, aircraftProfile(), deps)).toMatchObject({ status: "blocked", reason: "calculation-failed", message: expect.stringContaining("Fuel aboard is required") });
+    expect(weatherResolve).not.toHaveBeenCalled();
+
+    const overCapacity = { ...completeDraft(), fuelInputs: { ...completeDraft().fuelInputs, fuelAboardGallons: aircraftProfile().usableFuelGallons! + 1 } };
+    expect(await calculateCompletePlan(overCapacity, aircraftProfile(), deps)).toMatchObject({ status: "blocked", reason: "calculation-failed", message: expect.stringContaining("exceeds aircraft usable fuel capacity") });
+    expect(weatherResolve).not.toHaveBeenCalled();
+
+    const atCapacity = { ...completeDraft(), fuelInputs: { ...completeDraft().fuelInputs, fuelAboardGallons: aircraftProfile().usableFuelGallons! } };
+    expect(await calculateCompletePlan(atCapacity, aircraftProfile(), deps)).toMatchObject({ status: "ready" });
+    expect(weatherResolve).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the concrete vertical-profile slice to calculate TOC, TOD, and an explicit infeasible-profile result", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({ calculations: createVerticalProfileCalculationEngine() }));
 
     expect(result).toMatchObject({
@@ -81,8 +102,7 @@ describe("complete plan orchestration", () => {
 
   it("reports the unresolved transition-allocation policy instead of silently planning a multi-altitude route", async () => {
     const draft = {
-      ...planDraft(),
-      departureTimeUtc: "2026-09-21T12:00:00.000Z",
+      ...completeDraft(),
       route: { ...planDraft().route, legs: planDraft().route.legs.map((leg, index) => ({ ...leg, cruiseAltitudeFeetMsl: index === 0 ? 4_500 : 6_500 })) },
     };
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({ calculations: createVerticalProfileCalculationEngine() }));
@@ -90,7 +110,7 @@ describe("complete plan orchestration", () => {
   });
 
   it("does not run legacy final timing validation for a finalized progressive calculation", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const snapshot = { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [] } } as const;
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({
       weather: { resolve: async () => ({
@@ -104,7 +124,7 @@ describe("complete plan orchestration", () => {
   });
 
   it("preserves infeasible allocation evidence without applying weather-time validation", async () => {
-    const result = await calculateCompletePlan({ ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }, aircraftProfile(), dependencies({
+    const result = await calculateCompletePlan(completeDraft(), aircraftProfile(), dependencies({
       weather: { resolve: async () => ({ snapshotIds: [], phaseWindResolver: { resolveEffectiveWind: () => success(resolvedWind.value) }, warnings: [], provenance: { source: "fixture" }, validateCalculatedTiming: () => "timing should not be inspected" }) },
       calculations: { calculate: async () => ({ calculationSnapshot: { status: "infeasible-phase-allocation" }, warnings: ["No navlog rows were produced."] }) },
     }));
@@ -112,7 +132,7 @@ describe("complete plan orchestration", () => {
   });
 
   it("resolves each descent convergence iteration at its candidate TOD instead of the final user-leg origin", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const descentStarts: Array<{ readonly latitude: number; readonly longitude: number }> = [];
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({
       weather: {
@@ -139,7 +159,7 @@ describe("complete plan orchestration", () => {
   });
 
   it("does not extrapolate phase wind below a published weather envelope", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = completeDraft();
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({
       weather: {
         resolve: async () => ({

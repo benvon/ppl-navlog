@@ -44,6 +44,8 @@ export interface RouteDefinition {
 }
 
 export interface PlanFuelInputs {
+  /** Absent only on snapshots saved before fuel aboard was collected. */
+  readonly fuelAboardGallons?: number;
   readonly taxiRunupFuelGallons: number;
   readonly reserveFuelGallons: number;
 }

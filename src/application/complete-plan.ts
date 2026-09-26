@@ -13,6 +13,7 @@ import {
   type MagneticVariationCalculator,
 } from "./magnetic-variation";
 import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "./phase-calculation-engine";
+import { validateNavlogFuelInputs } from "./navlog-calculation";
 
 export interface CompletePlanRouteLeg {
   readonly sourceLeg: UserRouteLeg;
@@ -104,6 +105,8 @@ export const calculateCompletePlan = async (
   }
   const baseLegs = buildRouteLegs(draft);
   if (!baseLegs.ok) return blocked("invalid-route", baseLegs.message);
+  const validFuelInputs = validateNavlogFuelInputs(draft.fuelInputs, aircraftProfile);
+  if (!validFuelInputs.ok) return blocked("calculation-failed", validFuelInputs.error.message);
 
   let weather: CompletePlanWeather;
   try {
