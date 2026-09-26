@@ -33,6 +33,8 @@ export function renderPilotIntentPlanner(root: HTMLElement, dependencies: PilotI
 }
 
 class PilotIntentPlanner {
+  private activeStage: "aircraft" | "route" | "calculate" | "navlog" = "aircraft";
+  private stageOpen: Record<"aircraft" | "route" | "calculate" | "navlog", boolean> = { aircraft: true, route: false, calculate: false, navlog: false };
   private plans: readonly PilotInputPlan[] = [];
   private profiles: readonly AircraftProfile[] = [];
   private current?: PilotInputPlan;
@@ -65,23 +67,38 @@ class PilotIntentPlanner {
   }
 
   private render(): void {
+    this.content.querySelectorAll<HTMLDetailsElement>("details[data-stage]").forEach((details) => {
+      const stage = details.dataset.stage as keyof typeof this.stageOpen;
+      if (stage in this.stageOpen) this.stageOpen[stage] = details.open;
+    });
     this.content.replaceChildren();
     const shell = document.createElement("section");
     shell.className = "planner-shell";
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
     shell.append(heading, this.status);
-    const plans = document.createElement("section"); plans.append(this.el("h3", "Saved pilot inputs"));
-    this.plans.forEach((plan) => { const b = document.createElement("button"); b.type = "button"; b.textContent = `Open ${plan.title}`; b.disabled = this.savingProfile; b.addEventListener("click", () => { void this.open(plan.id); }); plans.append(b); });
+    const plans = document.createElement("section"); plans.className = "plan-picker"; plans.append(this.el("h3", "Saved pilot inputs"));
+    const planSelect = document.createElement("select"); planSelect.setAttribute("aria-label", "Saved plan"); planSelect.disabled = this.savingProfile || this.updating; planSelect.append(new Option("Choose saved plan", ""));
+    this.plans.forEach((plan) => planSelect.append(new Option(plan.title, plan.id, false, plan.id === this.current?.id)));
+    planSelect.addEventListener("change", () => { if (planSelect.value) void this.open(planSelect.value); });
+    plans.append(planSelect);
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
+    const groups: Record<"identity" | "timing" | "fuel" | "arrival" | "weather", HTMLElement> = {
+      identity: document.createElement("fieldset"), timing: document.createElement("fieldset"), fuel: document.createElement("fieldset"), arrival: document.createElement("fieldset"), weather: document.createElement("fieldset"),
+    };
+    for (const [key, title] of [["identity", "Route"], ["timing", "Departure time"], ["fuel", "Starting fuel"], ["arrival", "Arrival"], ["weather", "Departure weather source"]] as const) {
+      const legend = document.createElement("legend"); legend.textContent = title; groups[key].append(legend);
+    }
     fieldNames.forEach((name) => {
       const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "fuel-aboard": "Fuel aboard before taxi/run-up (gal; pilot input)", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
-      form.append(this.input(name, labels[name], this.fields[name] ?? ""));
+      const group = routeFieldGroup(name, groups);
+      group.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
     const profile = document.createElement("select"); profile.name = "selectedProfileId"; profile.append(new Option("Choose profile", ""));
     this.profiles.forEach((p) => profile.append(new Option(p.name, p.id, false, p.id === this.current?.selectedProfileId)));
     profile.addEventListener("change", () => {
+      if (this.result) this.activateStage("aircraft");
       this.confirmedOverrides.clear();
       const selected = this.profiles.find((candidate) => candidate.id === profile.value);
       if (this.current) {
@@ -98,26 +115,44 @@ class PilotIntentPlanner {
       this.refreshUpdateGate();
       void this.persist();
     });
-    profileLabel.append(profile); form.append(profileLabel);
-    form.append(this.renderRouteCollections());
+    profileLabel.append(profile);
+    form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.arrival, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { this.fields[input.name] = input.value; this.captureStructured(form); if (input.name.startsWith("override-tas-")) { const index = Number(input.name.slice("override-tas-".length)); this.confirmedOverrides.delete(index); const confirmation = form.querySelector<HTMLInputElement>(`[data-override-confirmation="${index}"]`); if (confirmation) confirmation.checked = false; } this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.fields[input.name] = input.value; this.captureStructured(form); if (input.name.startsWith("override-tas-")) { const index = Number(input.name.slice("override-tas-".length)); this.confirmedOverrides.delete(index); const confirmation = form.querySelector<HTMLInputElement>(`[data-override-confirmation="${index}"]`); if (confirmation) confirmation.checked = false; } this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.captureStructured(form); void this.persist(); });
     });
-    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update()); form.append(update);
-    const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : ""; form.append(feedback);
-    shell.append(this.renderProfileEditor(), form);
-    if (this.result !== undefined) {
-      const output = document.createElement("section"); output.dataset.currentResult = "true";
-      const navlog = renderCalculatedNavlog(this.result, { currentWeatherValidated: true, selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
-      if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
-      shell.append(output);
-    }
-    if (this.profiles.length === 0) shell.append(this.el("h3", "Create an aircraft profile to enable Update plan."));
+    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
+    const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
+    const aircraftStage = this.stage("aircraft", `Aircraft · ${this.profiles.find((p) => p.id === this.current?.selectedProfileId)?.name ?? "Select a profile"}`, profileLabel, this.renderProfileEditor());
+    const routeStage = this.stage("route", "Route information", form);
+    const calculateStage = this.stage("calculate", "Calculate", update, feedback);
+    const navlogStage = this.stage("navlog", "Calculated navlog");
+    navlogStage.append(this.renderCurrentResult());
+    shell.append(aircraftStage, routeStage, calculateStage, navlogStage);
     this.content.append(shell);
     this.refreshUpdateGate();
     if (this.updating || this.savingProfile) shell.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button").forEach((control) => { control.disabled = true; });
     if (this.root.firstChild === null) this.root.append(this.content); else if (!this.root.contains(this.content)) this.root.replaceChildren(this.content);
+  }
+
+  private stage(name: keyof typeof this.stageOpen, label: string, ...contents: HTMLElement[]): HTMLDetailsElement {
+    const section = document.createElement("details"); section.dataset.stage = name; section.dataset.active = String(this.activeStage === name); section.open = this.stageOpen[name];
+    const summary = document.createElement("summary"); summary.textContent = label; section.append(summary, ...contents);
+    return section;
+  }
+
+  private renderCurrentResult(): Node {
+    if (this.result === undefined) return document.createTextNode("Update plan to display a current calculated navlog.");
+    const output = document.createElement("section"); output.dataset.currentResult = "true";
+    const navlog = renderCalculatedNavlog(this.result, { currentWeatherValidated: true, selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
+    if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
+    return output;
+  }
+
+  private activateStage(name: keyof typeof this.stageOpen): void {
+    this.activeStage = name;
+    for (const stage of Object.keys(this.stageOpen) as (keyof typeof this.stageOpen)[]) this.stageOpen[stage] = stage === name;
+    this.content.querySelectorAll<HTMLDetailsElement>("details[data-stage]").forEach((details) => { details.open = details.dataset.stage === name; });
   }
 
   private input(name: string, labelText: string, value: string): HTMLLabelElement {
@@ -193,7 +228,7 @@ class PilotIntentPlanner {
     const values: readonly [string, string][] = [["profile-name", "Profile name"], ["cruiseTasKnots", "Cruise TAS (kt)"], ["cruiseFuelFlowGallonsPerHour", "Cruise fuel flow (gal/hr)"], ["climbRateFeetPerMinute", "Climb rate (ft/min)"], ["climbTasKnots", "Climb TAS (kt)"], ["climbFuelFlowGallonsPerHour", "Climb fuel flow (gal/hr)"], ["descentRateFeetPerMinute", "Descent rate (ft/min)"], ["descentTasKnots", "Descent TAS (kt)"], ["descentFuelFlowGallonsPerHour", "Descent fuel flow (gal/hr)"], ["usableFuelGallons", "Usable fuel (gal, optional)"], ["compass-deviation-card", "Compass deviation entries (e.g. 000:+1, 090:-1)"]];
     values.forEach(([id, label]) => form.append(this.input(id, label, this.fields[`profile-${id}`] ?? "")));
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
-      input.addEventListener("input", () => { this.fields[`profile-${input.name}`] = input.value; this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.fields[`profile-${input.name}`] = input.value; this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.fields[`profile-${input.name}`] = input.value; void this.persist(); });
     });
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; save.disabled = this.savingProfile; form.append(save); section.append(form); return section;
@@ -247,6 +282,7 @@ class PilotIntentPlanner {
       await this.persist();
       this.setStatus(`Aircraft profile ${saved.name} saved.`);
       this.savingProfile = false;
+      this.activateStage("route");
       this.render();
     } catch (error) {
       this.savingProfile = false;
@@ -266,6 +302,7 @@ class PilotIntentPlanner {
     this.inspected = undefined;
     this.updateError = "";
     this.profileDraftDirty = false;
+    this.activateStage("aircraft");
     this.setStatus("Enter pilot inputs, then Update plan to retrieve current context and calculate.");
     this.render();
   }
@@ -287,6 +324,7 @@ class PilotIntentPlanner {
     this.updateError = "";
     const selectedProfile = this.profiles.find((profile) => profile.id === plan.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selectedProfile);
+    this.activateStage("route");
     this.setStatus("Opened saved pilot inputs. Update plan to fetch current context and calculate.");
     this.render();
   }
@@ -357,8 +395,10 @@ class PilotIntentPlanner {
       this.inspected = undefined;
       this.updateError = "";
       this.setStatus("Plan updated with current route weather.");
+      this.activateStage("navlog");
     } catch (error) {
       this.fail(error, "update");
+      this.activateStage("calculate");
     } finally {
       this.updating = false;
       this.render();
@@ -481,6 +521,14 @@ class PilotIntentPlanner {
       if (helper) helper.textContent = message ?? "";
     });
   }
+}
+
+function routeFieldGroup(name: FieldName, groups: Record<"identity" | "timing" | "fuel" | "arrival" | "weather", HTMLElement>): HTMLElement {
+  if (name === "departure-time") return groups.timing;
+  if (name === "fuel-aboard" || name === "taxi-fuel" || name === "reserve-fuel") return groups.fuel;
+  if (name === "descent-target") return groups.arrival;
+  if (name === "departure-metar-icao") return groups.weather;
+  return groups.identity;
 }
 
 async function fetchRequiredMetar(client: MetarTransportClient, airportIdentifier: string, alternateIcao: string | undefined) {

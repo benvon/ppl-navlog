@@ -82,6 +82,20 @@ function button(root: HTMLElement, text: string): HTMLButtonElement {
   return element;
 }
 
+function planSelector(root: HTMLElement): HTMLSelectElement {
+  const select = root.querySelector<HTMLSelectElement>('select[aria-label="Saved plan"]');
+  if (!select) throw new Error("Missing saved-plan selector");
+  return select;
+}
+
+function choosePlan(root: HTMLElement, title: string): void {
+  const select = planSelector(root);
+  const option = [...select.options].find((candidate) => candidate.textContent === title);
+  if (!option) throw new Error(`Missing saved plan ${title}`);
+  select.value = option.value;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 function edit(root: HTMLElement, name: string, value: string, blur = false): void {
   const element = input(root, name);
   element.value = value;
@@ -138,6 +152,51 @@ function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordin
 }
 
 describe("pilot intent planner", () => {
+  it("opens aircraft first and groups fuel aboard with plan inputs", async () => {
+    const root = await mount(new MemoryInputs());
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')?.open).toBe(true);
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(false);
+    expect(root.querySelector('[data-stage="route"] [name="fuel-aboard"]')).not.toBeNull();
+    expect(root.querySelector('[data-stage="aircraft"] [name="selectedProfileId"]')).not.toBeNull();
+  });
+
+  it("opens a saved plan at route information and keeps other user-opened stages open on rerender", async () => {
+    const repository = new MemoryInputs();
+    repository.profiles.push(profile);
+    repository.plans.push({ id: "saved", title: "Saved", rawFields: { "plan-title": "Saved" }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    const root = await mount(repository);
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
+    expect(root.querySelector('[data-stage="aircraft"] summary')?.textContent).toContain(profile.name);
+    const aircraft = root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')!;
+    aircraft.open = true;
+    button(root, "Add checkpoint").click();
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')?.open).toBe(true);
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
+  });
+
+  it("opens the navlog after calculation and reopens route information when an input changes", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    button(root, "Update plan").click();
+    await settle();
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="navlog"]')?.open).toBe(true);
+    edit(root, "fuel-aboard", "19", true);
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(input(root, "fuel-aboard").value).toBe("19");
+  });
+
+  it("opens Calculate after a failed update without dropping route input", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile); repository.failSubmit = true;
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    button(root, "Update plan").click();
+    await settle();
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true);
+    expect(input(root, "fuel-aboard").value).toBe("20");
+  });
+
   it("shows repository initialization failure in the planner", async () => {
     const repository = new MemoryInputs(); repository.failInitialize = true;
     const root = await mount(repository);
@@ -374,13 +433,13 @@ describe("pilot intent planner", () => {
 
     edit(root, "departure-time", "2026-09-21T23:15", true);
     await settle();
-    button(root, "Open First plan").click();
+    choosePlan(root, "First plan");
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-21T23:15");
 
-    button(root, "Open Second plan").click();
+    choosePlan(root, "Second plan");
     await settle();
-    button(root, "Open First plan").click();
+    choosePlan(root, "First plan");
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-21T23:15");
     edit(root, "taxi-fuel", "1.2", true);
@@ -405,7 +464,7 @@ describe("pilot intent planner", () => {
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
 
-    button(root, "Open Other saved plan").click();
+    choosePlan(root, "Other saved plan");
     await settle();
     expect(input(root, "plan-title").value).toBe("Other saved plan");
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
@@ -669,7 +728,7 @@ describe("pilot intent planner", () => {
     let releaseSave!: () => void;
     repository.profileSaveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
     const root = await mount(repository);
-    button(root, "Open First plan").click();
+    choosePlan(root, "First plan");
     await settle();
 
     const values: Record<string, string> = {
@@ -680,10 +739,10 @@ describe("pilot intent planner", () => {
     };
     Object.entries(values).forEach(([name, value]) => { input(root, name).value = value; });
     root.querySelector("form:not(.route-form)")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    expect(button(root, "Open Second plan").disabled).toBe(true);
+    expect(planSelector(root).disabled).toBe(true);
     expect(input(root, "profile-name").disabled).toBe(true);
     expect(input(root, "plan-title").disabled).toBe(true);
-    button(root, "Open Second plan").click();
+    choosePlan(root, "Second plan");
     button(root, "New plan").click();
     expect(input(root, "plan-title").value).toBe("First plan");
     expect(repository.plans.find((plan) => plan.id === second.id)).toEqual(second);
@@ -701,7 +760,7 @@ describe("pilot intent planner", () => {
     root.querySelector("form:not(.route-form)")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("profile write failed");
-    expect(button(root, "Open Second plan").disabled).toBe(false);
+    expect(planSelector(root).disabled).toBe(false);
     expect(input(root, "profile-name").disabled).toBe(false);
   });
 
@@ -750,7 +809,7 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(true);
     root.querySelector<HTMLInputElement>("input[type='checkbox']")!.checked = true;
     root.querySelector<HTMLInputElement>("input[type='checkbox']")!.dispatchEvent(new Event("change", { bubbles: true }));
-    button(root, "Open Second plan").click();
+    choosePlan(root, "Second plan");
     await settle();
     expect(input(root, "plan-title").value).toBe("Second plan");
     expect(root.querySelector<HTMLInputElement>("input[type='checkbox']")?.checked).toBe(false);
@@ -891,7 +950,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector(".calculated-navlog")).toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
 
-    button(root, "Open Synthetic route").click();
+    choosePlan(root, "Synthetic route");
     await settle();
     expect(input(root, "plan-title").value).toBe("Synthetic route");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
@@ -908,7 +967,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "New plan").click();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
-    button(root, "Open Synthetic route").click();
+    choosePlan(root, "Synthetic route");
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Opened saved pilot inputs");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
@@ -934,7 +993,7 @@ describe("pilot intent planner", () => {
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
-    button(root, "Open Other plan").click();
+    choosePlan(root, "Other plan");
     await settle();
     expect(input(root, "plan-title").value).toBe("Other plan");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
