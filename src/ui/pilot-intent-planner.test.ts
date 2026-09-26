@@ -220,6 +220,9 @@ describe("pilot intent planner", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')?.open).toBe(false);
+    button(root, "New plan").click();
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
+    expect(root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")?.value).toBe(profile.id);
   });
 
   it("keeps profile creation collapsed when a saved profile is available", async () => {
@@ -890,6 +893,7 @@ describe("pilot intent planner", () => {
 
     edit(root, "plan-title", "Changed inputs");
     expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(root.querySelector('[data-stage="navlog"]')?.textContent).toContain("Update plan to display a current calculated navlog.");
     failPoint = true;
     button(root, "Update plan").click();
     await settle();
@@ -964,6 +968,21 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[name='override-reason-1']")).toBeNull();
     expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
     expect(button(root, "Update plan").disabled).toBe(false);
+  });
+
+  it("keeps the second leg override reason when another route field changes", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "second-leg-plan", title: "Second leg", rawFields: {
+        "plan-title": "Second leg", "override-tas-1": "102", "override-reason-1": "Training comparison",
+      }, selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "4500"],
+      overrideReasons: { "tas-1": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+    edit(root, "plan-title", "Second leg revised", true);
+    await settle();
+    expect(repository.plans[0]?.overrideReasons).toEqual({ "tas-1": "Training comparison" });
   });
 
   it("clears TAS overrides and reasons with a visible notice when adding a checkpoint", async () => {

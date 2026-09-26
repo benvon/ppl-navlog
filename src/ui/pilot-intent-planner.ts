@@ -177,7 +177,7 @@ class PilotIntentPlanner {
     const offsetMinutes = -now.getTimezoneOffset();
     const offset = `${offsetMinutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMinutes) % 60).padStart(2, "0")}`;
     const local = utcTextToLocalDateTime(now.toISOString().slice(0, 16))?.replace("T", " ") ?? "—";
-    const seconds = `:${String(now.getSeconds()).padStart(2, "0")}`;
+    const seconds = `:${String(now.getUTCSeconds()).padStart(2, "0")}`;
     clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
   }
 
@@ -372,15 +372,16 @@ class PilotIntentPlanner {
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...this.fields }, title: this.fields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
   private newPlan(): void {
     if (this.updating || this.savingProfile) return;
+    const selectedProfile = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
     this.openOverrideEditors.clear();
     this.fields = { ...initialFields };
-    this.current = this.blankPlan();
+    this.current = { ...this.blankPlan(), ...(selectedProfile ? { selectedProfileId: selectedProfile.id, profileSnapshot: selectedProfile } : {}) };
     this.result = undefined;
     this.inspected = undefined;
     this.updateError = "";
     this.profileDraftDirty = false;
     this.touchedFields.clear();
-    this.activateStage("aircraft");
+    this.activateStage(selectedProfile ? "route" : "aircraft");
     this.setStatus("Enter pilot inputs, then Update plan to retrieve current context and calculate.");
     this.render();
   }
@@ -411,12 +412,17 @@ class PilotIntentPlanner {
     const get = (selector: string) => form.querySelector<HTMLInputElement>(`[name="${selector}"]`)?.value ?? "";
     const checkpoints = (this.current?.checkpoints ?? []).map((_point, i) => ({ name: get(`checkpoint-name-${i}`), coordinateText: get(`checkpoint-coordinate-${i}`) }));
     const cruiseAltitudeTexts = [...form.querySelectorAll<HTMLInputElement>("input[name^='altitude-']")].map((x) => x.value);
-    const overrideReasons = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("input[name^='override-reason-']")].map((x, i) => [`tas-${i}`, x.value]));
+    const overrideReasons = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("input[name^='override-reason-']")].map((x) => [`tas-${x.name.slice("override-reason-".length)}`, x.value]));
     [...form.querySelectorAll<HTMLInputElement>("input[name^='override-tas-']")].forEach((x) => { this.fields[x.name] = x.value; });
     this.fields = { ...this.fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) };
     this.current = this.withIdentity({ ...(this.current ?? this.blankPlan()), checkpoints, cruiseAltitudeTexts, overrideReasons });
   }
-  private invalidate(): void { this.result = undefined; this.inspected = undefined; this.content.querySelector("[data-current-result]")?.remove(); }
+  private invalidate(): void {
+    this.result = undefined;
+    this.inspected = undefined;
+    const output = this.content.querySelector("[data-current-result]");
+    output?.replaceWith(document.createTextNode("Update plan to display a current calculated navlog."));
+  }
   private clearRouteOverrides(): boolean {
     const hadOverrides = Object.entries(this.fields).some(([key, value]) =>
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
