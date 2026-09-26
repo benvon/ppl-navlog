@@ -362,6 +362,7 @@ export function validatePlanDraft(value: unknown, now = new Date()): value is Pl
   identifier(value.selectedAircraftProfileId, "$.selectedAircraftProfileId", issues);
   if (!isRecord(value.fuelInputs)) add(issues, "$.fuelInputs", "must be an object");
   else {
+    if (value.fuelInputs.fuelAboardGallons !== undefined) nonNegativeNumber(value.fuelInputs.fuelAboardGallons, "$.fuelInputs.fuelAboardGallons", issues);
     nonNegativeNumber(value.fuelInputs.taxiRunupFuelGallons, "$.fuelInputs.taxiRunupFuelGallons", issues);
     nonNegativeNumber(value.fuelInputs.reserveFuelGallons, "$.fuelInputs.reserveFuelGallons", issues);
   }

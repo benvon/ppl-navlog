@@ -36,7 +36,9 @@ const loadedWinds = (): LoadedWindsData => ({
   },
 }) as unknown as LoadedWindsData;
 
-const completeLegs = (draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }): readonly CompletePlanRouteLeg[] => {
+const calculationDraft = () => { const draft = planDraft(); return { ...draft, fuelInputs: { ...draft.fuelInputs, fuelAboardGallons: 20 } }; };
+
+const completeLegs = (draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }): readonly CompletePlanRouteLeg[] => {
   const points = new Map(draft.route.points.map((point) => [point.id, point]));
   return draft.route.legs.map((sourceLeg) => {
     const start = points.get(sourceLeg.fromPointId);
@@ -62,7 +64,7 @@ const weather = (loaded = loadedWinds()): CompletePlanWeather => ({
 
 describe("full navlog calculation engine", () => {
   it("uses finalized progressive rows without running the whole-route allocator again", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const snapshot = { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [] }, phaseAllocation: { boundaries: [] } } as const;
     const progressiveWeather: CompletePlanWeather = {
       ...weather(),
@@ -85,7 +87,7 @@ describe("full navlog calculation engine", () => {
       phaseWindResolver: { resolveEffectiveWind: () => { throw new Error("Route samples must never be recalculated by the full-route engine."); } },
     };
     await expect(createFullNavlogCalculationEngine().calculate({
-      draft: { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" },
+      draft: { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" },
       aircraftProfile: aircraftProfile(),
       routeLegs: completeLegs(),
       weather: incompleteRouteWeather,
@@ -95,7 +97,7 @@ describe("full navlog calculation engine", () => {
     });
   });
   it("combines allocated phases with subleg weather and retains rows, boundaries, phase traces, and source provenance", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: weather() });
 
     expect(result.calculationSnapshot).toMatchObject({
@@ -112,7 +114,7 @@ describe("full navlog calculation engine", () => {
   });
 
   it("keeps each altitude-varying vertical phase's row ETE and fuel equal to its phase allocation totals", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: weather() });
     const snapshot = result.calculationSnapshot as {
       readonly phaseAllocation: { readonly phases: readonly { readonly id: string; readonly calculation: { readonly duration: number; readonly fuel: number } }[] };
@@ -131,7 +133,7 @@ describe("full navlog calculation engine", () => {
   });
 
   it("records an infeasible allocation without fabricating navlog rows", async () => {
-    const base = planDraft();
+    const base = calculationDraft();
     const draft = {
       ...base,
       departureTimeUtc: "2026-09-21T12:00:00.000Z",
@@ -152,7 +154,7 @@ describe("full navlog calculation engine", () => {
     const noLoadedWeather = { ...weather() };
     delete (noLoadedWeather as { loadedWindsData?: LoadedWindsData }).loadedWindsData;
     await expect(createFullNavlogCalculationEngine().calculate({
-      draft: { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(), weather: noLoadedWeather,
+      draft: { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(), weather: noLoadedWeather,
     })).rejects.toMatchObject({ name: "WeatherPhaseResolutionError" });
   });
 
@@ -171,14 +173,14 @@ describe("full navlog calculation engine", () => {
         firstAloftLevel: { domainLevel: value(windAtAltitude(3_000, 270, 15)) },
       },
     } as unknown as LoadedWindsData;
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const result = await createFullNavlogCalculationEngine().calculate({ draft, aircraftProfile: aircraftProfile(), routeLegs: completeLegs(draft), weather: weather(loaded) });
     const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly assumptions: readonly string[] }[] } };
     expect(snapshot.navlog.rows.some((row) => row.assumptions.some((assumption) => assumption.includes("field elevation")))).toBe(true);
   });
 
   it("maps selected-weather envelope failures to weather resolution failures", async () => {
-    const base = planDraft();
+    const base = calculationDraft();
     const draft = {
       ...base, departureTimeUtc: "2026-09-21T12:00:00.000Z",
       route: { ...base.route, legs: base.route.legs.map((leg) => ({ ...leg, cruiseAltitudeFeetMsl: 35_000 })) },
@@ -189,14 +191,14 @@ describe("full navlog calculation engine", () => {
   });
 
   it("fails closed on an invalid compass table instead of storing a partial navlog", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     await expect(createFullNavlogCalculationEngine().calculate({
       draft, aircraftProfile: { ...aircraftProfile(), compassDeviationTable: [] }, routeLegs: completeLegs(draft), weather: weather(),
     })).rejects.toMatchObject({ name: "UnsupportedCompletePlanInputError" });
   });
 
   it("rejects invalid route endpoints and non-finite snapshot data", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const legs = completeLegs(draft);
     const invalidEndpoints = [{ ...legs[0]!, start: draft.route.points[1]! }, ...legs.slice(1)] as readonly CompletePlanRouteLeg[];
     await expect(createFullNavlogCalculationEngine().calculate({
@@ -208,7 +210,7 @@ describe("full navlog calculation engine", () => {
   });
 
   it("rejects invalid climb and descent vertical rates before allocation", async () => {
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
     const base = { draft, routeLegs: completeLegs(draft), weather: weather() };
     await expect(createFullNavlogCalculationEngine().calculate({ ...base, aircraftProfile: { ...aircraftProfile(), climbRateFeetPerMinute: 0 } })).rejects.toMatchObject({ name: "UnsupportedCompletePlanInputError" });
     await expect(createFullNavlogCalculationEngine().calculate({ ...base, aircraftProfile: { ...aircraftProfile(), descentRateFeetPerMinute: Number.NaN } })).rejects.toMatchObject({ name: "UnsupportedCompletePlanInputError" });

@@ -67,8 +67,10 @@ const renderCalculatedResult = (
   scroll.append(table);
   const summary = nested(navlog, "fuelSummary");
   const fuel = document.createElement("p");
-  fuel.textContent = `Fuel required including taxi/run-up and reserve: ${number(summary?.requiredFuel)} gal. Enroute: ${number(summary?.enrouteFuel)} gal.`;
+  fuel.textContent = `Fuel required including taxi/run-up and reserve: ${fuelAmount(summary?.requiredFuel)} gal. Enroute: ${fuelAmount(summary?.enrouteFuel)} gal.`;
   section.append(scroll, fuel);
+  const aboardFuel = aboardFuelNotice(summary);
+  if (aboardFuel !== undefined) section.append(aboardFuel);
   const usableFuel = usableFuelNotice(summary);
   if (usableFuel !== undefined) section.append(usableFuel);
   const warnings = revisionWarnings(revision);
@@ -76,14 +78,69 @@ const renderCalculatedResult = (
   return section;
 };
 
+const fuelAmount = (value: unknown): string => typeof value !== "number" || !Number.isFinite(value)
+  ? "—"
+  : value !== 0 && Math.abs(value) < 0.1 ? `${value < 0 ? "−" : ""}<0.1` : value.toFixed(1);
+const fuelBalance = (value: unknown): string => typeof value !== "number" || !Number.isFinite(value)
+  ? "—"
+  : value < 0 ? `Deficit: ${fuelAmount(Math.abs(value))} gal` : `${fuelAmount(value)} gal`;
+const arrivalBalance = (value: unknown): string => typeof value === "number" && Number.isFinite(value) && value < 0
+  ? `Estimated arrival deficit: ${fuelAmount(Math.abs(value))} gal`
+  : `Estimated arrival balance: ${fuelBalance(value)}`;
+
+const aboardFuelNotice = (summary: RecordValue | undefined): HTMLElement | undefined => {
+  if (typeof summary?.fuelAboard !== "number") return undefined;
+  const section = document.createElement("section");
+  section.className = "aboard-fuel-summary";
+  const details = document.createElement("p");
+  const reserveAssessment = typeof summary.reserveShortfall === "number" && summary.reserveShortfall > 0
+    ? `Reserve shortfall: ${fuelAmount(summary.reserveShortfall)} gal.`
+    : `Reserve margin: ${fuelAmount(summary.reserveMargin)} gal above reserve.`;
+  const sufficiency = typeof summary.sufficientAboardFuel === "boolean"
+    ? `Aboard-fuel sufficiency: ${summary.sufficientAboardFuel ? "sufficient" : "insufficient"} for taxi, route, and reserve.`
+    : "";
+  details.textContent = `Fuel aboard (pilot input): ${fuelAmount(summary.fuelAboard)} gal. Taxi/run-up (pilot input): ${fuelAmount(summary.taxiRunupFuel)} gal; post-taxi balance (calculated): ${fuelBalance(summary.fuelAfterTaxi)}. ${arrivalBalance(summary.estimatedArrivalFuel)}. Reserve (pilot input): ${fuelAmount(summary.reserveFuel)} gal. ${reserveAssessment} ${sufficiency}`;
+  section.append(details);
+  const capacity = capacityComparisonNotice(summary);
+  if (capacity) section.append(capacity);
+  const warning = aboardFuelWarning(summary);
+  if (warning) section.append(warning);
+  return section;
+};
+
+const capacityComparisonNotice = (summary: RecordValue): HTMLElement | undefined => {
+  const unavailable = summary.capacityComparisonAvailable === false
+    || (summary.capacityComparisonAvailable === undefined && (summary.usableFuel === undefined || summary.usableFuel === null));
+  if (!unavailable) return undefined;
+  const capacity = document.createElement("p");
+  capacity.textContent = "Usable-fuel capacity comparison unavailable; aboard-fuel sufficiency is evaluated from the entered fuel amount.";
+  return capacity;
+};
+
+const aboardFuelWarning = (summary: RecordValue): HTMLElement | undefined => {
+  const shortfall = typeof summary.reserveShortfall === "number" ? summary.reserveShortfall : 0;
+  const exhaustionDeficit = typeof summary.fuelExhaustionDeficit === "number" ? summary.fuelExhaustionDeficit : 0;
+  const messages = [
+    shortfall > 0 ? `Reserve shortfall: ${fuelAmount(shortfall)} gal.` : undefined,
+    exhaustionDeficit > 0 ? `Fuel exhaustion deficit: ${fuelAmount(exhaustionDeficit)} gal.` : undefined,
+    summary.fuelExhausted === true && exhaustionDeficit <= 0 ? "Fuel exhausted at arrival (estimated balance is zero). The estimate does not include an available-fuel margin." : undefined,
+    summary.sufficientAboardFuel === false && shortfall === 0 && exhaustionDeficit <= 0 && summary.fuelExhausted !== true ? "Fuel aboard is insufficient for this plan." : undefined,
+  ].filter((message): message is string => message !== undefined);
+  if (messages.length === 0) return undefined;
+  const warning = document.createElement("p");
+  warning.className = "navlog-fuel-warning";
+  warning.textContent = `WARNING: ${messages.join(" ")}`;
+  return warning;
+};
+
 const usableFuelNotice = (summary: RecordValue | undefined): HTMLElement | undefined => {
   if (typeof summary?.usableFuel !== "number" || typeof summary.usableFuelDifference !== "number") return undefined;
   const notice = document.createElement("p");
   if (summary.sufficientUsableFuel === false) {
     notice.className = "navlog-fuel-warning";
-    notice.textContent = `WARNING: Usable fuel is ${number(summary.usableFuel)} gal; this plan is short ${number(Math.abs(summary.usableFuelDifference))} gal of required fuel.`;
+    notice.textContent = `WARNING: Usable fuel is ${fuelAmount(summary.usableFuel)} gal; this plan is short ${fuelAmount(Math.abs(summary.usableFuelDifference))} gal of required fuel.`;
   } else {
-    notice.textContent = `Usable fuel: ${number(summary.usableFuel)} gal; margin above required fuel: ${number(summary.usableFuelDifference)} gal.`;
+    notice.textContent = `Usable fuel: ${fuelAmount(summary.usableFuel)} gal; margin above required fuel: ${fuelAmount(summary.usableFuelDifference)} gal.`;
   }
   return notice;
 };
@@ -107,7 +164,7 @@ const revisionWarnings = (revision: PlanRevision): HTMLElement | undefined => {
 const navlogHeader = (): HTMLTableSectionElement => {
   const head = document.createElement("thead");
   const row = document.createElement("tr");
-  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Fuel gal"].forEach((label) => {
+  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Fuel used gal", "Balance after row"].forEach((label) => {
     const heading = document.createElement("th");
     heading.scope = "col";
     heading.textContent = label;
@@ -141,7 +198,7 @@ const navlogRow = (row: RecordValue, revision: PlanRevision, rowIndex: number, o
     valueCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`), valueCell("windCorrectionAngle", number(row.windCorrectionAngle)), valueCell("trueHeading", number(row.trueHeading)),
     valueCell("variation", number(nested(row, "variation")?.effectiveValue)), valueCell("magneticHeading", number(row.magneticHeading)), valueCell("compassDeviation", number(row.compassDeviation)),
     valueCell("compassHeading", number(row.compassHeading)), valueCell("distance", number(subleg?.distance)), valueCell("groundspeed", number(row.groundspeed)), valueCell("estimatedTimeEnroute", number(row.estimatedTimeEnroute)),
-    valueCell("fuel", number(row.fuel)),
+    valueCell("fuel", fuelAmount(row.fuel)), cell(fuelBalance(nested(row, "cumulative")?.fuelRemaining)),
   );
   return tr;
 };

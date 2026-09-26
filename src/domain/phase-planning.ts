@@ -1,4 +1,4 @@
-import { type CalculationTrace, trace } from "./calculation-trace";
+import { type CalculationTrace, trace, type TraceValue } from "./calculation-trace";
 import type { Coordinate } from "./coordinates";
 import { failure, propagateFailure, success, type DomainResult } from "./errors";
 import {
@@ -165,6 +165,11 @@ export interface FuelSummaryInput {
   readonly descentFuel: Gallons;
   readonly reserveFuel: Gallons;
   readonly usableFuel?: Gallons;
+  readonly fuelAboard?: Gallons;
+  readonly fuelAfterTaxi?: SignedGallons;
+  readonly estimatedArrivalFuel?: SignedGallons;
+  readonly fuelExhaustionDeficit?: Gallons;
+  readonly runningFuelBalances?: readonly SignedGallons[];
 }
 
 export interface FuelSummary {
@@ -180,35 +185,114 @@ export interface FuelSummary {
   /** Positive when usable fuel exceeds required fuel; negative when insufficient. */
   readonly usableFuelDifference?: SignedGallons;
   readonly sufficientUsableFuel?: boolean;
+  readonly fuelAboard?: Gallons;
+  readonly fuelAfterTaxi?: SignedGallons;
+  readonly estimatedArrivalFuel?: SignedGallons;
+  readonly reserveMargin?: SignedGallons;
+  readonly reserveShortfall?: Gallons;
+  readonly fuelExhaustionDeficit?: Gallons;
+  readonly runningFuelBalances?: readonly SignedGallons[];
+  readonly fuelExhausted?: boolean;
+  readonly capacityComparisonAvailable: boolean;
+  readonly sufficientAboardFuel?: boolean;
   readonly trace: CalculationTrace;
 }
 
 /** Keeps taxi/run-up and reserve fuel explicit rather than folding them into enroute fuel. */
 export const calculateFuelSummary = (input: FuelSummaryInput): DomainResult<FuelSummary> => {
+  const totals = fuelSummaryTotals(input);
+  if (!totals.ok) return propagateFailure(totals);
+  const aboard = aboardFuelSummary(input);
+  if (!aboard.ok) return propagateFailure(aboard);
+  const usableFuelDifference = input.usableFuel === undefined ? undefined : signedGallons(input.usableFuel - totals.value.requiredFuel);
+  if (usableFuelDifference !== undefined && !usableFuelDifference.ok) return propagateFailure(usableFuelDifference);
+  return success({
+    ...input,
+    enrouteFuel: totals.value.enrouteFuel,
+    requiredFuel: totals.value.requiredFuel,
+    usableFuelDifference: usableFuelDifference?.value,
+    sufficientUsableFuel: input.usableFuel === undefined ? undefined : input.usableFuel >= totals.value.requiredFuel,
+    capacityComparisonAvailable: input.usableFuel !== undefined,
+    sufficientAboardFuel: aboard.value.sufficientAboardFuel,
+    fuelExhausted: aboard.value.fuelExhausted,
+    reserveMargin: aboard.value.reserveMargin,
+    reserveShortfall: aboard.value.reserveShortfall,
+    trace: fuelSummaryTrace(input, totals.value, aboard.value),
+  });
+};
+
+interface FuelSummaryTotals {
+  readonly enrouteFuel: Gallons;
+  readonly requiredFuel: Gallons;
+}
+
+interface AboardFuelSummary {
+  readonly sufficientAboardFuel?: boolean;
+  readonly fuelExhausted?: boolean;
+  readonly reserveMargin?: SignedGallons;
+  readonly reserveShortfall?: Gallons;
+}
+
+const fuelSummaryTotals = (input: FuelSummaryInput): DomainResult<FuelSummaryTotals> => {
   const enrouteFuel = gallons(input.climbFuel + input.transitionFuel + input.cruiseFuel + input.descentFuel);
   if (!enrouteFuel.ok) return propagateFailure(enrouteFuel);
   const requiredFuel = gallons(input.taxiRunupFuel + enrouteFuel.value + input.reserveFuel);
   if (!requiredFuel.ok) return propagateFailure(requiredFuel);
-  const usableFuelDifference = input.usableFuel === undefined ? undefined : signedGallons(input.usableFuel - requiredFuel.value);
-  if (usableFuelDifference !== undefined && !usableFuelDifference.ok) return propagateFailure(usableFuelDifference);
+  return success({ enrouteFuel: enrouteFuel.value, requiredFuel: requiredFuel.value });
+};
+
+const aboardFuelSummary = (input: FuelSummaryInput): DomainResult<AboardFuelSummary> => {
+  const reserve = reserveBalance(input);
+  if (!reserve.ok) return propagateFailure(reserve);
+  const fuelExhausted = runningFuelExhausted(input.runningFuelBalances);
   return success({
-    ...input,
-    enrouteFuel: enrouteFuel.value,
-    requiredFuel: requiredFuel.value,
-    usableFuelDifference: usableFuelDifference?.value,
-    sufficientUsableFuel: input.usableFuel === undefined ? undefined : input.usableFuel >= requiredFuel.value,
-    trace: trace(
-      "fuel-summary",
-      [
-        { name: "taxi/run-up fuel", value: input.taxiRunupFuel, unit: "gallons" },
-        { name: "climb fuel", value: input.climbFuel, unit: "gallons" },
-        { name: "transition fuel", value: input.transitionFuel, unit: "gallons" },
-        { name: "cruise fuel", value: input.cruiseFuel, unit: "gallons" },
-        { name: "descent fuel", value: input.descentFuel, unit: "gallons" },
-        { name: "reserve fuel", value: input.reserveFuel, unit: "gallons" },
-      ],
-      [{ name: "enroute fuel", value: enrouteFuel.value, unit: "gallons" }],
-      { name: "required fuel", value: requiredFuel.value, unit: "gallons" },
-    ),
+    sufficientAboardFuel: sufficientAboardFuel(input.estimatedArrivalFuel, input.reserveFuel, fuelExhausted),
+    fuelExhausted,
+    reserveMargin: reserve.value.reserveMargin,
+    reserveShortfall: reserve.value.reserveShortfall,
   });
 };
+
+const reserveBalance = (input: FuelSummaryInput): DomainResult<Pick<AboardFuelSummary, "reserveMargin" | "reserveShortfall">> => {
+  if (input.estimatedArrivalFuel === undefined) return success({});
+  const reserveMargin = signedGallons(input.estimatedArrivalFuel - input.reserveFuel);
+  if (!reserveMargin.ok) return propagateFailure(reserveMargin);
+  const reserveShortfall = gallons(Math.max(0, input.reserveFuel - input.estimatedArrivalFuel));
+  if (!reserveShortfall.ok) return propagateFailure(reserveShortfall);
+  return success({ reserveMargin: reserveMargin.value, reserveShortfall: reserveShortfall.value });
+};
+
+const runningFuelExhausted = (balances: readonly SignedGallons[] | undefined): boolean | undefined =>
+  balances?.some((balance) => balance <= 0);
+
+const sufficientAboardFuel = (arrival: SignedGallons | undefined, reserve: Gallons, exhausted: boolean | undefined): boolean | undefined =>
+  arrival === undefined ? undefined : arrival > 0 && arrival >= reserve && exhausted !== true;
+
+const fuelSummaryTrace = (input: FuelSummaryInput, totals: FuelSummaryTotals, aboard: AboardFuelSummary): CalculationTrace => trace(
+  "fuel-summary",
+  fuelTraceInputs(input),
+  fuelTraceIntermediateValues(input, totals, aboard),
+  { name: "required fuel", value: totals.requiredFuel, unit: "gallons" },
+);
+
+const fuelTraceInputs = (input: FuelSummaryInput): TraceValue[] => [
+  { name: "taxi/run-up fuel", value: input.taxiRunupFuel, unit: "gallons" },
+  { name: "climb fuel", value: input.climbFuel, unit: "gallons" },
+  { name: "transition fuel", value: input.transitionFuel, unit: "gallons" },
+  { name: "cruise fuel", value: input.cruiseFuel, unit: "gallons" },
+  { name: "descent fuel", value: input.descentFuel, unit: "gallons" },
+  { name: "reserve fuel", value: input.reserveFuel, unit: "gallons" },
+  ...optionalGallonsTrace("fuel aboard", input.fuelAboard),
+];
+
+const fuelTraceIntermediateValues = (input: FuelSummaryInput, totals: FuelSummaryTotals, aboard: AboardFuelSummary): TraceValue[] => [
+  { name: "enroute fuel", value: totals.enrouteFuel, unit: "gallons" },
+  ...optionalGallonsTrace("fuel after taxi/run-up", input.fuelAfterTaxi),
+  ...(input.runningFuelBalances ?? []).slice(1).map((balance, index) => ({ name: `fuel remaining after row ${index + 1}`, value: balance, unit: "gallons" as const })),
+  ...optionalGallonsTrace("estimated arrival fuel", input.estimatedArrivalFuel),
+  ...optionalGallonsTrace("reserve margin", aboard.reserveMargin),
+  ...optionalGallonsTrace("reserve shortfall", aboard.reserveShortfall),
+];
+
+const optionalGallonsTrace = (name: string, value: number | undefined): TraceValue[] =>
+  value === undefined ? [] : [{ name, value, unit: "gallons" }];

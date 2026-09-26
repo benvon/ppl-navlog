@@ -4,6 +4,7 @@ import type {
   AirportRoutePoint,
   CheckpointRoutePoint,
   PlanDraft,
+  PlanFuelInputs,
   PlanFamily,
   PlanRevision,
   PlanWeatherSelection,
@@ -47,6 +48,7 @@ export interface PlanDraftInput {
   readonly departureTimeUtc: string;
   readonly route: RouteDefinition;
   readonly selectedAircraftProfileId: string;
+  readonly fuelAboardGallons?: number;
   readonly taxiRunupFuelGallons: number;
   readonly reserveFuelGallons: number;
   readonly descentTargetAltitudeFeetMsl: number;
@@ -134,13 +136,24 @@ export function createPlanDraft(input: PlanDraftInput, ids: UseCaseIds, clock: U
     departureTimeUtc: requiredUtcInstant(input.departureTimeUtc),
     route: input.route,
     selectedAircraftProfileId: input.selectedAircraftProfileId,
-    fuelInputs: { taxiRunupFuelGallons: input.taxiRunupFuelGallons, reserveFuelGallons: input.reserveFuelGallons },
+    fuelInputs: createPlanFuelInputs(input),
     ...(input.weatherSelection === undefined ? {} : { weatherSelection: input.weatherSelection }),
     descentTargetAltitudeFeetMsl: input.descentTargetIsManual === false
       ? automaticDescentTargetValue(input.descentTargetAltitudeFeetMsl, createdAt)
       : pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
     createdAt,
     updatedAt: createdAt,
+  };
+}
+
+function createPlanFuelInputs(input: Pick<PlanDraftInput, "fuelAboardGallons" | "taxiRunupFuelGallons" | "reserveFuelGallons">): PlanFuelInputs {
+  if (input.fuelAboardGallons !== undefined && (!Number.isFinite(input.fuelAboardGallons) || input.fuelAboardGallons < 0)) {
+    throw new DraftUseCaseError("Fuel aboard must be a finite nonnegative value.");
+  }
+  return {
+    ...(input.fuelAboardGallons === undefined ? {} : { fuelAboardGallons: input.fuelAboardGallons }),
+    taxiRunupFuelGallons: input.taxiRunupFuelGallons,
+    reserveFuelGallons: input.reserveFuelGallons,
   };
 }
 

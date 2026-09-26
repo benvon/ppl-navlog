@@ -10,6 +10,7 @@ const cache = { status: "upstream_refresh" as const, source: "upstream" as const
 const station = { id: "BRL", name: "Burlington", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us" as const, availableForecastCycles: ["06" as const], source: "aviationweather" as const };
 const provenance = { adapter: "aviationweather" as const, product: "NCEP FB Winds/Temps (legacy FD)" as const, region: "us" as const, endpoint: "https://aviationweather.gov/api/data/windtemp" as const, fetchedAt: timestamp, cache };
 const period = { stationId: "BRL", forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
+const calculationDraft = () => { const draft = planDraft(); return { ...draft, fuelInputs: { ...draft.fuelInputs, fuelAboardGallons: 20 } }; };
 
 const client: WindsTransportClient & MetarTransportClient = {
   discoverStations: async (): Promise<WindsStationsSuccessPayload> => ({ stations: [station], forecasts: [period], unavailableForecastCycles: [], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111" }),
@@ -31,7 +32,7 @@ describe("browser plan composition", () => {
   it("requires an explicit selected period before fetching or saving", async () => {
     let writes = 0;
     const calculator = createBrowserPlanCalculator({ saveCalculatedPlanRevision: async () => { writes += 1; } }, client, { next: () => "id-1" }, { now: () => new Date(timestamp) });
-    const result = await calculator(planDraft(), aircraftProfile());
+    const result = await calculator(calculationDraft(), aircraftProfile());
     expect(result).toMatchObject({ status: "blocked", reason: "forecast-not-selected" });
     expect(writes).toBe(0);
   });
@@ -40,7 +41,7 @@ describe("browser plan composition", () => {
     const saved: { family: PlanFamily; revision: PlanRevision; snapshots: readonly WeatherReferenceSnapshot[] }[] = [];
     let next = 0;
     const calculator = createBrowserPlanCalculator({ saveCalculatedPlanRevision: async (family, revision, snapshots) => { saved.push({ family, revision, snapshots }); } }, client, { next: () => `new-${++next}` }, { now: () => new Date(timestamp) });
-    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: period.validAt, selectedAtUtc: timestamp, surfaceWeatherIcao: "KORD" } };
+    const draft = { ...calculationDraft(), departureTimeUtc: "2026-09-21T22:00:00.000Z", weatherSelection: { forecastValidTimeUtc: period.validAt, selectedAtUtc: timestamp, surfaceWeatherIcao: "KORD" } };
     const result = await calculator(draft, aircraftProfile());
     expect(result.status).toBe("saved");
     expect(saved).toHaveLength(1);

@@ -101,7 +101,7 @@ describe("navlog calculation", () => {
   it("finalizes each progressive interval once, carries cumulative state, and summarizes the finalized rows", () => {
     const base = {
       routeLegs: [sourceLeg()], aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
       windResolver: { resolveEffectiveWind: () => success(windValue()) },
     };
     const session = createNavlogCalculationSession(base);
@@ -153,7 +153,7 @@ describe("navlog calculation", () => {
       allocatedSublegs: [subleg("climb", "climb", 5), subleg("cruise", "cruise", 10), subleg("descent", "descent", 5)],
       routeLegs: [sourceLeg()],
       aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
       windResolver: { resolveEffectiveWind: () => success(windValue()) },
     });
 
@@ -180,6 +180,68 @@ describe("navlog calculation", () => {
     expect(result.value.fuelSummary).toMatchObject({ taxiRunupFuel: 1, reserveFuel: 5, usableFuel: 50 });
     expect(result.value.fuelSummary.enrouteFuel).toBeCloseTo(result.value.rows.reduce((sum, row) => sum + row.fuel, 0), 10);
     expect(result.value.fuelSummary.requiredFuel).toBeCloseTo(result.value.fuelSummary.enrouteFuel + 6, 10);
+    expect(result.value.fuelSummary.fuelAboard).toBe(40);
+    expect(result.value.rows[0]!.cumulative.fuelRemaining).toBeCloseTo(39 - result.value.rows[0]!.fuel, 10);
+    expect(result.value.fuelSummary.estimatedArrivalFuel).toBeCloseTo(40 - result.value.fuelSummary.requiredFuel + 5, 10);
+    expect(result.value.fuelSummary.trace.intermediateValues.map(({ name }) => name)).toEqual([
+      "enroute fuel", "fuel after taxi/run-up", "fuel remaining after row 1", "fuel remaining after row 2",
+      "fuel remaining after row 3", "estimated arrival fuel", "reserve margin", "reserve shortfall",
+    ]);
+  });
+
+  it("carries unrounded fuel through rows and reports reserve shortfall and taxi exhaustion", () => {
+    const base = {
+      allocatedSublegs: [subleg("one", "cruise", 1), subleg("two", "cruise", 1)],
+      routeLegs: [sourceLeg()], aircraftProfile: profile(),
+      fuelInputs: { fuelAboardGallons: 0.2, taxiRunupFuelGallons: 0.3, reserveFuelGallons: 1 },
+      windResolver: { resolveEffectiveWind: () => success(windValue()) },
+    };
+    const result = calculateNavlog(base);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    const [first, second] = result.value.rows;
+    expect(first!.cumulative.fuelRemaining).toBeCloseTo(0.2 - 0.3 - first!.fuel, 12);
+    expect(second!.cumulative.fuelRemaining).toBeCloseTo(first!.cumulative.fuelRemaining - second!.fuel, 12);
+    expect(result.value.fuelSummary.fuelAfterTaxi).toBeCloseTo(-0.1, 12);
+    expect(result.value.fuelSummary.reserveShortfall).toBeGreaterThan(0);
+    expect(result.value.fuelSummary.fuelExhaustionDeficit).toBeGreaterThan(0);
+    expect(result.value.fuelSummary.fuelExhausted).toBe(true);
+  });
+
+  it("requires finite nonnegative aboard fuel, enforces present capacity, and permits absent capacity", () => {
+    const base = {
+      allocatedSublegs: [], routeLegs: [sourceLeg()], aircraftProfile: profile(),
+      fuelInputs: { fuelAboardGallons: 0, taxiRunupFuelGallons: 0, reserveFuelGallons: 0 },
+      windResolver: { resolveEffectiveWind: () => success(windValue()) },
+    };
+    expect(calculateNavlog({ ...base, fuelInputs: { ...base.fuelInputs, fuelAboardGallons: Number.NaN } })).toMatchObject({ ok: false });
+    expect(calculateNavlog({ ...base, fuelInputs: { ...base.fuelInputs, fuelAboardGallons: -1 } })).toMatchObject({ ok: false });
+    expect(calculateNavlog({ ...base, fuelInputs: { taxiRunupFuelGallons: 0, reserveFuelGallons: 0 } })).toMatchObject({ ok: false });
+    expect(calculateNavlog({ ...base, fuelInputs: { ...base.fuelInputs, fuelAboardGallons: 51 } })).toMatchObject({ ok: false });
+    const noCapacity = calculateNavlog({ ...base, aircraftProfile: { ...profile(), usableFuelGallons: undefined } });
+    expect(noCapacity).toMatchObject({ ok: true, value: { fuelSummary: { capacityComparisonAvailable: false, fuelAboard: 0, sufficientAboardFuel: false, fuelExhausted: true } } });
+    const exactlyAtReserve = calculateNavlog({
+      ...base,
+      aircraftProfile: { ...profile(), usableFuelGallons: undefined },
+      fuelInputs: { fuelAboardGallons: 5, taxiRunupFuelGallons: 0, reserveFuelGallons: 5 },
+    });
+    expect(exactlyAtReserve).toMatchObject({ ok: true, value: { fuelSummary: { estimatedArrivalFuel: 5, sufficientAboardFuel: true, fuelExhausted: false } } });
+  });
+
+  it("propagates a TAS override through time, fuel, and aboard balance", () => {
+    const calculate = (routeLeg: NavlogSourceLeg) => calculateNavlog({
+      allocatedSublegs: [subleg("cruise", "cruise", 30)], routeLegs: [routeLeg], aircraftProfile: profile(),
+      fuelInputs: { fuelAboardGallons: 10, taxiRunupFuelGallons: 1, reserveFuelGallons: 3 },
+      windResolver: { resolveEffectiveWind: () => success(windValue()) },
+    });
+    const baseline = calculate(sourceLeg());
+    const overridden = calculate(sourceLeg(true));
+    expect(baseline.ok).toBe(true);
+    expect(overridden.ok).toBe(true);
+    if (!baseline.ok || !overridden.ok) throw new Error("Expected both TAS scenarios to calculate.");
+    expect(overridden.value.rows[0]!.estimatedTimeEnroute).toBeLessThan(baseline.value.rows[0]!.estimatedTimeEnroute);
+    expect(overridden.value.rows[0]!.fuel).toBeLessThan(baseline.value.rows[0]!.fuel);
+    expect(overridden.value.fuelSummary.estimatedArrivalFuel).toBeGreaterThan(baseline.value.fuelSummary.estimatedArrivalFuel!);
   });
 
   it("retains each applied override alongside its computed value instead of collapsing it into the effective result", () => {
@@ -187,7 +249,7 @@ describe("navlog calculation", () => {
       allocatedSublegs: [subleg("cruise", "cruise", 10)],
       routeLegs: [sourceLeg(true)],
       aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
       windResolver: { resolveEffectiveWind: () => success(windValue(true)) },
     });
 
@@ -208,7 +270,7 @@ describe("navlog calculation", () => {
       allocatedSublegs: [subleg("climb", "climb", 5)],
       routeLegs: [sourceLeg()],
       aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
       windResolver: {
         resolveEffectiveWind: () => success({
           ...windValue(),
@@ -257,7 +319,7 @@ describe("navlog calculation", () => {
       allocatedSublegs: [subleg("cruise", "cruise", 10)],
       routeLegs: [sourceLeg()],
       aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 },
       windResolver: { resolveEffectiveWind: () => failure("UNSUPPORTED_WIND_ALTITUDE", "No wind is available at this altitude.") },
     });
     expect(result).toMatchObject({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE" } });
@@ -266,7 +328,7 @@ describe("navlog calculation", () => {
   it("serializes the calculation as finite JSON while omitting absent optional values", () => {
     const calculation = calculateNavlog({
       allocatedSublegs: [subleg("cruise", "cruise", 10)], routeLegs: [sourceLeg()], aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
     });
     if (!calculation.ok) throw new Error(calculation.error.message);
     const snapshot = toNavlogCalculationSnapshot(calculation.value);
@@ -280,10 +342,10 @@ describe("navlog calculation", () => {
   it("rejects invalid fuel, missing route-leg lineage, unusable fuel, and invalid cruise override values", () => {
     const base = {
       allocatedSublegs: [subleg("cruise", "cruise", 10)], routeLegs: [sourceLeg()], aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
     };
-    expect(calculateNavlog({ ...base, fuelInputs: { taxiRunupFuelGallons: -1, reserveFuelGallons: 5 } })).toMatchObject({ ok: false, error: { code: "OUT_OF_RANGE" } });
-    expect(calculateNavlog({ ...base, fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: -1 } })).toMatchObject({ ok: false, error: { code: "OUT_OF_RANGE" } });
+    expect(calculateNavlog({ ...base, fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: -1, reserveFuelGallons: 5 } })).toMatchObject({ ok: false, error: { code: "OUT_OF_RANGE" } });
+    expect(calculateNavlog({ ...base, fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: -1 } })).toMatchObject({ ok: false, error: { code: "OUT_OF_RANGE" } });
     expect(calculateNavlog({ ...base, routeLegs: [] })).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
     expect(calculateNavlog({ ...base, aircraftProfile: { ...profile(), usableFuelGallons: -1 } })).toMatchObject({ ok: false, error: { code: "OUT_OF_RANGE" } });
     const original = sourceLeg();
@@ -297,7 +359,7 @@ describe("navlog calculation", () => {
   it("fails closed for an impossible wind triangle, invalid compass table, and incomplete METAR interpolation evidence", () => {
     const base = {
       allocatedSublegs: [subleg("cruise", "cruise", 10)], routeLegs: [sourceLeg()], aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
     };
     expect(calculateNavlog({ ...base, windResolver: { resolveEffectiveWind: () => success({ ...windValue(), wind: planningValue(value(wind(0, 200))) }) } })).toMatchObject({ ok: false, error: { code: "INVALID_WIND_TRIANGLE" } });
     expect(calculateNavlog({ ...base, aircraftProfile: { ...profile(), compassDeviationTable: [] } })).toMatchObject({ ok: false, error: { code: "INVALID_DEVIATION_TABLE" } });
@@ -314,7 +376,7 @@ describe("navlog calculation", () => {
   it("rejects a non-finite value before JSON snapshot persistence", () => {
     const result = calculateNavlog({
       allocatedSublegs: [subleg("cruise", "cruise", 10)], routeLegs: [sourceLeg()], aircraftProfile: profile(),
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success(windValue()) },
     });
     if (!result.ok) throw new Error(result.error.message);
     expect(toNavlogCalculationSnapshot({ ...result.value, warnings: [Number.POSITIVE_INFINITY as unknown as string] })).toMatchObject({ ok: false, error: { code: "INVALID_NUMBER" } });
@@ -334,7 +396,7 @@ describe("navlog calculation", () => {
     const transition = subleg("transition", "transition-climb", 5);
     const result = calculateNavlog({
       allocatedSublegs: [transition, subleg("cruise", "cruise", 5)], routeLegs: [routeLeg], aircraftProfile: { ...profile(), usableFuelGallons: undefined },
-      fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success({ ...windValue(), warnings: ["Fixture weather warning."] }) },
+      fuelInputs: { fuelAboardGallons: 40, taxiRunupFuelGallons: 1, reserveFuelGallons: 5 }, windResolver: { resolveEffectiveWind: () => success({ ...windValue(), warnings: ["Fixture weather warning."] }) },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error.message);

@@ -6,7 +6,7 @@ import { calculateAndSavePlan, type CalculatedPlanPersistence } from "./calculat
 
 const clock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
 const ids = { next: () => "revision-new" };
-const draft = () => ({ ...planDraft(), departureTimeUtc: "2026-09-21T18:00:00.000Z" });
+const draft = () => { const base = planDraft(); return { ...base, departureTimeUtc: "2026-09-21T18:00:00.000Z", fuelInputs: { ...base.fuelInputs, fuelAboardGallons: 20 } }; };
 const evidence = () => ({ ...weatherSnapshot(), retrievedAt: "2026-09-21T11:00:00.000Z" });
 const completeSnapshot: JsonValue = { schema: "complete-navlog/v1", status: "calculated", rows: [] };
 const partialSnapshot: JsonValue = { schema: "vertical-profile/v1", status: "partial" };
