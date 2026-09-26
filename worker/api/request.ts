@@ -5,8 +5,10 @@ const REQUEST_ID_HEADER = 'X-Request-Id';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type ApiRoute = { readonly kind: 'health' } | { readonly kind: 'airport'; readonly icao: string } | { readonly kind: 'metar'; readonly icao: string }
+  | { readonly kind: 'taf'; readonly icao: string }
   | { readonly kind: 'winds-stations'; readonly route: WindsRoutePoint[] }
-  | { readonly kind: 'winds-forecast'; readonly station: string; readonly validTime: string; readonly region: WindsRegion };
+  | { readonly kind: 'winds-forecast'; readonly station: string; readonly validTime: string; readonly region: WindsRegion }
+  | { readonly kind: 'winds-point'; readonly latitudeDeg: number; readonly longitudeDeg: number; readonly altitudeFeetMsl: number; readonly plannedUtc: string };
 
 export function createRequestId(request: Request): string {
   const suppliedRequestId = request.headers.get(REQUEST_ID_HEADER)?.trim();
@@ -69,9 +71,40 @@ function parseWindsRegion(value: string): WindsRegion {
   throw new ApiError('region must be one of us, alaska, or hawaii.', 400, 'invalid_request');
 }
 
+function parsePointCoordinate(value: string): number {
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || value.length > 16) throw new ApiError('Point coordinates must be canonical decimal values.', 400, 'invalid_request');
+  const coordinate = Number(value);
+  if (!Number.isFinite(coordinate)) throw new ApiError('Point coordinates must be finite decimal values.', 400, 'invalid_request');
+  return coordinate;
+}
+
+function parsePointAltitude(value: string): number {
+  if (!/^(?:0|[1-9]\d{0,4})$/.test(value)) throw new ApiError('altitudeFeetMsl must be an integer in supported bounds.', 400, 'invalid_request');
+  return Number(value);
+}
+
+function parsePointUtc(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) throw new ApiError('plannedUtc must be a canonical UTC ISO timestamp.', 400, 'invalid_request');
+  return value;
+}
+
+function parseWindsPoint(url: URL): ApiRoute {
+  const allowed = new Set(['lat', 'lon', 'altitudeFeetMsl', 'plannedUtc']);
+  if ([...url.searchParams.keys()].some((key) => !allowed.has(key))) throw new ApiError('Only lat, lon, altitudeFeetMsl, and plannedUtc are accepted by this endpoint.', 400, 'invalid_request');
+  const latitudeDeg = parsePointCoordinate(requiredSingleQuery(url, 'lat'));
+  const longitudeDeg = parsePointCoordinate(requiredSingleQuery(url, 'lon'));
+  if (latitudeDeg < -90 || latitudeDeg > 90 || longitudeDeg < -180 || longitudeDeg > 180) throw new ApiError('Point coordinates are outside supported bounds.', 400, 'invalid_request');
+  return { kind: 'winds-point', latitudeDeg, longitudeDeg, altitudeFeetMsl: parsePointAltitude(requiredSingleQuery(url, 'altitudeFeetMsl')), plannedUtc: parsePointUtc(requiredSingleQuery(url, 'plannedUtc')) };
+}
+
+
 export function parseApiRoute(request: Request): ApiRoute {
   const url = new URL(request.url);
   const segments = url.pathname.split('/').filter(Boolean);
+  if (hasSegments(segments.slice(0, 3), ['api', 'weather', 'taf']) && segments.length === 4) {
+    if ([...url.searchParams.keys()].length > 0) throw new ApiError('Query parameters are not accepted by this endpoint.', 400, 'invalid_request');
+    return { kind: 'taf', icao: normalizeIcao(segments[3] ?? '') };
+  }
   const baseRoute = parseBaseRoute(segments, url);
   if (baseRoute) return baseRoute;
   const windsRoute = parseWindsRoute(segments, url);
@@ -100,10 +133,15 @@ function parseBaseRoute(segments: string[], url: URL): ApiRoute | null {
 
 function parseWindsRoute(segments: string[], url: URL): ApiRoute | null {
   const windsStationsRoute = hasSegments(segments, ['api', 'weather', 'winds', 'stations']);
+  const windsPointRoute = hasSegments(segments, ['api', 'weather', 'winds', 'point']);
   const windsForecastRoute = hasSegments(segments, ['api', 'weather', 'winds']);
   if (windsStationsRoute) {
     if ([...url.searchParams.keys()].some((key) => key !== 'route')) throw new ApiError('Only the route query parameter is accepted by this endpoint.', 400, 'invalid_request');
     return { kind: 'winds-stations', route: parseRoute(requiredSingleQuery(url, 'route')) };
+  }
+  if (windsPointRoute) {
+    if (url.search.length > 512) throw new ApiError('Point query exceeds the supported length.', 400, 'invalid_request');
+    return parseWindsPoint(url);
   }
   if (windsForecastRoute) {
     if ([...url.searchParams.keys()].some((key) => key !== 'station' && key !== 'validTime' && key !== 'region')) throw new ApiError('Only station, validTime, and region query parameters are accepted by this endpoint.', 400, 'invalid_request');

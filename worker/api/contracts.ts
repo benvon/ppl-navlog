@@ -64,6 +64,41 @@ export type WindsRoutePoint = AirportCoordinates;
 export type WindsForecastCycle = '06' | '12' | '24';
 export type WindsRegion = 'us' | 'alaska' | 'hawaii';
 
+export interface AloftPointQuery { latitudeDeg: number; longitudeDeg: number; altitudeFeetMsl: number; plannedUtc: string; }
+export interface AloftSourceWeight {
+  stationId: string;
+  latitudeDeg: number;
+  longitudeDeg: number;
+  distanceNauticalMiles: number;
+  horizontalWeight: number;
+  lowerAltitudeFeet: number;
+  upperAltitudeFeet: number;
+  verticalWeight: number;
+  lowerWindFromDegTrue: number | null;
+  lowerWindSpeedKt: number;
+  upperWindFromDegTrue: number | null;
+  upperWindSpeedKt: number;
+  temperatureLowerAltitudeFeet: number | null;
+  temperatureUpperAltitudeFeet: number | null;
+  temperatureVerticalWeight: number | null;
+  temperatureLowerC: number | null;
+  temperatureUpperC: number | null;
+}
+export interface AloftPointAnswer {
+  query: AloftPointQuery;
+  windFromDegTrue: number | null;
+  windSpeedKt: number;
+  temperatureC: number | null;
+  issuedAt: string;
+  useFrom: string;
+  useUntil: string;
+  forecastCycle: WindsForecastCycle;
+  product: { region: WindsRegion; cycle: WindsForecastCycle; cache: Pick<CacheProvenance, 'status' | 'source' | 'ageSeconds' | 'fetchedAt' | 'expiresAt' | 'freshnessRemainingSeconds' | 'servedAt'> };
+  sources: AloftSourceWeight[];
+  method: 'station-level' | 'vertical-vector' | 'horizontal-vector' | 'horizontal-vertical-vector';
+  requestId: string;
+}
+
 export interface WindsStation {
   id: string;
   name: string | null;
@@ -125,3 +160,6 @@ export interface WindsStationsSuccessPayload {
 }
 
 export interface WindsForecastSuccessPayload { forecast: WindsForecast; provenance: WindsSourceProvenance; requestId: string; }
+
+export interface TafWindGroup { kind: 'prevailing' | 'FM' | 'TEMPO' | 'PROB'; fromUtc: string; untilUtc: string; windDirectionType: 'fixed' | 'variable' | 'missing'; windFromDegTrue: number | null; windSpeedKt: number | null; gustKt: number | null; probabilityPercent: number | null; raw: string; }
+export interface TafAnswer { stationIcao: string; issuedAt: string; validFrom: string; validUntil: string; rawTaf: string; groups: TafWindGroup[]; requestId: string; }

@@ -4,6 +4,7 @@ import type { PlanDraft, RoutePoint, UserRouteLeg, JsonValue, WeatherReferenceSn
 import type { AircraftProfile } from "../domain/aircraft";
 import type { Coordinate } from "../domain/coordinates";
 import type { LoadedWindsData } from "../services/weather/winds-adapter";
+import type { AloftPointAnswer, MetarSuccessPayload } from "../../worker/api/contracts";
 import type { NauticalMiles, TrueCourse } from "../domain/units";
 import { nauticalMiles } from "../domain/units";
 import {
@@ -24,11 +25,25 @@ export interface CompletePlanRouteLeg {
   readonly magneticVariation: CalculatedMagneticVariation;
 }
 
+export interface RouteWeatherSample {
+  readonly routeDistanceNauticalMiles: number;
+  readonly plannedUtc: string;
+  readonly altitudeFeetMsl: number;
+  readonly answer: AloftPointAnswer;
+}
+
 export interface CompletePlanWeather {
   readonly snapshotIds: readonly string[];
   /** New immutable evidence awaiting atomic persistence with its plan revision. */
   readonly referenceSnapshots?: readonly WeatherReferenceSnapshot[];
-  readonly selectedForecastValidTimeUtc: string;
+  readonly selectedForecastValidTimeUtc?: string;
+  /** Route-indexed point answers retained only for this current calculation. */
+  readonly routeWeatherSamples?: readonly RouteWeatherSample[];
+  readonly departureMetarPayload?: MetarSuccessPayload;
+  /** Finalized one-pass route calculation, produced while advancing through weather events. */
+  readonly progressiveCalculationSnapshot?: JsonValue;
+  /** Legacy calculation timing hook; progressive route results are already final. */
+  readonly validateCalculatedTiming?: (calculationSnapshot: JsonValue) => string | undefined;
   readonly phaseWindResolver: EffectiveWindResolver;
   /** Immutable selected source data for per-subleg winds and teaching traces. */
   readonly loadedWindsData?: LoadedWindsData;
@@ -96,8 +111,8 @@ export const calculateCompletePlan = async (
   } catch (error) {
     return blocked("weather-unavailable", errorMessage(error, "Weather inputs are unavailable; the plan was not calculated."));
   }
-  if (!isValidUtcInstant(weather.selectedForecastValidTimeUtc)) {
-    return blocked("weather-unavailable", "Weather resolution did not provide an explicit UTC forecast-valid time.", weather.warnings);
+  if (weather.selectedForecastValidTimeUtc !== undefined && !isValidUtcInstant(weather.selectedForecastValidTimeUtc)) {
+    return blocked("weather-unavailable", "Weather resolution provided an invalid legacy UTC forecast-valid time.", weather.warnings);
   }
 
   const routeLegs: CompletePlanRouteLeg[] = [];
@@ -114,24 +129,38 @@ export const calculateCompletePlan = async (
     return blocked("magnetic-unavailable", errorMessage(error, "Magnetic variation is unavailable; the plan was not calculated."), weather.warnings);
   }
 
+  return calculateFinalPlan(draft, aircraftProfile, routeLegs, weather, dependencies);
+
+};
+
+const calculateFinalPlan = async (
+  draft: PlanDraft, aircraftProfile: AircraftProfile, routeLegs: readonly CompletePlanRouteLeg[],
+  weather: CompletePlanWeather, dependencies: CompletePlanDependencies,
+): Promise<CompletePlanResult> => {
   try {
     const calculation = await dependencies.calculations.calculate({ draft, aircraftProfile, routeLegs, weather });
-    return {
-      status: "ready",
-      routeLegs,
-      weather,
-      calculationSnapshot: calculation.calculationSnapshot,
-      warnings: [...weather.warnings, ...calculation.warnings],
-    };
+    if (isInfeasiblePhaseSnapshot(calculation.calculationSnapshot)) return readyResult(routeLegs, weather, calculation.calculationSnapshot, [...weather.warnings, ...calculation.warnings]);
+    const timingError = weather.progressiveCalculationSnapshot === undefined
+      ? weather.validateCalculatedTiming?.(calculation.calculationSnapshot)
+      : undefined;
+    if (timingError !== undefined) return blocked("weather-unavailable", timingError, weather.warnings);
+    return readyResult(routeLegs, weather, calculation.calculationSnapshot, [...weather.warnings, ...calculation.warnings]);
   } catch (error) {
-    if (error instanceof WeatherPhaseResolutionError) {
-      return blocked("weather-unavailable", error.message, weather.warnings);
-    }
-    if (error instanceof UnsupportedCompletePlanInputError) {
-      return blocked("unsupported-plan-input", error.message, weather.warnings);
-    }
-    return blocked("calculation-failed", errorMessage(error, "Phase calculation failed; the plan was not saved."), weather.warnings);
+    return calculationError(error, weather.warnings);
   }
+};
+
+const readyResult = (routeLegs: readonly CompletePlanRouteLeg[], weather: CompletePlanWeather, calculationSnapshot: JsonValue, warnings: readonly string[]): CompletePlanResult => ({ status: "ready", routeLegs, weather, calculationSnapshot, warnings });
+
+const calculationError = (error: unknown, warnings: readonly string[]): CompletePlanResult => {
+  if (error instanceof WeatherPhaseResolutionError) return blocked("weather-unavailable", error.message, warnings);
+  if (error instanceof UnsupportedCompletePlanInputError) return blocked("unsupported-plan-input", error.message, warnings);
+  return blocked("calculation-failed", errorMessage(error, "Phase calculation failed; the plan was not saved."), warnings);
+};
+
+const isInfeasiblePhaseSnapshot = (snapshot: JsonValue): boolean => {
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) return false;
+  return (snapshot as Record<string, JsonValue>).status === "infeasible-phase-allocation";
 };
 
 type BaseRouteLeg = Omit<CompletePlanRouteLeg, "magneticVariation">;

@@ -1,7 +1,7 @@
 import type { ApiErrorCode, ApiErrorPayload } from './contracts';
 
 export class ApiError extends Error {
-  constructor(readonly message: string, readonly status: number, readonly code: ApiErrorCode) {
+  constructor(readonly message: string, readonly status: number, readonly code: ApiErrorCode, readonly diagnostic?: string) {
     super(message);
     this.name = 'ApiError';
   }

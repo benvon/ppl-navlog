@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
+import type { AirportLookup } from "../application/airport-lookup";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
-import type { MetarTransportClient, WindsTransportClient } from "../services/weather/winds-client";
+import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
+import type { AloftPointAnswer, AloftPointQuery } from "../../worker/api/contracts";
+import { coordinate, type Coordinate } from "../domain/coordinates";
+import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
 import { renderPilotIntentPlanner } from "./pilot-intent-planner";
@@ -48,8 +52,17 @@ const ids = { next: () => `planner-id-${++idNumber}` };
 const clock = { now: () => new Date("2026-09-21T21:30:00.000Z") };
 const profile = aircraftProfile();
 
-function winds(overrides: Partial<WindsTransportClient & MetarTransportClient> = {}): WindsTransportClient & MetarTransportClient {
-  return { ...completeFlightWeatherClient, ...overrides };
+function winds(overrides: Partial<WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
+  return {
+    ...completeFlightWeatherClient,
+    fetchMetar: async (icao) => {
+      const payload = await completeFlightWeatherClient.fetchMetar(icao);
+      return { ...payload, metar: { ...payload.metar, icao }, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache, key: `synthetic-metar:${icao}` } } };
+    },
+    fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", product: { region: "us", cycle: "06", cache: { status: "upstream_refresh", source: "upstream", ageSeconds: 0, fetchedAt: "2026-09-21T21:30:00.000Z", expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: "2026-09-21T21:30:00.000Z" } }, sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12, upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0, temperatureLowerC: 3, temperatureUpperC: 3 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
+    fetchTaf: async () => ({ stationIcao: "KJVL", issuedAt: "2026-09-21T20:00:00.000Z", validFrom: "2026-09-21T21:00:00.000Z", validUntil: "2026-09-22T03:00:00.000Z", rawTaf: "SYNTHETIC TAF", groups: [{ kind: "prevailing", fromUtc: "2026-09-21T21:00:00.000Z", untilUtc: "2026-09-22T03:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "SYNTHETIC prevailing" }], requestId: "55555555-5555-4555-8555-555555555555" }),
+    ...overrides,
+  };
 }
 
 async function settle(): Promise<void> {
@@ -76,7 +89,7 @@ function edit(root: HTMLElement, name: string, value: string, blur = false): voi
   if (blur) element.dispatchEvent(new Event("blur", { bubbles: true }));
 }
 
-async function mount(repository: MemoryInputs, client = winds(), airportLookup = createLocalStudyAirportLookup()): Promise<HTMLElement> {
+async function mount(repository: MemoryInputs, client = winds(), airportLookup: AirportLookup = createLocalStudyAirportLookup()): Promise<HTMLElement> {
   const root = document.createElement("div");
   renderPilotIntentPlanner(root, { repository, airportLookup, winds: client, ids, clock });
   await settle();
@@ -91,20 +104,36 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
   edit(root, "descent-target", "1800");
   edit(root, "departure-icao", "KORD");
   edit(root, "destination-icao", "KJVL");
-  if (withSurfaceMetar) edit(root, "surface-weather-icao", "KORD");
+  if (withSurfaceMetar) edit(root, "departure-metar-icao", "KORD");
   const select = root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")!;
   select.value = profile.id;
   select.dispatchEvent(new Event("change", { bubbles: true }));
   await settle();
 }
 
-async function choosePublishedPeriod(root: HTMLElement): Promise<void> {
-  button(root, "Load published forecast periods").click();
-  await settle();
-  const select = root.querySelector<HTMLSelectElement>("[name='forecast-choice']")!;
-  select.value = COMPLETE_FLIGHT_FORECAST_VALID_AT;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
-  await settle();
+function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
+  expect(callOrder).toEqual(["metar", "point", "point", "point"]);
+  expect(queries).toHaveLength(3);
+  const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
+  if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
+  const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
+  if (!routeGeometry.ok) throw new Error(routeGeometry.error.message);
+  const interiorDistances = queries.slice(1).map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
+  expect(queries[0]?.latitudeDeg).toBeCloseTo(departure.value.latitude, 4);
+  expect(queries[0]?.longitudeDeg).toBeCloseTo(departure.value.longitude, 4);
+  expect(interiorDistances[0]).toBeGreaterThan(0);
+  expect(interiorDistances[0]).toBeLessThan(interiorDistances[1]!);
+  expect(interiorDistances[1]).toBeLessThan(routeGeometry.value.distance);
+}
+
+function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
+  const point = coordinate(query.latitudeDeg, query.longitudeDeg);
+  if (!point.ok) throw new Error(point.error.message);
+  const fromDeparture = calculateGreatCircleDistanceAndInitialCourse(departure, point.value);
+  const toDestination = calculateGreatCircleDistanceAndInitialCourse(point.value, destination);
+  if (!fromDeparture.ok || !toDestination.ok) throw new Error("A sampled weather event coordinate was invalid.");
+  expect(fromDeparture.value.distance + toDestination.value.distance).toBeCloseTo(routeDistance, 1);
+  return fromDeparture.value.distance;
 }
 
 describe("pilot intent planner", () => {
@@ -119,16 +148,160 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     edit(root, "plan-title", "  literal title text  ", true);
     edit(root, "departure-icao", "1C8", true);
-    edit(root, "surface-weather-icao", "KORD", true);
+    edit(root, "departure-metar-icao", "KORD", true);
     await settle();
-    expect(repository.plans.at(-1)?.rawFields).toMatchObject({ "plan-title": "  literal title text  ", "departure-icao": "1C8", "surface-weather-icao": "KORD" });
-    expect(root.querySelector<HTMLInputElement>("[name='surface-weather-icao']")?.value).toBe("KORD");
+    expect(repository.plans.at(-1)?.rawFields).toMatchObject({ "plan-title": "  literal title text  ", "departure-icao": "1C8", "departure-metar-icao": "KORD" });
+    expect(root.querySelector<HTMLInputElement>("[name='departure-metar-icao']")?.value).toBe("KORD");
 
     repository.failSave = true;
     edit(root, "departure-icao", "1C8", true);
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(button(root, "Update plan").disabled).toBe(true);
+  });
+
+  it("hides obsolete destination weather choices while preserving saved pilot fields", async () => {
+    const repository = new MemoryInputs();
+    repository.plans.push({
+      id: "legacy-weather", title: "Legacy route", rawFields: {
+        "plan-title": "Legacy route", "destination-taf-icao": "KJVL", "destination-metar-icao": "KMSN",
+      }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+    expect(root.querySelector("[name='destination-taf-icao']")).toBeNull();
+    expect(root.querySelector("[name='destination-metar-icao']")).toBeNull();
+    edit(root, "plan-title", "Legacy route edited", true);
+    await settle();
+    expect(repository.plans[0]?.rawFields).toMatchObject({ "destination-taf-icao": "KJVL", "destination-metar-icao": "KMSN" });
+  });
+
+  it("migrates an old surface-weather choice to departure only", async () => {
+    const repository = new MemoryInputs();
+    repository.plans.push({
+      id: "legacy-weather", title: "Legacy route", rawFields: {
+        "plan-title": "Legacy route", "surface-weather-icao": "KORD", "departure-icao": "1C8",
+      }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+
+    const root = await mount(repository);
+
+    expect(input(root, "departure-metar-icao").value).toBe("KORD");
+    expect(root.querySelector("[name='destination-taf-icao']")).toBeNull();
+    expect(input(root, "departure-icao").value).toBe("1C8");
+
+    edit(root, "plan-title", "Legacy route edited", true);
+    await settle();
+    expect(repository.plans[0]?.rawFields).toMatchObject({
+      "surface-weather-icao": "KORD",
+      "departure-metar-icao": "KORD",
+      "departure-icao": "1C8",
+    });
+  });
+
+  it("validates explicit endpoint alternates as exact four-character ICAO codes", async () => {
+    const root = await mount(new MemoryInputs());
+
+    edit(root, "departure-metar-icao", "KOR");
+    expect(input(root, "departure-metar-icao").getAttribute("aria-invalid")).toBe("true");
+    expect(root.querySelector("#departure-metar-icao-error")?.textContent).toContain("four-character ICAO");
+    expect(button(root, "Update plan").disabled).toBe(true);
+
+    edit(root, "departure-metar-icao", "kord");
+    expect(input(root, "departure-metar-icao").getAttribute("aria-invalid")).toBe("false");
+    expect(input(root, "departure-metar-icao").value).toBe("kord");
+  });
+
+  it("requires an explicit source alternate when a resolved airport has only a three-character identifier", async () => {
+    const repository = new MemoryInputs();
+    repository.profiles.push(profile);
+    const studyAirports = createLocalStudyAirportLookup();
+    const airportLookup = {
+      lookupAirportCode: async (code: string) => {
+        const airport = await studyAirports.lookupAirportCode(code === "1C8" ? "KORD" : code);
+        return code === "1C8" ? { ...airport, icao: "1C8" } : airport;
+      },
+    };
+    const root = await mount(repository, winds(), airportLookup);
+    await makeLocallyValid(root);
+    edit(root, "departure-icao", "1C8");
+    button(root, "Update plan").click();
+    await settle();
+
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("exact four-character departure METAR ICAO alternate");
+    expect(root.querySelector(".calculated-navlog")).toBeNull();
+  });
+
+  it("updates from bounded point answers and endpoint weather without legacy discovery", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const callOrder: string[] = [];
+    const pointQueries: AloftPointQuery[] = [];
+    const client = winds({
+      fetchPoint: async (query) => { callOrder.push("point"); pointQueries.push(query); return winds().fetchPoint(query); },
+      fetchMetar: async (icao) => { callOrder.push("metar"); return completeFlightWeatherClient.fetchMetar(icao); },
+    });
+    const discovery = vi.spyOn(client, "discoverStations").mockRejectedValue(new Error("oversized legacy discovery response (651267 bytes)"));
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchTaf = vi.spyOn(client, "fetchTaf");
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Update plan").click();
+    await settle();
+
+    expect(repository.submissions).toHaveLength(1);
+    expect(fetchMetar).toHaveBeenCalledTimes(1);
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
+    expect(fetchTaf).not.toHaveBeenCalled();
+    expect(fetchPoint).toHaveBeenCalledTimes(3);
+    assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
+    expect(discovery).not.toHaveBeenCalled();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
+    expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("SYNTHETIC TAF");
+    const groundspeed = root.querySelector<HTMLButtonElement>('button[data-inspect-field="groundspeed"]');
+    if (!groundspeed) throw new Error("Missing groundspeed inspection control.");
+    const displayedGroundspeed = groundspeed.textContent ?? "";
+    groundspeed.click();
+    await settle();
+    const inspector = root.querySelector(".calculation-inspector");
+    if (!inspector) throw new Error("Missing current calculation inspector.");
+    const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
+    if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
+    expect(Number(storedMatch[1]).toFixed(1)).toBe(Number(displayedGroundspeed).toFixed(1));
+    expect(inspector.textContent).toContain("BRL");
+    expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
+    expect(inspector.textContent).toContain("KORD");
+    expect(inspector.textContent).toContain("horizontal weight");
+
+  });
+
+  it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
+    const repository = new MemoryInputs();
+    repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    edit(root, "departure-metar-icao", "KORD", true);
+    await settle();
+
+    expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
+    expect(root.querySelector("[name='forecast-choice']")).toBeNull();
+    expect([...root.querySelectorAll("button")].some((candidate) => candidate.textContent === "Load published forecast periods")).toBe(false);
+    expect(button(root, "Update plan").disabled).toBe(false);
+    button(root, "Update plan").click();
+    await settle();
+
+    expect(repository.submissions).toHaveLength(1);
+    expect(repository.submissions[0]?.rawFields).toMatchObject({
+      "plan-title": "Synthetic route",
+      "departure-metar-icao": "KORD",
+      "taxi-fuel": "0.8",
+    });
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
   });
 
   it("reopens the latest plan snapshot after blur autosave without losing fields on a later save", async () => {
@@ -212,13 +385,11 @@ describe("pilot intent planner", () => {
     expect(reopened.querySelector(".calculated-navlog")).toBeNull();
   });
 
-  it("keeps Update plan locally gated until required fields, a profile, and a published period are present", async () => {
+  it("gates Update plan on required inputs and a profile without requiring a forecast period", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     expect(button(root, "Update plan").disabled).toBe(true);
     await makeLocallyValid(root);
-    expect(button(root, "Update plan").disabled).toBe(true);
-    await choosePublishedPeriod(root);
     expect(button(root, "Update plan").disabled).toBe(false);
   });
 
@@ -228,7 +399,6 @@ describe("pilot intent planner", () => {
     const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
     const root = await mount(repository, winds(), lookup);
     await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
     edit(root, "departure-icao", "K-ORD", true);
     await settle();
 
@@ -249,7 +419,6 @@ describe("pilot intent planner", () => {
     const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
     const root = await mount(repository, winds(), lookup);
     await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
     edit(root, "departure-icao", " kord ");
     edit(root, "destination-icao", "kjvl");
     expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
@@ -302,7 +471,6 @@ describe("pilot intent planner", () => {
     const fetchMetar = vi.spyOn(weather, "fetchMetar");
     const root = await mount(repository, weather);
     await makeLocallyValid(root);
-    await choosePublishedPeriod(root);
 
     edit(root, "plan-title", `  ${"a".repeat(121)}  `);
     const title = input(root, "plan-title");
@@ -321,7 +489,9 @@ describe("pilot intent planner", () => {
     button(root, "Update plan").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
-    expect(fetchForecast).toHaveBeenCalled();
+    expect(fetchForecast).not.toHaveBeenCalled();
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(repository.submissions[0]?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
   });
 
@@ -484,7 +654,6 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
-    await choosePublishedPeriod(root);
     edit(root, "override-tas-0", "-5");
     expect(button(root, "Update plan").disabled).toBe(true);
     expect(root.textContent).toContain("Leg 1 TAS override must be a positive number of knots.");
@@ -509,7 +678,6 @@ describe("pilot intent planner", () => {
       updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
     });
     const root = await mount(repository);
-    await choosePublishedPeriod(root);
     edit(root, "override-tas-0", "100", true);
     edit(root, "override-reason-0", "Training comparison", true);
     await settle();
@@ -534,62 +702,75 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update plan").disabled).toBe(true);
   });
 
-  it("submits pilot inputs before a fetch failure and keeps the failure through edits and retry start", async () => {
+  it("clears current evidence on edit or failure, retains submitted inputs, and recovers on success", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const client = winds({ fetchForecast: async () => { throw new Error("forecast fetch failed"); } });
+    let failPoint = false;
+    const client = winds({ fetchPoint: async (query) => {
+      if (failPoint) throw new Error("point service unavailable");
+      return winds().fetchPoint(query);
+    } });
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
     button(root, "Update plan").click();
     await settle();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(repository.submissions).toHaveLength(1);
-    expect(repository.submissions[0]?.rawFields["departure-icao"]).toBe("KORD");
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("forecast fetch failed");
 
-    edit(root, "plan-title", "Edited after failure");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("forecast fetch failed");
+    edit(root, "plan-title", "Changed inputs");
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    failPoint = true;
     button(root, "Update plan").click();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("forecast fetch failed");
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("forecast fetch failed");
     expect(repository.submissions).toHaveLength(2);
-  });
+    expect(repository.submissions[1]?.rawFields["plan-title"]).toBe("Changed inputs");
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
 
-  it("blocks a saved forecast period absent from current availability without substituting another", async () => {
-    const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const alternate = "2026-09-22T03:00:00.000Z";
-    const client = winds({ discoverStations: async () => {
-      const payload = await completeFlightWeatherClient.discoverStations([] as never);
-      return { ...payload, forecasts: payload.forecasts.map((period) => ({ ...period, validAt: alternate })) };
-    } });
-    const root = await mount(repository, client);
-    await makeLocallyValid(root);
-    edit(root, "selected-forecast-period", COMPLETE_FLIGHT_FORECAST_VALID_AT);
-    const update = button(root, "Update plan");
-    expect(update.disabled).toBe(false);
-    update.click();
+    failPoint = false;
+    button(root, "Update plan").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector("[role='status']")?.textContent).toContain("selected forecast period is unavailable");
-    expect(repository.submissions[0]?.rawFields["selected-forecast-period"]).toBe(COMPLETE_FLIGHT_FORECAST_VALID_AT);
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
+    expect(repository.submissions).toHaveLength(3);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
   });
 
-  it("blocks stale-on-error winds and does not render a successful plan", async () => {
+  it("preserves but does not use a saved legacy forecast period", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const stale = winds({ fetchForecast: async (...args) => {
-      const payload = await completeFlightWeatherClient.fetchForecast(...args);
-      return { ...payload, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache, status: "stale_on_error", source: "stale", freshnessRemainingSeconds: 0 } } };
-    } });
-    const root = await mount(repository, stale);
-    await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
+    const client = winds();
+    const discover = vi.spyOn(client, "discoverStations");
+    repository.plans.push({
+      id: "legacy-period-plan", title: "Legacy period route", rawFields: {
+        "plan-title": "Legacy period route", "departure-time": "2026-09-21T22:00", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
+        "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository, client);
+    expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
     button(root, "Update plan").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("The selected winds forecast is stale; no updated plan was produced.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(repository.submissions[0]?.rawFields["selected-forecast-period"]).toBe(COMPLETE_FLIGHT_FORECAST_VALID_AT);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(discover).not.toHaveBeenCalled();
+  });
+
+  it("does not consult the legacy weather transport for a new endpoint selection", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const client = winds();
+    const fetchForecast = vi.spyOn(client, "fetchForecast");
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Update plan").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(fetchForecast).not.toHaveBeenCalled();
+    expect(fetchMetar).toHaveBeenCalledWith("KORD");
   });
 
   it("removes an override with a deleted checkpoint leg so the route can be updated", async () => {
@@ -605,7 +786,6 @@ describe("pilot intent planner", () => {
       overrideReasons: { "tas-1": "Leg 2 test" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
     });
     const root = await mount(repository);
-    await choosePublishedPeriod(root);
     button(root, "Remove checkpoint 1").click();
     await settle();
     expect(root.querySelector("[name='override-tas-1']")).toBeNull();
@@ -638,67 +818,48 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("overrides and reasons were cleared");
   });
 
-  it("resets forecast choices and transient results when starting a new plan or reopening a saved plan", async () => {
+  it("resets transient errors when starting a new plan or reopening a saved plan", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
     button(root, "Update plan").click();
     await settle();
-    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
 
     button(root, "New plan").click();
     await settle();
     expect(input(root, "plan-title").value).toBe("New study route");
     expect(input(root, "departure-icao").value).toBe("");
-    expect(input(root, "surface-weather-icao").value).toBe("");
+    expect(input(root, "departure-metar-icao").value).toBe("");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelectorAll("[name='forecast-choice'] option")).toHaveLength(1);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
 
     button(root, "Open Synthetic route").click();
     await settle();
     expect(input(root, "plan-title").value).toBe("Synthetic route");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelectorAll("[name='forecast-choice'] option")).toHaveLength(1);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Opened saved pilot inputs");
   });
 
-  it("clears a previous result after a failed later update, then clears the error only after a successful update", async () => {
+  it("clears the temporary weather error when a plan is replaced or reopened", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    let fail = false;
-    const client = winds({ fetchForecast: async (...args) => {
-      if (fail) throw new Error("temporary forecast failure");
-      return completeFlightWeatherClient.fetchForecast(...args);
-    } });
-    const root = await mount(repository, client);
-    await makeLocallyValid(root, true);
-    await choosePublishedPeriod(root);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
     button(root, "Update plan").click();
     await settle();
-    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
-    const inspected = root.querySelector<HTMLButtonElement>(".calculated-navlog button[data-inspect-field='trueHeading']");
-    expect(inspected).not.toBeNull();
-    inspected!.click();
-    expect(root.querySelector(".calculation-inspector h3")?.textContent).toContain("True heading");
-    expect([...root.querySelectorAll<HTMLButtonElement>("button")].some((item) => item.textContent === "Print current plan")).toBe(false);
-
-    fail = true;
-    button(root, "Update plan").click();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    button(root, "New plan").click();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
+    button(root, "Open Synthetic route").click();
     await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Opened saved pilot inputs");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector(".calculation-inspector")).toBeNull();
-    expect([...root.querySelectorAll<HTMLButtonElement>("button")].some((item) => item.textContent === "Print current plan")).toBe(false);
-    expect(root.querySelector("[role='status']")?.textContent).toContain("temporary forecast failure");
-    edit(root, "plan-title", "retrying");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("temporary forecast failure");
-
-    fail = false;
-    button(root, "Update plan").click();
-    await settle();
-    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated using current airport and weather context.");
   });
 
-  it("disables plan navigation during an update and clears the result when another plan is opened", async () => {
+  it("opens a different saved plan after a route-weather update is unavailable", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const firstPlan: PilotInputPlan = {
       id: "first-plan", title: "First plan", rawFields: {
@@ -713,23 +874,11 @@ describe("pilot intent planner", () => {
       overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
     };
     repository.plans.push(firstPlan, otherPlan);
-    let release!: (value: Awaited<ReturnType<typeof completeFlightWeatherClient.fetchForecast>>) => void;
-    let shouldWait = false;
-    const client = winds({ fetchForecast: (...args) => shouldWait
-      ? new Promise((resolve) => { release = resolve; })
-      : completeFlightWeatherClient.fetchForecast(...args) });
-    const root = await mount(repository, client);
-    await choosePublishedPeriod(root);
-    shouldWait = true;
+    const root = await mount(repository);
     button(root, "Update plan").click();
     await settle();
-    expect(button(root, "Open Other plan").disabled).toBe(true);
-    button(root, "Open Other plan").click();
-    await settle();
-    expect(input(root, "plan-title").value).toBe("First plan");
-    release(await completeFlightWeatherClient.fetchForecast("BRL", COMPLETE_FLIGHT_FORECAST_VALID_AT, "us"));
-    await settle();
-    expect(root.querySelector(".calculated-navlog")).not.toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "Open Other plan").click();
     await settle();
     expect(input(root, "plan-title").value).toBe("Other plan");

@@ -1,0 +1,60 @@
+# Weather coverage fixtures
+
+The Winds/Temps station IDs below are representative identifiers from the
+Aviation Weather Center station catalog and regional product fixtures captured
+on 2026-09-21. They provide exact-ID examples for the three supported product
+regions; they are test references, not a complete coverage list.
+
+| Region | Station | Coordinates (latitude, longitude) | Nearest other fixture station |
+| --- | --- | --- | --- |
+| CONUS (`us`) | ABQ | 35.0402, -106.6090 | ATL, 1,101 NM |
+| CONUS (`us`) | ATL | 33.6407, -84.4277 | BGR, 985 NM |
+| CONUS (`us`) | BGR | 44.8074, -68.8281 | ATL, 985 NM |
+| Alaska (`alaska`) | FAI | 64.8031, -147.8761 | BRW, 436 NM |
+| Alaska (`alaska`) | BRW | 71.2837, -156.7843 | FAI, 436 NM |
+| Hawaii (`hawaii`) | ITO | 19.7191, -155.0490 | HNL, 188 NM |
+| Hawaii (`hawaii`) | LIH | 21.9805, -159.3386 | HNL, 88 NM |
+| Hawaii (`hawaii`) | HNL | 21.3187, -157.9224 | LIH, 88 NM |
+
+Coordinates are taken from the exact station-catalog fixtures in `worker/api/winds.test.ts`. Pair distances use great-circle distance rounded to the nearest nautical mile. The 100 NM point-distance bound places the midpoint of the 188 NM ITO–HNL fixture pair within 94 NM of either station and rejects the midpoint of the sparse 436 NM FAI–BRW pair. The CONUS fixture is far too sparse to establish coverage between its stations. These fixtures do not establish regional coverage in any region; each point still requires a reporting station with usable levels inside the bound. Pilot waypoints and generated TOC/TOD points define the request locations; these sparse station fixtures do not justify any added interior samples.
+
+Development Worker source measurements on 2026-09-24: successful decoded regional products across supported regions/cycles ranged from 618 to 12,504 bytes; Hawaii cycle 06 timed out once. The station catalog decoded to 1,950,054 bytes, below its 3 MiB cap. A separate live station-discovery response measured 651,267 decoded bytes, exceeding the browser's 512 KiB response limit. That confirms the browser response boundary as a size failure path, but does not establish the cause of every intermittent report. The Worker retains a finite 1 MiB regional-source limit and a synthetic valid product above 512 KiB as a bounded regression test.
+
+The source date identifies the captured fixture set used by
+`worker/api/winds.test.ts`. Product periods in those fixtures are synthetic
+variations of that captured product and must not be interpreted as live
+availability.
+
+
+## Progressive aloft requests and route intervals (2026-09-25)
+
+Each Update plan makes exactly one point request per pilot waypoint that starts an interval and per generated top-of-climb (TOC) or top-of-descent (TOD). The destination starts no interval and receives no aloft request. With the supported maximum of 25 checkpoints plus departure and both generated points, the upper bound is 28 requests. The examples below count pilot start points; add one request for each generated TOC/TOD included in a plan. Requests occur in route order. Each point's weather calculates the following interval only: A's answer fully calculates A→B, while B's answer begins B→next. The planner carries position, altitude, UTC, fuel, and other completed state forward without recalculating prior intervals. The next point's weather cannot change a completed leg. One arrival estimate may set the next request time only.
+
+TOC is placed at the planned climb-altitude crossing. TOD placement uses planned true airspeed and descent rate without wind; the weather fetched at TOD calculates the following descent interval. If descent cannot reach destination target altitude, planning stops with an explanation. Departure METAR remains the surface anchor for the initial climb. The final segment uses weather fetched at its starting waypoint or generated TOD, like every other segment. Destination TAF/METAR are not required by the active planner.
+
+| Representative geometry | Coordinates in route order | Distance | Pilot start points | Base aloft calls | Calls with TOC and TOD |
+| --- | --- | ---: | ---: | ---: | ---: |
+| KORD–checkpoint–KJVL short CONUS fixture | 41.9742, -87.9073 → 41.8000, -88.2000 → 42.6200, -89.0400 | 79 NM | 2 | 2 | 4 |
+| ABQ–ATL long CONUS station-pair geometry | 35.0402, -106.6090 → 33.6407, -84.4277 | 1,101 NM | 1 | 1 | 3 |
+| FAI–BRW Alaska station-pair geometry | 64.8031, -147.8761 → 71.2837, -156.7843 | 436 NM | 1 | 1 | 3 |
+| ITO–HNL Hawaii station-pair geometry | 19.7191, -155.0490 → 21.3187, -157.9224 | 188 NM | 1 | 1 | 3 |
+
+The latter three are station-pair geometries, not validated flight plans or proof of forecast coverage. The KORD checkpoint coordinates and distance are from the existing KORD→KJVL mixed-altitude fixture; distances are great-circle geometry rounded to the nearest nautical mile. FAI–BRW midpoint is outside the Worker 100 NM station limit; CONUS station fixtures are sparse. Every requested pilot or generated point must be individually resolved by the Worker. Each interval's report must cover its request UTC and calculated interval arrival; a missing or unusable report stops the plan before the next request. The calculation does not refetch or substitute another period.
+
+## Local Worker live-source smoke (2026-09-25 00:36–00:38 UTC)
+
+The local development Worker queried current official AWC products after the regional decoder and TAF parser corrections. The selected 06-cycle point answers were issued at 2026-09-24 18:00 UTC and usable from 20:00 to 03:00 UTC. Response sizes below are the decoded local API bodies; the same-time direct AWC regional `low` product downloads returned 12,504 bytes for CONUS, 2,704 for Alaska, and 618 for Hawaii, with HTTP 200 for all three 06/12/24 cycle requests (28–609 ms). This is an integration snapshot, not a claim of universal coverage.
+
+| Query | Result | API body | Duration | Verified point sources |
+| --- | --- | ---: | ---: | --- |
+| BRL area, 4,500 ft | 200 | 1,415 bytes | 84 ms | BRL, SPI, DBQ |
+| ORD area, 4,500 ft | 200 | 712 bytes | 32 ms | JOT |
+| Fairbanks area, 4,500 ft | 200 | 741 bytes | 47 ms | FAI |
+| Honolulu area, 4,500 ft | 200 | 1,418 bytes | 161 ms | HNL, LNY, OGG |
+| Hilo area, 4,500 ft | 200 | 1,100 bytes | 25 ms | ITO, KOA |
+| Denver area, 7,500 ft | 404 `upstream_no_data` | 164 bytes | 36 ms | No usable bracketed levels |
+| Denver area, 9,000 ft | 200 | — | 31 ms | DEN, PUB |
+| Sparse Alaska FAI–BRW gap, 4,500 ft | 404 `upstream_no_data` | 164 bytes | 14 ms | No verified source within the supported bound |
+| KJVL destination TAF | 200 | 1,302 bytes | 78 ms | Prevailing, PROB, FM groups |
+
+The Denver failures at 4,500 and 7,500 ft demonstrate that being inside a published region does not guarantee usable altitude levels. The 9,000-ft point resolved without extrapolation. The local TAF reported a 2026-09-24 23:30 UTC issue and validity from 2026-09-25 00:00 to 2026-09-26 00:00 UTC; this was a separate API smoke and the active planner does not request a destination TAF. A local Worker smoke does not test the deployed Worker binding or a complete browser flight plan.

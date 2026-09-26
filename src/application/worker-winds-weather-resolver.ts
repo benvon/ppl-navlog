@@ -31,7 +31,9 @@ export const createWorkerWindsPlanWeatherResolver = (
   metarClient?: MetarTransportClient,
 ): CompletePlanWeatherResolver => ({
   resolve: async ({ draft }) => {
-    if (draft.weatherSelection === undefined) throw new Error("Choose an available winds forecast period explicitly before calculating the plan.");
+    if (draft.weatherSelection === undefined) throw new Error("Route weather calculation is not available for this plan yet.");
+    const selectedForecastValidTimeUtc = draft.weatherSelection.forecastValidTimeUtc;
+    if (selectedForecastValidTimeUtc === undefined) throw new Error("Route weather calculation is not available for this plan yet.");
     const departure = draft.route.points[0];
     if (departure?.kind !== "airport") throw new Error("A departure airport with field elevation is required for weather planning.");
     // A METAR anchor improves low-altitude interpolation, but it is optional:
@@ -39,7 +41,7 @@ export const createWorkerWindsPlanWeatherResolver = (
     // the runway-picker METAR dependency is temporarily unavailable.
     const metarIcao = draft.weatherSelection.surfaceWeatherIcao;
     const metar = metarIcao === undefined || metarClient === undefined ? undefined : await metarClient.fetchMetar(metarIcao).catch(() => undefined);
-    const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, draft.weatherSelection.forecastValidTimeUtc, input, departure, metarIcao, metar));
+    const loaded = await winds.load(selectionInput(draft.route.points.map((point) => point.coordinate), draft.departureTimeUtc, selectedForecastValidTimeUtc, input, departure, metarIcao, metar));
     const snapshot = weatherSnapshot(input.weatherSnapshotId, loaded);
     return {
       snapshotIds: [snapshot.id],

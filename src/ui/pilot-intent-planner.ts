@@ -1,35 +1,30 @@
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
-import { calculateCompletePlan } from "../application/complete-plan";
+import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
+import { resolveRouteWeather } from "../application/route-weather-sampling";
 import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
-import { routeDistanceMidpoint } from "../application/weather-station-reference";
-import { routeCoordinatesDistanceMidpoint } from "../application/weather-station-reference";
 import { coordinate } from "../domain/coordinates";
-import { selectNearestWindsStation } from "../domain/weather-stations";
-import { createWorkerWindsPlanWeatherResolver } from "../application/worker-winds-weather-resolver";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
-import { selectForecastValidTime } from "../domain/weather-valid-time";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import type { PlanDraft, PlanRevision } from "../domain/route";
-import type { WindsTransportClient, MetarTransportClient } from "../services/weather/winds-client";
-import { WorkerWindsAdapter } from "../services/weather/winds-adapter";
+import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
   readonly airportLookup: AirportLookup;
-  readonly winds: WindsTransportClient & MetarTransportClient;
+  readonly winds: WindsTransportClient & MetarTransportClient & AloftPointTransportClient;
   readonly ids: UseCaseIds;
   readonly clock: UseCaseClock;
 }
 
-const fieldNames = ["plan-title", "departure-time", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "surface-weather-icao", "selected-forecast-period"] as const;
+const fieldNames = ["plan-title", "departure-time", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
 type FieldName = typeof fieldNames[number];
 const initialFields: Readonly<Record<FieldName, string>> = {
   "plan-title": "New study route", "departure-time": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
-  "departure-icao": "", "destination-icao": "", "surface-weather-icao": "", "selected-forecast-period": "",
+  "departure-icao": "", "destination-icao": "", "departure-metar-icao": "",
 };
 
 export function renderPilotIntentPlanner(root: HTMLElement, dependencies: PilotIntentPlannerDependencies): void {
@@ -50,7 +45,6 @@ class PilotIntentPlanner {
   private readonly confirmedOverrides = new Set<number>();
   private updating = false;
   private savingProfile = false;
-  private forecastChoices: readonly { validAt: string; useFrom: string; useUntil: string }[] = [];
   private saveQueue: Promise<void> = Promise.resolve();
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
@@ -81,7 +75,7 @@ class PilotIntentPlanner {
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
-      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "surface-weather-icao": "Selected METAR ICAO (optional)", "selected-forecast-period": "Selected forecast valid time (UTC)" };
+      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
       form.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
@@ -106,11 +100,6 @@ class PilotIntentPlanner {
     });
     profileLabel.append(profile); form.append(profileLabel);
     form.append(this.renderRouteCollections());
-    const findPeriods = document.createElement("button"); findPeriods.type = "button"; findPeriods.textContent = "Load published forecast periods"; findPeriods.addEventListener("click", () => void this.loadForecastChoices()); form.append(findPeriods);
-    const forecastChoice = document.createElement("select"); forecastChoice.name = "forecast-choice"; forecastChoice.append(new Option("Choose a currently published period", ""));
-    this.forecastChoices.forEach((period) => forecastChoice.append(new Option(`${period.validAt} (usable ${period.useFrom}–${period.useUntil})`, period.validAt)));
-    forecastChoice.addEventListener("change", () => { this.fields["selected-forecast-period"] = forecastChoice.value; const input = form.querySelector<HTMLInputElement>("[name='selected-forecast-period']"); if (input) input.value = forecastChoice.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); void this.persist(); });
-    form.append(forecastChoice);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
       input.addEventListener("input", () => { this.fields[input.name] = input.value; this.captureStructured(form); if (input.name.startsWith("override-tas-")) { const index = Number(input.name.slice("override-tas-".length)); this.confirmedOverrides.delete(index); const confirmation = form.querySelector<HTMLInputElement>(`[data-override-confirmation="${index}"]`); if (confirmation) confirmation.checked = false; } this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.captureStructured(form); void this.persist(); });
@@ -120,7 +109,7 @@ class PilotIntentPlanner {
     shell.append(this.renderProfileEditor(), form);
     if (this.result !== undefined) {
       const output = document.createElement("section"); output.dataset.currentResult = "true";
-      const navlog = renderCalculatedNavlog(this.result, { selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
+      const navlog = renderCalculatedNavlog(this.result, { currentWeatherValidated: true, selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
       if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
       shell.append(output);
     }
@@ -133,7 +122,7 @@ class PilotIntentPlanner {
 
   private input(name: string, labelText: string, value: string): HTMLLabelElement {
     const label = document.createElement("label"); label.append(document.createTextNode(`${labelText} `));
-    const input = document.createElement("input"); input.type = "text"; input.name = name; input.value = value; if (name === "selected-forecast-period") input.readOnly = true;
+    const input = document.createElement("input"); input.type = "text"; input.name = name; input.value = value;
     const error = document.createElement("span"); error.id = `${name}-error`; error.className = "field-error"; input.setAttribute("aria-describedby", error.id);
     label.append(input, error); return label;
   }
@@ -265,22 +254,6 @@ class PilotIntentPlanner {
       this.render();
     }
   }
-  private async loadForecastChoices(): Promise<void> {
-    try {
-      const departure = await this.dependencies.airportLookup.lookupAirportCode(this.fields["departure-icao"] ?? "");
-      const destination = await this.dependencies.airportLookup.lookupAirportCode(this.fields["destination-icao"] ?? "");
-      const points = (this.current?.checkpoints ?? []).map((point) => { const parsed = parsePlannerCoordinateText(point.coordinateText); if (!parsed.ok) throw new Error(parsed.error.message); return parsed.value; });
-      const routeCoordinates = [departure.coordinate, ...points, destination.coordinate];
-      const discovered = await this.dependencies.winds.discoverStations(routeCoordinates);
-      const midpoint = routeCoordinatesDistanceMidpoint(routeCoordinates);
-      const candidates = discovered.stations.map((station) => { const checked = coordinate(station.coordinates.latitudeDeg, station.coordinates.longitudeDeg); if (!checked.ok) throw new Error("A discovered winds station has invalid coordinates."); return { id: station.id, coordinate: checked.value }; });
-      const nearest = selectNearestWindsStation(midpoint, candidates); if (!nearest.ok) throw new Error(nearest.error.message);
-      this.forecastChoices = discovered.forecasts.filter((period) => period.stationId === nearest.value.station.id).map(({ validAt, useFrom, useUntil }) => ({ validAt, useFrom, useUntil }));
-      if (!this.forecastChoices.some((p) => p.validAt === this.fields["selected-forecast-period"])) this.setStatus("Forecast choices loaded. The saved period is not currently available; choose an available period.");
-      else this.setStatus("Current forecast choices loaded.");
-      this.render();
-    } catch (error) { this.fail(error); this.render(); }
-  }
   private el(tag: "h3", value: string): HTMLElement { const e = document.createElement(tag); e.textContent = value; return e; }
   private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: this.fields["plan-title"] ?? "New study route", rawFields: { ...this.fields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...this.fields }, title: this.fields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
@@ -291,7 +264,6 @@ class PilotIntentPlanner {
     this.current = this.blankPlan();
     this.result = undefined;
     this.inspected = undefined;
-    this.forecastChoices = [];
     this.updateError = "";
     this.profileDraftDirty = false;
     this.setStatus("Enter pilot inputs, then Update plan to retrieve current context and calculate.");
@@ -309,10 +281,9 @@ class PilotIntentPlanner {
     }
     this.confirmedOverrides.clear();
     this.current = plan;
-    this.fields = { ...initialFields, ...plan.rawFields };
+    this.fields = restorePilotFields(plan.rawFields);
     this.result = undefined;
     this.inspected = undefined;
-    this.forecastChoices = [];
     this.updateError = "";
     const selectedProfile = this.profiles.find((profile) => profile.id === plan.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selectedProfile);
@@ -328,7 +299,7 @@ class PilotIntentPlanner {
     this.fields = { ...this.fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) };
     this.current = this.withIdentity({ ...(this.current ?? this.blankPlan()), checkpoints, cruiseAltitudeTexts, overrideReasons });
   }
-  private invalidate(): void { this.result = undefined; this.content.querySelector("[data-current-result]")?.remove(); }
+  private invalidate(): void { this.result = undefined; this.inspected = undefined; this.content.querySelector("[data-current-result]")?.remove(); }
   private clearRouteOverrides(): boolean {
     const hadOverrides = Object.entries(this.fields).some(([key, value]) =>
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
@@ -367,6 +338,7 @@ class PilotIntentPlanner {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
     this.result = undefined;
+    this.inspected = undefined;
     this.updating = true;
     this.render();
     try {
@@ -384,7 +356,7 @@ class PilotIntentPlanner {
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;
       this.updateError = "";
-      this.setStatus("Plan updated using current airport and weather context.");
+      this.setStatus("Plan updated with current route weather.");
     } catch (error) {
       this.fail(error, "update");
     } finally {
@@ -415,7 +387,7 @@ class PilotIntentPlanner {
       destination,
       cruiseAltitudesFeetMsl: current.cruiseAltitudeTexts.map(Number),
     }, this.dependencies.ids);
-    const weatherSelection = buildWeatherSelection(raw, this.dependencies.clock.now().toISOString());
+    const weatherSelection = weatherSelectionFromInputs(raw, departure.icao);
     const draft = createPlanDraft({
       title: raw["plan-title"] ?? "",
       departureTimeUtc,
@@ -465,50 +437,32 @@ class PilotIntentPlanner {
     }
     return draft;
   }
+  private async fetchEndpointWeather(draft: PlanDraft) {
+    const departure = draft.route.points[0];
+    if (departure?.kind !== "airport") throw new Error("Route weather requires an airport departure endpoint.");
+    const departureMetar = await fetchRequiredMetar(this.dependencies.winds, departure.icao, draft.weatherSelection?.departureMetarIcao);
+    return { departureMetar };
+  }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
-    const coordinates = draft.route.points.map((point) => point.coordinate);
-    const discovery = await this.dependencies.winds.discoverStations(coordinates);
-    const periods = nearestStationPeriods(discovery, coordinates);
-    const forecastId = draft.weatherSelection?.forecastValidTimeUtc;
-    if (!forecastId) throw new Error("Choose a published forecast period before updating.");
-    validateCurrentForecastPeriod(periods, forecastId, draft.departureTimeUtc);
-    const weatherResolver = createWorkerWindsPlanWeatherResolver(
-      new WorkerWindsAdapter(this.dependencies.winds),
-      {
-        stationSelectionCoordinate: routeDistanceMidpoint(draft.route),
-        weatherSnapshotId: this.dependencies.ids.next(),
-      },
-      this.dependencies.winds,
-    );
+    const { departureMetar } = await this.fetchEndpointWeather(draft);
+    const solution = await resolveRouteWeather(draft, profile, {
+      fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
+    }, { departureMetar });
     const calc = await calculateCompletePlan(draft, profile, {
-      weather: weatherResolver,
+      weather: { resolve: async (): Promise<CompletePlanWeather> => solution.weather },
       calculations: createFullNavlogCalculationEngine(),
     });
     if (calc.status === "blocked") throw new Error(calc.message);
-    requireFreshCurrentWeather(calc.weather.loadedWindsData?.provenance.forecast.cache);
-    if (calc.weather.warnings.some((warning) =>
-      warning.includes("could not be loaded") || warning.includes("was not usable"))) {
-      throw new Error("The selected METAR source is unavailable, stale, or unusable.");
-    }
     const snapshot = calc.calculationSnapshot as Record<string, unknown>;
-    if (snapshot.schema !== "complete-navlog/v1" || snapshot.status !== "calculated") {
-      throw new Error("The route cannot produce a complete flyable navlog.");
-    }
+    if (snapshot.schema !== "complete-navlog/v1" || snapshot.status !== "calculated") throw new Error("The route cannot produce a complete flyable navlog.");
     const now = this.dependencies.clock.now().toISOString();
     const current = this.current;
     if (!current) throw new Error("The active plan changed during calculation.");
     return {
-      schemaVersion: 1,
-      id: this.dependencies.ids.next(),
-      planId: current.id,
-      revisionNumber: 1,
-      reason: "initial-save",
-      createdAt: now,
-      draftSnapshot: draft,
-      aircraftProfileSnapshot: { profile, snapshottedAt: now },
-      weatherSnapshotIds: calc.weather.snapshotIds,
-      calculationSnapshot: calc.calculationSnapshot,
-      warnings: calc.warnings,
+      schemaVersion: 1, id: this.dependencies.ids.next(), planId: current.id, revisionNumber: 1,
+      reason: "initial-save", createdAt: now, draftSnapshot: draft,
+      aircraftProfileSnapshot: { profile, snapshottedAt: now }, weatherSnapshotIds: calc.weather.snapshotIds,
+      calculationSnapshot: calc.calculationSnapshot, warnings: calc.warnings,
     };
   }
   private fail(error: unknown, kind: "update" | "save" = "update"): void { this.result = undefined; const message = error instanceof Error ? error.message : "The requested action failed."; if (kind === "save") this.saveError = message; else this.updateError = message; this.setStatus(""); }
@@ -528,21 +482,68 @@ class PilotIntentPlanner {
   }
 }
 
+async function fetchRequiredMetar(client: MetarTransportClient, airportIdentifier: string, alternateIcao: string | undefined) {
+  return fetchRequiredEndpoint(client.fetchMetar.bind(client), airportIdentifier, alternateIcao, "departure METAR");
+}
+
+async function fetchRequiredEndpoint<T>(
+  fetch: (icao: string) => Promise<T>,
+  airportIdentifier: string,
+  alternateIcao: string | undefined,
+  productName: string,
+): Promise<T> {
+  if (!/^[A-Z0-9]{4}$/.test(airportIdentifier)) {
+    if (alternateIcao === undefined) throw new Error(`Enter an exact four-character ${productName} ICAO alternate for this airport.`);
+    return fetch(alternateIcao);
+  }
+  try { return await fetch(airportIdentifier); }
+  catch (error) {
+    if (!(error instanceof WindsClientError) || error.apiCode !== "upstream_no_data" || alternateIcao === undefined) throw error;
+    return fetch(alternateIcao);
+  }
+}
+
 function localUtcTextToIso(value: string): string {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(value)) throw new Error("Enter planned departure as a date and time in UTC.");
   const parsed = new Date(`${value}:00Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 16) !== value) throw new Error("Enter a real planned departure date and time in UTC.");
   return parsed.toISOString();
 }
-function buildWeatherSelection(fields: Readonly<Record<string, string>>, selectedAtUtc: string) {
-  const forecastValidTimeUtc = fields["selected-forecast-period"]?.trim();
-  if (!forecastValidTimeUtc) throw new Error("Choose a published forecast period before updating.");
-  const surfaceWeatherIcao = fields["surface-weather-icao"]?.trim().toUpperCase();
+function buildWeatherSelection(departureMetarIcao: string | undefined) {
   return {
-    forecastValidTimeUtc,
-    selectedAtUtc,
-    ...(surfaceWeatherIcao ? { surfaceWeatherIcao } : {}),
+    ...(departureMetarIcao === undefined ? {} : { departureMetarIcao }),
   };
+}
+function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record<string, string> {
+  return {
+    ...initialFields,
+    ...rawFields,
+    "departure-metar-icao": Object.hasOwn(rawFields, "departure-metar-icao")
+      ? rawFields["departure-metar-icao"] ?? ""
+      : rawFields["surface-weather-icao"] ?? "",
+  };
+}
+function weatherSelectionFromInputs(
+  raw: Readonly<Record<string, string>>,
+  departureIdentifier: string,
+) {
+  resolveEndpointWeatherIcao(raw["departure-metar-icao"] ?? "", departureIdentifier, "departure METAR");
+  return buildWeatherSelection(optionalEndpointAlternate(raw["departure-metar-icao"]));
+}
+function optionalEndpointAlternate(value: string | undefined): string | undefined {
+  const normalized = value?.trim().toUpperCase();
+  return normalized ? normalized : undefined;
+}
+function resolveEndpointWeatherIcao(explicitText: string, airportIdentifier: string, reportName: string): string {
+  const explicit = explicitText.trim().toUpperCase();
+  if (explicit !== "") {
+    const error = metarError(explicit);
+    if (error) throw new Error(error);
+    return explicit;
+  }
+  const airportIcao = airportIdentifier.trim().toUpperCase();
+  if (/^[A-Z0-9]{4}$/.test(airportIcao)) return airportIcao;
+  throw new Error(`Enter an exact four-character ${reportName} ICAO alternate for this airport.`);
 }
 function profileDraftDiffersFromSaved(
   fields: Readonly<Record<string, string>>,
@@ -608,30 +609,10 @@ function parsePlannerCoordinateText(value: string) {
   if (!decimal) return compact;
   return coordinate(Number(decimal[1]), Number(decimal[2]));
 }
-function nearestStationPeriods(discovery: Awaited<ReturnType<WindsTransportClient["discoverStations"]>>, route: Parameters<typeof routeCoordinatesDistanceMidpoint>[0]): typeof discovery.forecasts {
-  const midpoint = routeCoordinatesDistanceMidpoint(route);
-  const candidates = discovery.stations.map((station) => {
-    const checked = coordinate(station.coordinates.latitudeDeg, station.coordinates.longitudeDeg);
-    if (!checked.ok) throw new Error("A discovered winds station has invalid coordinates.");
-    return { id: station.id, coordinate: checked.value };
-  });
-  const nearest = selectNearestWindsStation(midpoint, candidates);
-  if (!nearest.ok) throw new Error(nearest.error.message);
-  return discovery.forecasts.filter((period) => period.stationId === nearest.value.station.id);
-}
-function validateCurrentForecastPeriod(periods: Awaited<ReturnType<WindsTransportClient["discoverStations"]>>["forecasts"], selectedId: string, departureTimeUtc: string): void {
-  if (!periods.some((period) => period.validAt === selectedId)) throw new Error("The selected forecast period is unavailable for the current nearest station and route.");
-  const validPeriods = periods.map((period) => ({ id: period.validAt, validFromUtc: period.useFrom, validToUtc: period.useUntil }));
-  if (!selectForecastValidTime(validPeriods, selectedId, departureTimeUtc).ok) throw new Error("The selected forecast period does not include the planned departure time.");
-}
-function requireFreshCurrentWeather(cache: { readonly status: string; readonly freshnessRemainingSeconds: number } | undefined): void {
-  if (cache?.status === "stale_on_error" || (cache && cache.freshnessRemainingSeconds <= 0)) throw new Error("The selected winds forecast is stale; no updated plan was produced.");
-}
-
 function requiredFieldsError(fields: Readonly<Record<string, string>>): string | undefined {
   if ((fields["plan-title"] ?? "").trim().length > 120) return "Plan title must be 120 characters or fewer.";
-  return ["plan-title", "departure-time", "departure-icao", "destination-icao", "selected-forecast-period"]
-    .some((key) => (fields[key] ?? "").trim() === "") ? "Enter a title, departure time, both airports, and choose a published forecast period." : undefined;
+  return ["plan-title", "departure-time", "departure-icao", "destination-icao"]
+    .some((key) => (fields[key] ?? "").trim() === "") ? "Enter a title, departure time, and both airports." : undefined;
 }
 function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[], profileDraftDirty: boolean, confirmedOverrides: ReadonlySet<number>): string | undefined {
   const checks = [
@@ -639,7 +620,7 @@ function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: Pil
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
     fuelError(fields), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
-    metarError(fields["surface-weather-icao"] ?? ""), tasOverrideError(plan, fields),
+    metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
   ];
   return checks.find((message) => message !== undefined);
@@ -668,8 +649,8 @@ function airportCodeError(departure: string, destination: string): string | unde
   return [departure, destination].some((code) => !/^[A-Z0-9]{3,4}$/i.test(code.trim()))
     ? "Enter departure and destination airport codes using exactly 3 or 4 letters or numbers." : undefined;
 }
-function metarError(value: string): string | undefined {
-  return value.trim() !== "" && !/^[A-Z0-9]{4}$/.test(value.trim().toUpperCase()) ? "Selected METAR must be an exact four-character ICAO code." : undefined;
+function metarError(value: string, reportName = "METAR"): string | undefined {
+  return value.trim() !== "" && !/^[A-Z0-9]{4}$/.test(value.trim().toUpperCase()) ? `${reportName} must be an exact four-character ICAO code.` : undefined;
 }
 function tasOverrideError(plan: PilotInputPlan | undefined, fields: Readonly<Record<string, string>>): string | undefined {
   if (!plan) return undefined;
@@ -704,8 +685,7 @@ function simpleFieldError(name: string, fields: Readonly<Record<string, string>>
   const value = fields[name] ?? "";
   return titleFieldError(name, value) ?? departureTimeFieldError(name, value) ?? fuelFieldError(name, value)
     ?? descentTargetFieldError(name, value) ?? airportFieldError(name, value)
-    ?? (name === "surface-weather-icao" ? metarError(value) : undefined)
-    ?? (name === "selected-forecast-period" && !value.trim() ? "Load and select a published forecast period." : undefined);
+    ?? (name === "departure-metar-icao" ? metarError(value, "Departure METAR") : undefined);
 }
 function titleFieldError(name: string, value: string): string | undefined {
   if (name !== "plan-title") return undefined;

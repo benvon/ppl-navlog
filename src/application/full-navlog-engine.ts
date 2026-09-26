@@ -4,7 +4,7 @@ import type { RouteGeometryLeg } from "../domain/phase-geometry";
 import type { VerticalPhasePerformance } from "../domain/phase-performance";
 import type { JsonValue } from "../domain/route";
 import { gallonsPerHour, feetMsl, positiveKnots } from "../domain/units";
-import { createSampledPhaseWindResolver, resolveLoadedEffectiveWindForSubleg, type LoadedWindsData } from "../services/weather/winds-adapter";
+import { resolveLoadedEffectiveWindForSubleg, type LoadedWindsData } from "../services/weather/winds-adapter";
 import { isJsonValue } from "../services/storage/validation";
 import type { CompletePlanCalculationEngine, CompletePlanRouteLeg, CompletePlanWeather } from "./complete-plan";
 import { calculateNavlog, toNavlogCalculationSnapshot, type NavlogWindResolver } from "./navlog-calculation";
@@ -18,11 +18,14 @@ import { UnsupportedCompletePlanInputError, WeatherPhaseResolutionError } from "
  */
 export const createFullNavlogCalculationEngine = (): CompletePlanCalculationEngine => ({
   calculate: async ({ draft, aircraftProfile, routeLegs, weather }) => {
-    const loadedWinds = weather.loadedWindsData;
-    if (loadedWinds === undefined) {
-      throw new WeatherPhaseResolutionError("Complete navlog calculation requires selected loaded winds data for every generated subleg.");
+    if (weather.progressiveCalculationSnapshot !== undefined) {
+      return { calculationSnapshot: weather.progressiveCalculationSnapshot, warnings: [] };
     }
-    const allocationInput = allocationInputFor(draft.descentTargetAltitudeFeetMsl.effectiveValue, aircraftProfile, routeLegs, loadedWinds);
+    const routeSamples = weather.routeWeatherSamples;
+    const loadedWinds = weather.loadedWindsData;
+    if (routeSamples !== undefined) throw new WeatherPhaseResolutionError("Route waypoint weather requires a finalized progressive calculation snapshot.");
+    if (loadedWinds === undefined) throw new WeatherPhaseResolutionError("Complete navlog calculation requires legacy loaded winds data when no finalized progressive snapshot is available.");
+    const allocationInput = allocationInputFor(draft.descentTargetAltitudeFeetMsl.effectiveValue, aircraftProfile, routeLegs, weather);
     const allocation = allocateRoutePhases(requireValue(allocationInput));
     const allocatedPlan = requireValue(allocation);
 
@@ -52,7 +55,7 @@ const allocationInputFor = (
   descentTargetAltitudeFeetMsl: number,
   profile: AircraftProfile,
   routeLegs: readonly CompletePlanRouteLeg[],
-  loadedWinds: LoadedWindsData,
+  weather: CompletePlanWeather,
 ): DomainResult<RoutePhaseAllocationInput> => {
   const first = routeLegs[0];
   const final = routeLegs[routeLegs.length - 1];
@@ -76,7 +79,7 @@ const allocationInputFor = (
     destinationAltitude: destinationAltitude.value,
     climbPerformance: climbPerformance.value,
     descentPerformance: descentPerformance.value,
-    windResolver: createSampledPhaseWindResolver(loadedWinds),
+    windResolver: weather.phaseWindResolver,
   });
 };
 

@@ -44,10 +44,53 @@ function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, r
   heading.textContent = selectionHeading(revision, selection, row);
   const value = selectedValue(row, selection.field);
   section.append(paragraph(`Stored unrounded value: ${displayValue(value)}.`));
+  if (["groundspeed", "estimatedTimeEnroute", "fuel"].includes(selection.field)) {
+    section.append(paragraph("Effective wind used for this row"));
+    appendTrace(section, nested(row.effectiveWind, "trace"));
+  }
+  if (selection.field === "estimatedTimeEnroute" || selection.field === "fuel") {
+    section.append(paragraph("Wind-triangle groundspeed used by this calculation"));
+    appendTrace(section, nested(nested(row, "traces"), "windTriangle"));
+  }
+  section.append(paragraph("Selected value calculation"));
   appendTrace(section, selectedTrace(row, selection.field));
   appendProvenance(section, selectedProvenance(row, selection.field));
+  appendEndpointSources(section, revision);
   appendTextList(section, "Assumptions", row.assumptions);
   appendOverrides(section, row.appliedOverrides);
+}
+
+function appendEndpointSources(section: HTMLElement, revision: PlanRevision | undefined): void {
+  const sources = nested(nested(revision?.calculationSnapshot, "weather"), "endpointSources");
+  if (sources === undefined) return;
+  const heading = document.createElement("h4");
+  heading.textContent = "Endpoint weather sources";
+  section.append(heading);
+  for (const [key, label] of [["departureMetar", "Departure METAR"], ["destinationTaf", "Destination TAF"], ["destinationMetar", "Destination METAR"]] as const) {
+    const source = nested(sources, key);
+    if (source === undefined) continue;
+    section.append(endpointSourceParagraph(key, label, source));
+  }
+}
+
+function endpointSourceParagraph(key: string, label: string, source: RecordValue): HTMLParagraphElement {
+  const status = key === "departureMetar" ? "Departure surface anchor" : source.selectedForTerminalWind === true ? "Selected for terminal wind" : "Fetched source; not selected for terminal wind";
+  const timing = key === "destinationTaf" ? tafValidity(source) : metarTiming(source);
+  return paragraph(`${label} (${status}): ${String(source.stationIcao ?? "unknown station")}; request ${String(source.requestId ?? "unknown")}; issued ${String(source.issuedAt ?? "unknown")}; ${timing}; ${cacheDescription(source)}.`);
+}
+
+function tafValidity(source: RecordValue): string {
+  return `valid ${String(source.validFrom ?? "unknown")} to ${String(source.validUntil ?? "unknown")}`;
+}
+
+function metarTiming(source: RecordValue): string {
+  return `fetched ${String(source.fetchedAt ?? "unknown")}; observed ${String(source.observedAt ?? "not available")}`;
+}
+
+function cacheDescription(source: RecordValue): string {
+  const cache = nested(source, "cache");
+  if (cache === undefined) return "cache not reported";
+  return `cache ${String(cache.status ?? "unknown")} from ${String(cache.source ?? "unknown")}; fetched ${String(cache.fetchedAt ?? "unknown")}; expires ${String(cache.expiresAt ?? "unknown")}; freshness ${String(cache.freshnessRemainingSeconds ?? "unknown")} seconds`;
 }
 
 function selectionHeading(revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): string {
@@ -60,7 +103,7 @@ function selectionHeading(revision: PlanRevision | undefined, selection: NavlogI
 
 function appendTrace(section: HTMLElement, trace: RecordValue | undefined): void {
   if (trace === undefined) {
-    section.append(paragraph("This value comes from route or phase allocation. Inspect the phase-boundary evidence in the navlog for its geometry and altitude inputs."));
+    section.append(paragraph("This value comes from route or phase allocation; no detailed trace was stored for it."));
   } else {
     renderTrace(section, trace);
   }

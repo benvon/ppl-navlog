@@ -60,6 +60,8 @@ export interface NavlogSourceLeg {
     readonly variation: PlanningValue<SignedDegrees>;
     readonly trace: CalculationTrace;
   };
+  /** Progressive routes may refresh WMM at each generated subleg midpoint. */
+  readonly resolveMagneticVariation?: (subleg: AllocatedNavlogSubleg) => NavlogSourceLeg["magneticVariation"];
 }
 
 export interface NavlogCalculationInput {
@@ -71,6 +73,32 @@ export interface NavlogCalculationInput {
     readonly reserveFuelGallons: number;
   };
   readonly windResolver: NavlogWindResolver;
+}
+
+/** Static inputs shared by a progressive, one-row-at-a-time calculation. */
+export type NavlogCalculationSessionInput = Omit<NavlogCalculationInput, "allocatedSublegs">;
+
+/** Validated inputs that do not change as finalized route rows are carried forward. */
+export interface NavlogCalculationSession {
+  readonly routeLegs: ReadonlyMap<string, NavlogSourceLeg>;
+  readonly aircraftProfile: AircraftProfile;
+  readonly taxiRunupFuel: Gallons;
+  readonly reserveFuel: Gallons;
+  readonly usableFuel?: Gallons;
+  readonly windResolver: NavlogWindResolver;
+}
+
+/** Immutable accumulator returned after each fully calculated interval. */
+export interface NavlogCalculationState {
+  readonly rows: readonly NavlogCalculationRow[];
+  readonly cumulativeDistance: NauticalMiles;
+  readonly cumulativeMinutes: Minutes;
+  readonly cumulativeEnrouteFuel: Gallons;
+}
+
+export interface FinalizedNavlogRow {
+  readonly row: NavlogCalculationRow;
+  readonly state: NavlogCalculationState;
 }
 
 export interface AppliedNavlogOverride {
@@ -125,53 +153,98 @@ export interface NavlogCalculationResult {
   readonly warnings: readonly string[];
 }
 
-/**
- * Builds PHAK-style navigation rows after phase allocation. It does not fetch
- * weather, place TOC/TOD, select forecasts, or round worksheet values.
- */
-export const calculateNavlog = (input: NavlogCalculationInput): DomainResult<NavlogCalculationResult> => {
-  const sourceLegs = new Map(input.routeLegs.map((routeLeg) => [routeLeg.sourceLeg.id, routeLeg]));
+/** Prepares stable calculation inputs before a progressive row sequence begins. */
+export const createNavlogCalculationSession = (input: NavlogCalculationSessionInput): DomainResult<NavlogCalculationSession> => {
   const taxiRunupFuel = gallons(input.fuelInputs.taxiRunupFuelGallons);
   if (!taxiRunupFuel.ok) return propagateFailure(taxiRunupFuel);
   const reserveFuel = gallons(input.fuelInputs.reserveFuelGallons);
   if (!reserveFuel.ok) return propagateFailure(reserveFuel);
+  const usableFuelResult = input.aircraftProfile.usableFuelGallons === undefined ? undefined : gallons(input.aircraftProfile.usableFuelGallons);
+  if (usableFuelResult !== undefined && !usableFuelResult.ok) return propagateFailure(usableFuelResult);
+  return success({
+    routeLegs: new Map(input.routeLegs.map((routeLeg) => [routeLeg.sourceLeg.id, routeLeg])),
+    aircraftProfile: input.aircraftProfile,
+    taxiRunupFuel: taxiRunupFuel.value,
+    reserveFuel: reserveFuel.value,
+    ...(usableFuelResult === undefined ? {} : { usableFuel: usableFuelResult.value }),
+    windResolver: input.windResolver,
+  });
+};
 
-  const rows: NavlogCalculationRow[] = [];
+export const createNavlogCalculationState = (): NavlogCalculationState => ({
+  rows: [], cumulativeDistance: 0 as NauticalMiles,
+  cumulativeMinutes: 0 as Minutes,
+  cumulativeEnrouteFuel: 0 as Gallons,
+});
+
+/** Calculates and finalizes one interval exactly once, carrying its totals forward. */
+export const calculateNavlogRow = (
+  session: NavlogCalculationSession,
+  state: NavlogCalculationState,
+  subleg: AllocatedNavlogSubleg,
+  windResolver: NavlogWindResolver = session.windResolver,
+): DomainResult<FinalizedNavlogRow> => {
+  const sourceLeg = session.routeLegs.get(subleg.sourceLegId);
+  const calculated = calculateRow(subleg, sourceLeg, session.aircraftProfile, windResolver);
+  if (!calculated.ok) return propagateFailure(calculated);
+  const distance = nauticalMiles(state.cumulativeDistance + subleg.distance);
+  if (!distance.ok) return propagateFailure(distance);
+  const duration = minutes(state.cumulativeMinutes + calculated.value.estimatedTimeEnroute);
+  if (!duration.ok) return propagateFailure(duration);
+  const enrouteFuel = gallons(state.cumulativeEnrouteFuel + calculated.value.fuel);
+  if (!enrouteFuel.ok) return propagateFailure(enrouteFuel);
+  const cumulative = cumulativeValues(distance.value, duration.value, enrouteFuel.value, session.taxiRunupFuel, session.reserveFuel);
+  if (!cumulative.ok) return propagateFailure(cumulative);
+  const row = { ...calculated.value, cumulative: cumulative.value };
+  const nextState: NavlogCalculationState = {
+    rows: [...state.rows, row],
+    cumulativeDistance: distance.value,
+    cumulativeMinutes: duration.value,
+    cumulativeEnrouteFuel: enrouteFuel.value,
+  };
+  return success({ row, state: nextState });
+};
+
+/** Produces route totals from the already finalized rows; no row is recalculated. */
+export const finalizeNavlog = (
+  session: NavlogCalculationSession,
+  state: NavlogCalculationState,
+): DomainResult<NavlogCalculationResult> => {
   const phaseFuel: Record<"climb" | "transition" | "cruise" | "descent", Gallons[]> = {
     climb: [], transition: [], cruise: [], descent: [],
   };
-  let cumulativeDistance = 0;
-  let cumulativeMinutes = 0;
-  let cumulativeEnrouteFuel = 0;
   const warnings: string[] = [];
-
-  for (const subleg of input.allocatedSublegs) {
-    const sourceLeg = sourceLegs.get(subleg.sourceLegId);
-    const row = calculateRow(subleg, sourceLeg, input.aircraftProfile, input.windResolver);
-    if (!row.ok) return propagateFailure(row);
-    cumulativeDistance += subleg.distance;
-    cumulativeMinutes += row.value.estimatedTimeEnroute;
-    cumulativeEnrouteFuel += row.value.fuel;
-    const cumulative = cumulativeValues(cumulativeDistance, cumulativeMinutes, cumulativeEnrouteFuel, taxiRunupFuel.value, reserveFuel.value);
-    if (!cumulative.ok) return propagateFailure(cumulative);
-    phaseFuel[phaseFuelBucket(subleg.phase)].push(row.value.fuel);
-    warnings.push(...(row.value.effectiveWind.warnings ?? []), ...row.value.assumptions);
-    rows.push({ ...row.value, cumulative: cumulative.value });
+  for (const row of state.rows) {
+    phaseFuel[phaseFuelBucket(row.subleg.phase)].push(row.fuel);
+    warnings.push(...(row.effectiveWind.warnings ?? []), ...row.assumptions);
   }
-
-  const usableFuel = input.aircraftProfile.usableFuelGallons === undefined ? undefined : gallons(input.aircraftProfile.usableFuelGallons);
-  if (usableFuel !== undefined && !usableFuel.ok) return propagateFailure(usableFuel);
   const summary = calculateFuelSummary({
-    taxiRunupFuel: taxiRunupFuel.value,
+    taxiRunupFuel: session.taxiRunupFuel,
     climbFuel: sumGallons(phaseFuel.climb),
     transitionFuel: sumGallons(phaseFuel.transition),
     cruiseFuel: sumGallons(phaseFuel.cruise),
     descentFuel: sumGallons(phaseFuel.descent),
-    reserveFuel: reserveFuel.value,
-    ...(usableFuel === undefined ? {} : { usableFuel: usableFuel.value }),
+    reserveFuel: session.reserveFuel,
+    ...(session.usableFuel === undefined ? {} : { usableFuel: session.usableFuel }),
   });
   if (!summary.ok) return propagateFailure(summary);
-  return success({ schema: "navlog-calculation/v1", rows, fuelSummary: summary.value, warnings: unique(warnings) });
+  return success({ schema: "navlog-calculation/v1", rows: state.rows, fuelSummary: summary.value, warnings: unique(warnings) });
+};
+
+/**
+ * Compatibility wrapper for callers that already have all allocated intervals.
+ * Progressive planners should call calculateNavlogRow as each interval is ready.
+ */
+export const calculateNavlog = (input: NavlogCalculationInput): DomainResult<NavlogCalculationResult> => {
+  const session = createNavlogCalculationSession(input);
+  if (!session.ok) return propagateFailure(session);
+  let state = createNavlogCalculationState();
+  for (const subleg of input.allocatedSublegs) {
+    const result = calculateNavlogRow(session.value, state, subleg);
+    if (!result.ok) return propagateFailure(result);
+    state = result.value.state;
+  }
+  return finalizeNavlog(session.value, state);
 };
 
 type NavlogRowWithoutCumulative = Omit<NavlogCalculationRow, "cumulative">;
@@ -189,7 +262,8 @@ const calculateRow = (
   if (!resolvedWind.ok) return propagateFailure(resolvedWind);
   const validSurfaceInterpolation = validateSurfaceInterpolation(resolvedWind.value.surfaceToAloftInterpolation);
   if (!validSurfaceInterpolation.ok) return propagateFailure(validSurfaceInterpolation);
-  return calculateHeadingAndFuelRow(subleg, sourceLeg, profile, performance.value, resolvedWind.value);
+  const magneticVariation = sourceLeg.resolveMagneticVariation?.(subleg) ?? sourceLeg.magneticVariation;
+  return calculateHeadingAndFuelRow(subleg, profile, performance.value, resolvedWind.value, magneticVariation);
 };
 
 const missingSourceLeg = (subleg: AllocatedNavlogSubleg): DomainResult<never> =>
@@ -199,14 +273,14 @@ const missingSourceLeg = (subleg: AllocatedNavlogSubleg): DomainResult<never> =>
 
 const calculateHeadingAndFuelRow = (
   subleg: AllocatedNavlogSubleg,
-  sourceLeg: NavlogSourceLeg,
   profile: AircraftProfile,
   performance: { readonly trueAirspeed: PlanningValue<Knots>; readonly fuelFlow: PlanningValue<GallonsPerHour> },
   effectiveWind: ResolvedNavlogWind,
+  magneticVariation: NavlogSourceLeg["magneticVariation"],
 ): DomainResult<NavlogRowWithoutCumulative> => {
   const windTriangle = solveWindTriangle(subleg.trueCourse, performance.trueAirspeed.effectiveValue, effectiveWind.wind.effectiveValue);
   if (!windTriangle.ok) return propagateFailure(windTriangle);
-  const magnetic = convertTrueToMagneticHeading(windTriangle.value.trueHeading, sourceLeg.magneticVariation.variation.effectiveValue);
+  const magnetic = convertTrueToMagneticHeading(windTriangle.value.trueHeading, magneticVariation.variation.effectiveValue);
   if (!magnetic.ok) return propagateFailure(magnetic);
   const deviation = deviationFor(profile, magnetic.value.heading);
   if (!deviation.ok) return propagateFailure(deviation);
@@ -216,13 +290,13 @@ const calculateHeadingAndFuelRow = (
   if (!ete.ok) return propagateFailure(ete);
   const fuel = calculateFuelForDuration(ete.value.duration, performance.fuelFlow.effectiveValue);
   if (!fuel.ok) return propagateFailure(fuel);
-  return success(rowWithoutCumulative(subleg, sourceLeg, performance, effectiveWind, windTriangle.value, magnetic.value, deviation.value, compass.value, ete.value, fuel.value));
+  return success(rowWithoutCumulative(subleg, performance, magneticVariation, effectiveWind, windTriangle.value, magnetic.value, deviation.value, compass.value, ete.value, fuel.value));
 };
 
 const rowWithoutCumulative = (
   subleg: AllocatedNavlogSubleg,
-  sourceLeg: NavlogSourceLeg,
   performance: { readonly trueAirspeed: PlanningValue<Knots>; readonly fuelFlow: PlanningValue<GallonsPerHour> },
+  magneticVariation: NavlogSourceLeg["magneticVariation"],
   effectiveWind: ResolvedNavlogWind,
   windTriangle: ReturnType<typeof solveWindTriangle> extends DomainResult<infer T> ? T : never,
   magnetic: ReturnType<typeof convertTrueToMagneticHeading> extends DomainResult<infer T> ? T : never,
@@ -235,12 +309,12 @@ const rowWithoutCumulative = (
   return {
     subleg, effectiveWind, trueAirspeed: performance.trueAirspeed, fuelFlow: performance.fuelFlow,
     windCorrectionAngle: windTriangle.windCorrectionAngle, trueHeading: windTriangle.trueHeading,
-    variation: sourceLeg.magneticVariation.variation, magneticHeading: magnetic.heading,
+    variation: magneticVariation.variation, magneticHeading: magnetic.heading,
     compassDeviation: deviation.deviation, compassHeading: compass.heading, groundspeed: windTriangle.groundspeed,
     estimatedTimeEnroute: ete.duration, fuel: fuel.fuel, assumptions,
-    appliedOverrides: appliedOverrides(effectiveWind.wind, performance.trueAirspeed, performance.fuelFlow, sourceLeg.magneticVariation.variation),
+    appliedOverrides: appliedOverrides(effectiveWind.wind, performance.trueAirspeed, performance.fuelFlow, magneticVariation.variation),
     traces: {
-      effectiveWind: effectiveWind.trace, windTriangle: windTriangle.trace, magneticVariation: sourceLeg.magneticVariation.trace,
+      effectiveWind: effectiveWind.trace, windTriangle: windTriangle.trace, magneticVariation: magneticVariation.trace,
       trueToMagnetic: magnetic.trace, compassDeviation: deviation.trace, magneticToCompass: compass.trace,
       estimatedTimeEnroute: ete.trace, fuel: fuel.trace,
     },

@@ -56,7 +56,7 @@ describe("Worker winds complete-plan resolver", () => {
       selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z",
       referenceSnapshots: [{ source: "aviationweather:NCEP-FB-Winds-Temps", payload: { selectedStation: { id: "BRL" } } }],
     });
-    await expect(resolver.resolve({ draft: { ...draft, weatherSelection: undefined }, aircraftProfile: aircraftProfile(), routeLegs: [] })).rejects.toThrow(/Choose an available winds forecast period/u);
+    await expect(resolver.resolve({ draft: { ...draft, weatherSelection: undefined }, aircraftProfile: aircraftProfile(), routeLegs: [] })).rejects.toThrow("Route weather calculation is not available for this plan yet.");
   });
 
   it("anchors the departure METAR at airport-data field elevation and stores the assumption evidence", async () => {

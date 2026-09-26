@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ApiError } from './errors';
-import { createAviationWeatherAdapter, decodeWindsProduct, regionForRoute, type CacheStore, type ServiceFetcher } from './winds';
+import { createAviationWeatherAdapter, decodeWindsProduct, regionForRoute, type CacheStore, type ServiceFetcher, type WindsDataAdapter } from './winds';
+import type { AloftPointQuery } from './contracts';
 
 /** Captured from the official AWC US low-level FB product on 2026-09-21. */
 const PRODUCT = `000
@@ -109,7 +110,7 @@ describe('Aviation Weather Center adapter', () => {
   });
 
   it('maps Alaska and Hawaii FB station IDs through the official station catalog', async () => {
-    const alaskaProduct = PRODUCT.replace(/^ABQ/gm, 'FAI').replace(/^ATL/gm, 'BRW');
+    const alaskaProduct = PRODUCT.replace(/^ABQ/gm, 'FAI').replace(/^ATL/gm, 'BRW').replace(/^BGR.*\n?/gm, '');
     const hawaiiProduct = PRODUCT.replace(/^ABQ/gm, 'ITO').replace(/^ATL/gm, 'LIH').replace(/^BGR/gm, 'HNL');
     const requests: Request[] = [];
     const regionalFetcher: ServiceFetcher = { async fetch(request) {
@@ -135,6 +136,52 @@ describe('Aviation Weather Center adapter', () => {
     });
     expect(requests.filter((request) => new URL(request.url).pathname === '/api/data/stationinfo')).toHaveLength(0);
     expect(requests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(2);
+  });
+
+  it('rejects ambiguous and region-inconsistent exact station identities', async () => {
+    const encodeCatalog = async (catalog: typeof STATION_CATALOG): Promise<Response> => {
+      const encoded = new TextEncoder().encode(JSON.stringify(catalog));
+      return new Response(await new Response(new ReadableStream<BufferSource>({ start(controller) { controller.enqueue(encoded); controller.close(); } }).pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    };
+    const duplicateCatalog = [...STATION_CATALOG, { iataId: 'BRL', faaId: 'BRL', icaoId: 'KBRL', site: 'Burlington', lat: 40.7832, lon: -91.1255, elev: 698 }, { iataId: 'BRL', faaId: 'BRL', icaoId: 'KBRL', site: 'Conflicting Burlington', lat: 60, lon: -150, elev: 0 }];
+    const duplicateFetcher: ServiceFetcher = { async fetch(request) {
+      if (new URL(request.url).pathname === '/api/data/windtemp') return new Response(PRODUCT.replace(/^ABQ/gm, 'BRL'), { headers: { 'Content-Type': 'text/plain' } });
+      if (new URL(request.url).pathname === '/data/cache/stations.cache.json.gz') {
+        return encodeCatalog(duplicateCatalog);
+      }
+      return responseFor(request);
+    } };
+    await expect(createAviationWeatherAdapter(duplicateFetcher, memoryCache(), () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89 }])).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+
+    const missingCatalog = STATION_CATALOG;
+    const missingFetcher: ServiceFetcher = { async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/api/data/windtemp') {
+        const baseProduct = PRODUCT.replace(/^ABQ/gm, 'BRL');
+        const product = url.searchParams.get('fcst') === '12' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : url.searchParams.get('fcst') === '24' ? baseProduct.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : baseProduct;
+        return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
+      }
+      if (new URL(request.url).pathname === '/data/cache/stations.cache.json.gz') {
+        return encodeCatalog(missingCatalog);
+      }
+      return responseFor(request);
+    } };
+    await expect(createAviationWeatherAdapter(missingFetcher, memoryCache(), () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89 }]))
+      .resolves.toMatchObject({ stations: expect.not.arrayContaining([expect.objectContaining({ id: 'BRL' })]) });
+
+    const wrongRegionCatalog = [...STATION_CATALOG.filter((entry) => entry.faaId !== 'ABQ'), { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Mislocated ABQ', lat: 64, lon: -147, elev: 0 }];
+    const wrongRegionFetcher: ServiceFetcher = { async fetch(request) {
+      if (new URL(request.url).pathname === '/data/cache/stations.cache.json.gz') return encodeCatalog(wrongRegionCatalog);
+      return responseFor(request);
+    } };
+    await expect(createAviationWeatherAdapter(wrongRegionFetcher, memoryCache(), () => FIXED_NOW).getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89 }])).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+  });
+
+  it('exposes the point-query contract for Task 2', () => {
+    const query: AloftPointQuery = { latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 4500, plannedUtc: '2026-09-22T01:00:00.000Z' };
+    expectTypeOf<WindsDataAdapter['getWindsPoint']>().toBeFunction();
+    expect(query).toMatchObject({ altitudeFeetMsl: 4500 });
   });
 
   it('publishes availability independently for each verified station', async () => {

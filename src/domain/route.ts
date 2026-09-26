@@ -48,11 +48,18 @@ export interface PlanFuelInputs {
   readonly reserveFuelGallons: number;
 }
 
-/** A pilot's explicit choice from the Worker-published forecast periods. */
+/** Endpoint source choices and optional legacy weather selectors for old snapshots. */
 export interface PlanWeatherSelection {
-  readonly forecastValidTimeUtc: string;
-  readonly selectedAtUtc: string;
-  /** Explicit nearby ICAO METAR source when the departure is a LID-only airport. */
+  /** Pilot alternate used only when the departure airport has no METAR or ICAO identifier. */
+  readonly departureMetarIcao?: string;
+  /** Pilot alternate used only when the destination airport has no TAF or ICAO identifier. */
+  readonly destinationTafIcao?: string;
+  /** Pilot-selected destination METAR alternate, queried only when destination has no METAR. */
+  readonly destinationMetarIcao?: string;
+  /** Legacy fields retained only while older persisted plans are migrated. */
+  readonly forecastValidTimeUtc?: string;
+  readonly selectedAtUtc?: string;
+  /** Legacy alias consumed by the old winds resolver during migration. */
   readonly surfaceWeatherIcao?: string;
 }
 

@@ -66,6 +66,7 @@ function aviationWeatherFetch(fetches: Request[]): typeof globalThis.fetch {
           : WINDS_PRODUCT;
       return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
     }
+    if (url.pathname === '/api/data/taf') return Response.json([{ icaoId: 'KORD', issueTime: FIXED_NOW, validTimeFrom: Date.parse(FIXED_NOW) / 1000, validTimeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, mostRecent: 1, rawTAF: 'TAF KORD fixture', fcsts: [{ fcstChange: null, timeFrom: Date.parse(FIXED_NOW) / 1000, timeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, wdir: 'VRB', wspd: 8, wgst: 18, raw: 'VRB08G18KT' }] }]);
     if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
     return new Response(null, { status: 404 });
   };
@@ -176,6 +177,27 @@ describe('Worker API functional contracts', () => {
       requestId: FIXED_REQUEST_ID
     });
     expect(awcRequests.every((request) => new URL(request.url).origin === 'https://aviationweather.gov')).toBe(true);
+  });
+
+  it('serves a validated aloft point answer with the request id and no station discovery payload', async () => {
+    const awcRequests: Request[] = [];
+    vi.stubGlobal('fetch', aviationWeatherFetch(awcRequests));
+    const response = await api('/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z', env({ WINDS_CACHE: memoryCache() }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ query: { latitudeDeg: 35.0402, longitudeDeg: -106.609, altitudeFeetMsl: 9000 }, forecastCycle: '06', product: { region: 'us', cycle: '06', cache: { status: 'upstream_refresh', source: 'upstream' } }, windSpeedKt: 0, requestId: FIXED_REQUEST_ID });
+    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
+    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
+  });
+
+  it('serves an exact-station TAF with normalized VRB group and request evidence', async () => {
+    const requests: Request[] = [];
+    vi.stubGlobal('fetch', aviationWeatherFetch(requests));
+    const response = await api('/api/weather/taf/KORD', env());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ stationIcao: 'KORD', groups: [{ windDirectionType: 'variable', windFromDegTrue: null, windSpeedKt: 8 }], requestId: FIXED_REQUEST_ID });
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]!.url).origin).toBe('https://aviationweather.gov');
   });
 
   it('returns browser-safe failures for invalid input, upstream failure, and rate limiting', async () => {

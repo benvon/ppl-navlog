@@ -1,5 +1,7 @@
 import type {
   AirportCoordinates,
+  AloftPointAnswer,
+  AloftPointQuery,
   CacheProvenance,
   WindsAloftLevel,
   WindsForecast,
@@ -13,7 +15,13 @@ import { ApiError } from './errors';
 import { readBoundedText } from './bounded-text';
 
 const AVIATION_WEATHER_ORIGIN = 'https://aviationweather.gov';
-const MAX_RESPONSE_BYTES = 512 * 1024;
+// Live regional products measured 618–12,504 decoded bytes; keep finite
+// headroom for valid synthetic/provider growth without unbounded buffering.
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_POINT_DISTANCE_NM = 100;
+const MAX_POINT_SOURCES = 3;
+const MAX_PRODUCT_STATIONS = 10_000;
+const MAX_PRODUCT_LINES = 12_000;
 const MAX_STATION_CATALOG_BYTES = 3 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5_000;
 const FRESH_TTL_MS = 20 * 60 * 1_000;
@@ -26,6 +34,7 @@ export interface ServiceFetcher { fetch(request: Request): Promise<Response>; }
 export interface CacheStore { match(request: Request): Promise<Response | undefined>; put(request: Request, response: Response): Promise<void>; }
 
 export interface WindsDataAdapter {
+  getWindsPoint(query: AloftPointQuery): Promise<AloftPointAnswer>;
   getWindsStations(route: readonly WindsRoutePoint[]): Promise<{ stations: WindsStation[]; forecasts: WindsForecastAvailability[]; unavailableForecastCycles: WindsForecastCycle[]; provenance: CacheProvenance[] }>;
   getWindsForecast(station: string, validTime: string, region: WindsRegion): Promise<{ forecast: WindsForecast; provenance: CacheProvenance }>;
 }
@@ -42,7 +51,7 @@ interface CachedProduct {
 
 interface DecodedForecast extends WindsForecastAvailability { readonly stationId: string; readonly levels: WindsAloftLevel[]; }
 interface StationInfo { readonly id: string; readonly name: string | null; readonly coordinates: AirportCoordinates; readonly elevationFt: number | null; }
-interface StationCatalogEntry { readonly identifiers: readonly string[]; readonly info: Omit<StationInfo, 'id'>; }
+interface StationCatalogEntry { readonly iataId: string | null; readonly info: Omit<StationInfo, 'id'>; }
 interface CachedStationCatalog {
   readonly fetchedAt: string;
   readonly freshUntil: string;
@@ -114,17 +123,16 @@ function isLevel(value: unknown): value is WindsAloftLevel {
 
 function isDecodedForecast(value: unknown): value is DecodedForecast {
   return isRecord(value) && typeof value.stationId === 'string' && isCycle(value.forecastCycle) && isIsoTimestamp(value.issuedAt) && isIsoTimestamp(value.validAt)
-    && isIsoTimestamp(value.useFrom) && isIsoTimestamp(value.useUntil) && Array.isArray(value.levels) && value.levels.every(isLevel);
+    && isIsoTimestamp(value.useFrom) && isIsoTimestamp(value.useUntil) && Array.isArray(value.levels) && value.levels.length <= 40 && value.levels.every(isLevel);
 }
 
 function isCachedProduct(value: unknown): value is CachedProduct {
   return isRecord(value) && isIsoTimestamp(value.fetchedAt) && isIsoTimestamp(value.freshUntil) && isIsoTimestamp(value.staleUntil) && isWindsRegion(value.region)
-    && isCycle(value.cycle) && typeof value.rawProduct === 'string' && Array.isArray(value.forecasts) && value.forecasts.every(isDecodedForecast);
+    && isCycle(value.cycle) && typeof value.rawProduct === 'string' && value.rawProduct.length <= MAX_RESPONSE_BYTES && Array.isArray(value.forecasts) && value.forecasts.length <= MAX_PRODUCT_STATIONS && value.forecasts.every(isDecodedForecast);
 }
 
 function isStationCatalogEntry(value: unknown): value is StationCatalogEntry {
-  return isRecord(value) && Array.isArray(value.identifiers) && value.identifiers.length > 0 && value.identifiers.length <= 3
-    && value.identifiers.every((identifier) => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier))
+  return isRecord(value) && typeof value.iataId === 'string' && /^[A-Z0-9]{3}$/.test(value.iataId)
     && isRecord(value.info) && (value.info.name === null || (typeof value.info.name === 'string' && value.info.name.length <= 200))
     && isCoordinates(value.info.coordinates) && (value.info.elevationFt === null || isFiniteNumber(value.info.elevationFt));
 }
@@ -142,7 +150,10 @@ async function boundedText(fetcher: ServiceFetcher, request: Request): Promise<s
     if (response.status === 204) throw new ApiError('No Winds/Temps forecast is available for this request.', 404, 'upstream_no_data');
     if (!response.ok) throw new ApiError('Aviation Weather Center is unavailable.', 503, 'upstream_unavailable');
     try { return await readBoundedText(response, MAX_RESPONSE_BYTES); }
-    catch { throw new ApiError('Aviation Weather Center returned an oversized or unreadable Winds/Temps response.', 502, 'upstream_invalid_response'); }
+    catch (error) {
+      const diagnostic = error instanceof Error && /exceeds limit/.test(error.message) ? 'winds_response_byte_limit' : 'winds_response_unreadable';
+      throw new ApiError('Aviation Weather Center returned an invalid Winds/Temps response.', 502, 'upstream_invalid_response', diagnostic);
+    }
   } catch (error) {
     if (error instanceof ApiError) throw error;
     throw new ApiError('Aviation Weather Center is unavailable.', 503, 'upstream_unavailable');
@@ -220,22 +231,23 @@ function decodeLevel(altitudeFt: number, raw: string): WindsAloftLevel {
   return { altitudeFt, ...wind, temperatureC: parseTemperature(altitudeFt, raw), raw };
 }
 
-/**
- * FB fixed-width fields are not aligned to the display start of every altitude
- * label. The 3,000-ft group has no temperature (4 chars), 6,000–24,000-ft
- * groups reserve 8 chars, and 30,000-ft-and-above groups reserve 7 chars.
- */
-function fbColumnWidth(altitudeFt: number): number {
-  if (altitudeFt === 3_000) return 4;
-  return altitudeFt >= 30_000 ? 7 : 8;
+function requireStationBudget(count: number): void {
+  if (count > MAX_PRODUCT_STATIONS) throw new ApiError('Aviation Weather Center returned a Winds/Temps product with too many stations.', 502, 'upstream_invalid_response');
+}
+
+function fbSeparatedColumnWidth(altitudeFt: number): number {
+  // Official FB rows separate groups with one space; 3,000-ft groups carry
+  // four characters, 6,000–24,000-ft groups seven, and high groups six.
+  if (altitudeFt <= 3_000) return 4;
+  return altitudeFt >= 30_000 ? 6 : 7;
 }
 
 function fixedWidthLevels(row: string, columns: readonly { altitudeFt: number; start: number }[]): WindsAloftLevel[] {
-  let start = columns[0]!.start;
-  return columns.map((column) => {
-    const width = fbColumnWidth(column.altitudeFt);
-    const raw = row.slice(start, start + width).trim();
-    start += width;
+  let cursor = columns[0]!.start;
+  return columns.map((column, index) => {
+    const width = fbSeparatedColumnWidth(column.altitudeFt);
+    const raw = row.slice(cursor, cursor + width).trim();
+    cursor += width + (index < columns.length - 1 ? 1 : 0);
     return decodeLevel(column.altitudeFt, raw);
   });
 }
@@ -253,26 +265,34 @@ export function decodeWindsProduct(rawProduct: string, cycle: WindsForecastCycle
   const header = levelsMatch[0];
   const columns = [...header.matchAll(/\b\d{4,5}\b/g)].map((match) => ({ altitudeFt: Number(match[0]), start: match.index as number }));
   const altitudes = columns.map((column) => column.altitudeFt);
-  if (altitudes.length === 0 || altitudes.some((altitude) => !Number.isSafeInteger(altitude) || altitude < 3_000 || altitude > 53_000)) throw new ApiError('Aviation Weather Center returned invalid Winds/Temps altitude columns.', 502, 'upstream_invalid_response');
+  if (altitudes.length === 0 || altitudes.some((altitude) => !Number.isSafeInteger(altitude) || altitude < 1_000 || altitude > 53_000)) throw new ApiError('Aviation Weather Center returned invalid Winds/Temps altitude columns.', 502, 'upstream_invalid_response');
   const dataStart = (levelsMatch.index ?? 0) + header.length;
   const rows = normalized.slice(dataStart).split('\n').filter((line) => line.trim().length > 0);
-  const forecasts: DecodedForecast[] = [];
-  for (const row of rows) {
-    const stationId = row.slice(0, columns[0]!.start).trim();
-    if (!stationId || !/^[A-Z0-9]{3}$/.test(stationId)) continue;
-    const levels = fixedWidthLevels(row, columns);
-    forecasts.push({ stationId, forecastCycle: cycle, issuedAt: issuedAt.toISOString(), validAt: validAt.toISOString(), useFrom: useFrom.toISOString(), useUntil: useUntil.toISOString(), levels });
-  }
+  if (rows.length > MAX_PRODUCT_LINES) throw new ApiError('Aviation Weather Center returned a Winds/Temps product with too many rows.', 502, 'upstream_invalid_response');
+  const stationRows = rows.map((row) => ({ row, stationId: row.slice(0, columns[0]!.start).trim() }))
+    .filter(({ stationId }) => /^[A-Z0-9]{3}$/.test(stationId));
+  const stationIds = stationRows.map(({ stationId }) => stationId);
+  if (new Set(stationIds).size !== stationIds.length) throw new ApiError('Aviation Weather Center returned duplicate station identities in one Winds/Temps product.', 502, 'upstream_invalid_response');
+  const forecasts: DecodedForecast[] = stationRows.map(({ row, stationId }) => ({ stationId, forecastCycle: cycle,
+    issuedAt: issuedAt.toISOString(), validAt: validAt.toISOString(), useFrom: useFrom.toISOString(), useUntil: useUntil.toISOString(), levels: fixedWidthLevels(row, columns) }));
+  requireStationBudget(forecasts.length);
   if (forecasts.length === 0) throw new ApiError('Aviation Weather Center returned a Winds/Temps product without reporting stations.', 502, 'upstream_invalid_response');
   return forecasts;
 }
 
+function stationCoordinates(latitude: unknown, longitude: unknown): AirportCoordinates | null {
+  if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  return { latitudeDeg: latitude, longitudeDeg: longitude };
+}
+
 function stationEntry(value: unknown): StationCatalogEntry | null {
-  if (!isRecord(value) || !isFiniteNumber(value.lat) || !isFiniteNumber(value.lon) || value.lat < -90 || value.lat > 90 || value.lon < -180 || value.lon > 180) return null;
-  const identifiers = [value.iataId, value.faaId, value.icaoId].filter((identifier): identifier is string => typeof identifier === 'string' && /^[A-Z0-9]{3,4}$/.test(identifier));
-  if (identifiers.length === 0) return null;
+  if (!isRecord(value)) return null;
+  const coordinates = stationCoordinates(value.lat, value.lon);
+  const iataId = typeof value.iataId === 'string' && /^[A-Z0-9]{3}$/.test(value.iataId) ? value.iataId : null;
+  if (!coordinates || !iataId) return null;
   const name = typeof value.site === 'string' && value.site.length <= 200 ? value.site : null;
-  return { identifiers, info: { name, coordinates: { latitudeDeg: value.lat, longitudeDeg: value.lon }, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
+  return { iataId, info: { name, coordinates, elevationFt: isFiniteNumber(value.elev) ? value.elev : null } };
 }
 
 function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCatalog {
@@ -287,15 +307,172 @@ function parseStationCatalog(value: unknown, fetchedAt: Date): CachedStationCata
   };
 }
 
-function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[]): Map<string, StationInfo> {
+function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
   const requestedIds = new Set(stationIds);
-  const result = new Map<string, StationInfo>();
+  const matches = new Map<string, StationInfo[]>();
   for (const entry of catalog.entries) {
-    for (const identifier of entry.identifiers) {
-      if (requestedIds.has(identifier)) result.set(identifier, { id: identifier, ...entry.info });
+    const identifier = entry.iataId;
+    if (identifier && requestedIds.has(identifier)) {
+      const records = matches.get(identifier) ?? [];
+      records.push({ id: identifier, ...entry.info });
+      matches.set(identifier, records);
     }
   }
+  const result = new Map<string, StationInfo>();
+  for (const identifier of requestedIds) {
+    const records = matches.get(identifier) ?? [];
+    if (records.length > 1) throw new ApiError('Aviation Weather Center station catalog returned conflicting identities for a reported station.', 502, 'upstream_invalid_response');
+    if (records.length === 0) continue;
+    let actualRegion: WindsRegion;
+    try { actualRegion = regionForPoint(records[0]!.coordinates); }
+    catch { throw new ApiError('Aviation Weather Center station catalog placed a reported station outside its supported product region.', 502, 'upstream_invalid_response'); }
+    if (actualRegion !== expectedRegion) throw new ApiError('Aviation Weather Center station catalog placed a reported station in a different product region.', 502, 'upstream_invalid_response');
+    result.set(identifier, records[0]!);
+  }
   return result;
+}
+
+/** Point interpolation only uses exact, unique, catalog-verified identities in the product region. */
+function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
+  const requestedIds = new Set(stationIds);
+  const matches = new Map<string, StationInfo[]>();
+  for (const entry of catalog.entries) {
+    const identifier = entry.iataId;
+    if (identifier && requestedIds.has(identifier)) {
+      const records = matches.get(identifier) ?? [];
+      records.push({ id: identifier, ...entry.info });
+      matches.set(identifier, records);
+    }
+  }
+  const result = new Map<string, StationInfo>();
+  for (const identifier of requestedIds) {
+    const records = matches.get(identifier) ?? [];
+    if (records.length > 1) throw new ApiError('Aviation Weather Center station catalog returned conflicting identities for a reported station.', 502, 'upstream_invalid_response');
+    if (records.length === 0) continue;
+    try {
+      if (regionForPoint(records[0]!.coordinates) === expectedRegion) result.set(identifier, records[0]!);
+    } catch { /* Uncovered catalog entries cannot participate in geographic math. */ }
+  }
+  return result;
+}
+
+const radians = (degrees: number): number => degrees * Math.PI / 180;
+function distanceNm(left: AirportCoordinates, right: AirportCoordinates): number {
+  const lat1 = radians(left.latitudeDeg);
+  const lat2 = radians(right.latitudeDeg);
+  const dLat = lat2 - lat1;
+  const dLon = radians(right.longitudeDeg - left.longitudeDeg);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 3_440.065 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function verticalLevels(levels: readonly WindsAloftLevel[], altitude: number): { lower: WindsAloftLevel; upper: WindsAloftLevel; weight: number } | null {
+  const available = levels.filter((level) => level.availability === 'available' && level.windSpeedKt !== null && level.windSpeedKt >= 0);
+  const lower = [...available].filter((level) => level.altitudeFt <= altitude).sort((a, b) => b.altitudeFt - a.altitudeFt)[0];
+  const upper = [...available].filter((level) => level.altitudeFt >= altitude).sort((a, b) => a.altitudeFt - b.altitudeFt)[0];
+  if (!lower || !upper) return null;
+  return { lower, upper, weight: lower.altitudeFt === upper.altitudeFt ? 0 : (altitude - lower.altitudeFt) / (upper.altitudeFt - lower.altitudeFt) };
+}
+
+type TemperatureInterpolation = { value: number; lowerAltitudeFeet: number; upperAltitudeFeet: number; verticalWeight: number; lowerC: number; upperC: number };
+function temperatureAtAltitude(levels: readonly WindsAloftLevel[], altitude: number): TemperatureInterpolation | null {
+  const available = levels.filter((level) => level.availability === 'available' && level.temperatureC !== null);
+  const lower = [...available].filter((level) => level.altitudeFt <= altitude).sort((a, b) => b.altitudeFt - a.altitudeFt)[0];
+  const upper = [...available].filter((level) => level.altitudeFt >= altitude).sort((a, b) => a.altitudeFt - b.altitudeFt)[0];
+  if (!lower || !upper) return null;
+  const weight = lower.altitudeFt === upper.altitudeFt ? 0 : (altitude - lower.altitudeFt) / (upper.altitudeFt - lower.altitudeFt);
+  return { value: lower.temperatureC! + (upper.temperatureC! - lower.temperatureC!) * weight, lowerAltitudeFeet: lower.altitudeFt, upperAltitudeFeet: upper.altitudeFt, verticalWeight: weight, lowerC: lower.temperatureC!, upperC: upper.temperatureC! };
+}
+
+function levelVector(level: WindsAloftLevel): { u: number; v: number } {
+  if (level.windSpeedKt === 0 || level.windFromDegTrue === null) return { u: 0, v: 0 };
+  const direction = radians(level.windFromDegTrue);
+  return { u: -(level.windSpeedKt ?? 0) * Math.sin(direction), v: -(level.windSpeedKt ?? 0) * Math.cos(direction) };
+}
+
+function interpolateVector(lower: WindsAloftLevel, upper: WindsAloftLevel, weight: number): { u: number; v: number } {
+  const a = levelVector(lower);
+  const b = levelVector(upper);
+  return { u: a.u + (b.u - a.u) * weight, v: a.v + (b.v - a.v) * weight };
+}
+
+function windFromVector(u: number, v: number): { direction: number | null; speed: number } {
+  const speed = Math.hypot(u, v);
+  if (speed < 0.01) return { direction: null, speed: 0 };
+  return { direction: (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360, speed };
+}
+
+type ProductEntry = { product: CachedProduct; provenance: CacheProvenance };
+type ApplicableProduct = ProductEntry & { forecast: DecodedForecast };
+type PointStation = { forecast: DecodedForecast; identity: StationInfo; levels: { lower: WindsAloftLevel; upper: WindsAloftLevel; weight: number }; distance: number; temperature: TemperatureInterpolation | null };
+
+function validateAloftPointQuery(query: AloftPointQuery, current: Date): WindsRegion {
+  if (!isCoordinates(query) || !Number.isSafeInteger(query.altitudeFeetMsl) || query.altitudeFeetMsl < 3_000 || query.altitudeFeetMsl > 53_000
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(query.plannedUtc) || !Number.isFinite(Date.parse(query.plannedUtc))
+    || new Date(query.plannedUtc).toISOString() !== query.plannedUtc) throw new ApiError('Winds point query is outside supported coordinate, altitude, or UTC bounds.', 400, 'invalid_request');
+  const plannedMs = Date.parse(query.plannedUtc);
+  if (plannedMs < current.getTime() - 60 * 60 * 1_000 || plannedMs > current.getTime() + 48 * 60 * 60 * 1_000) throw new ApiError('Winds point query time is outside the supported planning horizon.', 400, 'invalid_request');
+  return regionForPoint(query);
+}
+
+function chooseApplicableProduct(products: ProductEntry[], unavailableCycles: WindsForecastCycle[], failures: unknown[], query: AloftPointQuery, current: Date): ApplicableProduct {
+  const boundedFailure = failures.find((failure): failure is ApiError => failure instanceof ApiError && failure.diagnostic !== undefined);
+  if (boundedFailure) throw new ApiError('Aviation Weather Center returned an invalid Winds/Temps response.', 502, 'upstream_invalid_response', boundedFailure.diagnostic);
+  if (unavailableCycles.length > 0) throw new ApiError('The point forecast is inconclusive because a supported forecast cycle could not be checked.', 503, 'upstream_unavailable');
+  if (products.some(({ provenance }) => provenance.status === 'stale_on_error')) throw new ApiError('Current Winds/Temps products could not be verified.', 503, 'upstream_unavailable');
+  const plannedMs = Date.parse(query.plannedUtc);
+  const candidates = products.flatMap((entry) => entry.product.forecasts
+    .filter((forecast) => Date.parse(forecast.issuedAt) <= current.getTime() && Date.parse(forecast.issuedAt) <= plannedMs && Date.parse(forecast.useFrom) <= plannedMs && plannedMs < Date.parse(forecast.useUntil))
+    .map((forecast) => ({ ...entry, forecast })))
+    .sort((a, b) => Date.parse(b.forecast.issuedAt) - Date.parse(a.forecast.issuedAt) || a.forecast.forecastCycle.localeCompare(b.forecast.forecastCycle));
+  const chosen = candidates[0];
+  if (!chosen) throw new ApiError('No fresh Winds/Temps product covers the requested point time.', 404, 'upstream_no_data');
+  const newestIssueCycles = new Set(candidates.filter((candidate) => candidate.forecast.issuedAt === chosen.forecast.issuedAt).map((candidate) => candidate.forecast.forecastCycle));
+  if (newestIssueCycles.size > 1) throw new ApiError('Multiple distinct Winds/Temps products with the same newest issue cover the requested time.', 502, 'upstream_invalid_response');
+  return chosen;
+}
+
+function selectPointStations(query: AloftPointQuery, chosen: ApplicableProduct, identities: Map<string, StationInfo>): PointStation[] {
+  const sameIssue = chosen.product.forecasts.filter((forecast) => forecast.issuedAt === chosen.forecast.issuedAt);
+  if (sameIssue.some((forecast) => forecast.useFrom !== chosen.forecast.useFrom || forecast.useUntil !== chosen.forecast.useUntil)) throw new ApiError('Aviation Weather Center returned mixed Winds/Temps periods for one product issue.', 502, 'upstream_invalid_response');
+  const stations = chosen.product.forecasts.filter((forecast) => forecast.issuedAt === chosen.forecast.issuedAt && forecast.useFrom === chosen.forecast.useFrom && forecast.useUntil === chosen.forecast.useUntil)
+    .flatMap((forecast) => {
+      const identity = identities.get(forecast.stationId);
+      const levels = verticalLevels(forecast.levels, query.altitudeFeetMsl);
+      if (!identity || !levels) return [];
+      const distance = distanceNm(query, identity.coordinates);
+      return distance <= MAX_POINT_DISTANCE_NM ? [{ forecast, identity, levels, distance, temperature: temperatureAtAltitude(forecast.levels, query.altitudeFeetMsl) }] : [];
+    }).sort((a, b) => a.distance - b.distance || a.forecast.stationId.localeCompare(b.forecast.stationId)).slice(0, MAX_POINT_SOURCES);
+  if (stations.length === 0) throw new ApiError('No reporting station with usable levels is within supported point coverage.', 404, 'upstream_no_data');
+  const exact = stations.find((station) => station.distance < 0.01);
+  return exact ? [exact] : stations;
+}
+
+function answerFromPointStations(query: AloftPointQuery, chosen: ApplicableProduct, stations: PointStation[]): AloftPointAnswer {
+  const inverseWeights = stations.map((station) => station.distance < 0.01 ? Number.POSITIVE_INFINITY : 1 / station.distance);
+  const weightTotal = inverseWeights.some((weight) => !Number.isFinite(weight)) ? 1 : inverseWeights.reduce((sum, weight) => sum + weight, 0);
+  const horizontalWeights = inverseWeights.map((weight) => Number.isFinite(weight) ? weight / weightTotal : 1);
+  let u = 0; let v = 0; let temperatureTotal = 0;
+  const temperatureAvailable = stations.every((station) => station.temperature !== null);
+  stations.forEach((station, index) => {
+    const weight = station.levels.weight;
+    const vector = interpolateVector(station.levels.lower, station.levels.upper, weight);
+    u += vector.u * horizontalWeights[index]!;
+    v += vector.v * horizontalWeights[index]!;
+    if (station.temperature !== null) temperatureTotal += station.temperature.value * horizontalWeights[index]!;
+  });
+  const wind = windFromVector(u, v);
+  const sources = stations.map((station, index) => ({ stationId: station.forecast.stationId, latitudeDeg: station.identity.coordinates.latitudeDeg, longitudeDeg: station.identity.coordinates.longitudeDeg,
+    distanceNauticalMiles: station.distance, horizontalWeight: horizontalWeights[index]!, lowerAltitudeFeet: station.levels.lower.altitudeFt, upperAltitudeFeet: station.levels.upper.altitudeFt, verticalWeight: station.levels.weight,
+    lowerWindFromDegTrue: station.levels.lower.windFromDegTrue, lowerWindSpeedKt: station.levels.lower.windSpeedKt!,
+    upperWindFromDegTrue: station.levels.upper.windFromDegTrue, upperWindSpeedKt: station.levels.upper.windSpeedKt!,
+    temperatureLowerAltitudeFeet: station.temperature?.lowerAltitudeFeet ?? null, temperatureUpperAltitudeFeet: station.temperature?.upperAltitudeFeet ?? null,
+    temperatureVerticalWeight: station.temperature?.verticalWeight ?? null,
+    temperatureLowerC: station.temperature?.lowerC ?? null, temperatureUpperC: station.temperature?.upperC ?? null }));
+  const vertical = stations.some((station) => station.levels.lower.altitudeFt !== station.levels.upper.altitudeFt);
+  const horizontal = stations.length > 1;
+  return { query, windFromDegTrue: wind.direction, windSpeedKt: wind.speed, temperatureC: temperatureAvailable ? temperatureTotal : null, issuedAt: chosen.forecast.issuedAt, useFrom: chosen.forecast.useFrom, useUntil: chosen.forecast.useUntil,
+    forecastCycle: chosen.forecast.forecastCycle, product: { region: chosen.product.region, cycle: chosen.product.cycle, cache: { status: chosen.provenance.status, source: chosen.provenance.source, ageSeconds: chosen.provenance.ageSeconds, fetchedAt: chosen.provenance.fetchedAt, expiresAt: chosen.provenance.expiresAt, freshnessRemainingSeconds: chosen.provenance.freshnessRemainingSeconds, servedAt: chosen.provenance.servedAt } }, sources, method: horizontal ? (vertical ? 'horizontal-vertical-vector' : 'horizontal-vector') : (vertical ? 'vertical-vector' : 'station-level'), requestId: '' };
 }
 
 export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: CacheStore | undefined, now: () => Date = () => new Date()): WindsDataAdapter {
@@ -391,18 +568,29 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
     }
   }
 
-  async function allProducts(region: WindsRegion): Promise<{ products: Array<{ product: CachedProduct; provenance: CacheProvenance }>; unavailableCycles: WindsForecastCycle[] }> {
+  async function allProducts(region: WindsRegion): Promise<{ products: Array<{ product: CachedProduct; provenance: CacheProvenance }>; unavailableCycles: WindsForecastCycle[]; failures: unknown[] }> {
     const results = await Promise.allSettled(FORECAST_CYCLES.map((cycle) => product(region, cycle)));
     const products: Array<{ product: CachedProduct; provenance: CacheProvenance }> = [];
     const unavailableCycles: WindsForecastCycle[] = [];
+    const failures: unknown[] = [];
     results.forEach((result, index) => {
       if (result.status === 'fulfilled') products.push(result.value);
-      else unavailableCycles.push(FORECAST_CYCLES[index]!);
+      else { unavailableCycles.push(FORECAST_CYCLES[index]!); failures.push(result.reason); }
     });
-    return { products, unavailableCycles };
+    return { products, unavailableCycles, failures };
   }
 
   return {
+    async getWindsPoint(query) {
+      const current = now();
+      const region = validateAloftPointQuery(query, current);
+      const { products, unavailableCycles, failures } = await allProducts(region);
+      const chosen = chooseApplicableProduct(products, unavailableCycles, failures, query, current);
+      const ids = [...new Set(chosen.product.forecasts.map((forecast) => forecast.stationId))].sort();
+      const identities = pointStationInfo(await stationCatalog(), ids, region);
+      const stations = selectPointStations(query, chosen, identities);
+      return answerFromPointStations(query, chosen, stations);
+    },
     async getWindsStations(route) {
       const region = regionForRoute(route);
       const { products, unavailableCycles } = await allProducts(region);
@@ -417,7 +605,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
         if (availability.has(key)) throw new ApiError('Aviation Weather Center returned ambiguous station and valid-time forecasts.', 502, 'upstream_invalid_response');
         availability.set(key, forecast);
       }
-      const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort());
+      const stationsById = stationInfo(await stationCatalog(), [...stationCycles.keys()].sort(), region);
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => {
         const info = stationsById.get(id);
         return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : [];
@@ -441,7 +629,7 @@ export function createAviationWeatherAdapter(fetcher: ServiceFetcher, cache: Cac
       for (const item of products) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
       requireUniqueForecastMatch(matches, unavailableCycles);
       const match = matches[0] as { forecast: DecodedForecast; product: CachedProduct; provenance: CacheProvenance };
-      const info = stationInfo(await stationCatalog(), [station]);
+      const info = stationInfo(await stationCatalog(), [station], region);
       const stationInfoValue = info.get(station);
       if (!stationInfoValue) throw new ApiError('The requested Winds/Temps station does not have verified Aviation Weather Center coordinates.', 502, 'upstream_invalid_response');
       const windsStation: WindsStation = { id: station, name: stationInfoValue.name, coordinates: stationInfoValue.coordinates, elevationFt: stationInfoValue.elevationFt, region: match.product.region, availableForecastCycles: [match.forecast.forecastCycle], source: 'aviationweather' };

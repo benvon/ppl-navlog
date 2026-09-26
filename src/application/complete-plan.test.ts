@@ -21,7 +21,7 @@ const dependencies = (overrides: Partial<CompletePlanDependencies> = {}): Comple
   },
   calculations: {
     calculate: async ({ routeLegs, weather }) => ({
-      calculationSnapshot: { calculatedRouteLegCount: routeLegs.length, forecast: weather.selectedForecastValidTimeUtc },
+      calculationSnapshot: { calculatedRouteLegCount: routeLegs.length, forecast: weather.selectedForecastValidTimeUtc ?? null },
       warnings: [],
     }),
   },
@@ -87,6 +87,28 @@ describe("complete plan orchestration", () => {
     };
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({ calculations: createVerticalProfileCalculationEngine() }));
     expect(result).toMatchObject({ status: "blocked", reason: "unsupported-plan-input", message: expect.stringMatching(/transition-phase allocation/iu) });
+  });
+
+  it("does not run legacy final timing validation for a finalized progressive calculation", async () => {
+    const draft = { ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" };
+    const snapshot = { schema: "complete-navlog/v1", status: "calculated", navlog: { rows: [] } } as const;
+    const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies({
+      weather: { resolve: async () => ({
+        snapshotIds: [], phaseWindResolver: { resolveEffectiveWind: () => success(resolvedWind.value) },
+        warnings: [], provenance: { source: "fixture" }, progressiveCalculationSnapshot: snapshot,
+        validateCalculatedTiming: () => "legacy timing hook must not run",
+      }) },
+      calculations: { calculate: async () => ({ calculationSnapshot: snapshot, warnings: [] }) },
+    }));
+    expect(result).toMatchObject({ status: "ready", calculationSnapshot: snapshot });
+  });
+
+  it("preserves infeasible allocation evidence without applying weather-time validation", async () => {
+    const result = await calculateCompletePlan({ ...planDraft(), departureTimeUtc: "2026-09-21T12:00:00.000Z" }, aircraftProfile(), dependencies({
+      weather: { resolve: async () => ({ snapshotIds: [], phaseWindResolver: { resolveEffectiveWind: () => success(resolvedWind.value) }, warnings: [], provenance: { source: "fixture" }, validateCalculatedTiming: () => "timing should not be inspected" }) },
+      calculations: { calculate: async () => ({ calculationSnapshot: { status: "infeasible-phase-allocation" }, warnings: ["No navlog rows were produced."] }) },
+    }));
+    expect(result).toMatchObject({ status: "ready", calculationSnapshot: { status: "infeasible-phase-allocation" } });
   });
 
   it("resolves each descent convergence iteration at its candidate TOD instead of the final user-leg origin", async () => {

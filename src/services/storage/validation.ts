@@ -382,12 +382,22 @@ function validateWeatherSelection(value: unknown, issues: ValidationIssue[], now
     add(issues, "$.weatherSelection", "must be an object");
     return;
   }
-  utcInstant(value.forecastValidTimeUtc, "$.weatherSelection.forecastValidTimeUtc", issues);
-  if (value.surfaceWeatherIcao !== undefined && (typeof value.surfaceWeatherIcao !== "string" || !/^[A-Z0-9]{4}$/.test(value.surfaceWeatherIcao))) {
-    add(issues, "$.weatherSelection.surfaceWeatherIcao", "must be an uppercase four-character ICAO identifier when present");
-  }
-  if (utcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues)) {
-    checkNoFutureTimestamp(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
+  validateOptionalUtcInstant(value.forecastValidTimeUtc, "$.weatherSelection.forecastValidTimeUtc", issues);
+  validateOptionalUtcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
+  validateOptionalWeatherIcao(value.departureMetarIcao, "$.weatherSelection.departureMetarIcao", issues);
+  validateOptionalWeatherIcao(value.destinationTafIcao, "$.weatherSelection.destinationTafIcao", issues);
+  validateOptionalWeatherIcao(value.destinationMetarIcao, "$.weatherSelection.destinationMetarIcao", issues);
+  validateOptionalWeatherIcao(value.surfaceWeatherIcao, "$.weatherSelection.surfaceWeatherIcao", issues);
+}
+
+function validateOptionalUtcInstant(value: unknown, path: string, issues: ValidationIssue[], now?: Date): void {
+  if (value === undefined) return;
+  if (utcInstant(value, path, issues) && now !== undefined) checkNoFutureTimestamp(value, path, issues, now);
+}
+
+function validateOptionalWeatherIcao(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (value !== undefined && (typeof value !== "string" || !/^[A-Z0-9]{4}$/.test(value))) {
+    add(issues, path, "must be an uppercase four-character ICAO identifier when present");
   }
 }
 

@@ -1,6 +1,9 @@
 import type {
   ApiErrorCode,
   ApiErrorPayload,
+  AloftPointAnswer,
+  AloftPointQuery,
+  AloftSourceWeight,
   CacheProvenance,
   MetarData,
   MetarSuccessPayload,
@@ -13,8 +16,10 @@ import type {
   WindsSourceProvenance,
   WindsStation,
   WindsStationsSuccessPayload,
+  TafAnswer,
+  TafWindGroup,
 } from "../../../worker/api/contracts";
-import type { Coordinate } from "../../domain/coordinates";
+import { canonicalPointCoordinateDegrees, type Coordinate } from "../../domain/coordinates";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -30,15 +35,19 @@ export interface WindsTransportClient {
 }
 
 /** Compatible Worker METAR boundary, kept separate so aloft-only adapters remain testable. */
+export interface AloftPointTransportClient { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer>; }
+
 export interface MetarTransportClient {
   fetchMetar(icao: string): Promise<MetarSuccessPayload>;
 }
+export interface TafTransportClient { fetchTaf(icao: string): Promise<TafAnswer>; }
 
 export class WindsClientError extends Error {
   public constructor(
     readonly code: "INVALID_INPUT" | "TRANSPORT_FAILURE" | "INVALID_RESPONSE" | "API_FAILURE",
     message: string,
     readonly requestId?: string,
+    readonly apiCode?: ApiErrorCode,
   ) {
     super(message);
     this.name = "WindsClientError";
@@ -183,7 +192,64 @@ const isMetar = (value: unknown): value is MetarData =>
     isUtcMilliseconds(value.fetchedAt), nullable(value.observedAt, isUtcMilliseconds),
   );
 
+const isTafWind = (value: Record<string, unknown>): boolean =>
+  nullable(value.windFromDegTrue, (n) => isBoundedInteger(n, 0, 360)) &&
+  nullable(value.windSpeedKt, (n) => isBoundedInteger(n, 0, 199)) && nullable(value.gustKt, (n) => isBoundedInteger(n, 0, 199)) && (value.windSpeedKt !== null || value.gustKt === null) &&
+  (value.windDirectionType === "fixed" ? value.windFromDegTrue !== null && value.windSpeedKt !== null : value.windDirectionType === "variable" ? value.windFromDegTrue === null && value.windSpeedKt !== null : value.windDirectionType === "missing" && value.windFromDegTrue === null && value.windSpeedKt === null);
+const isTafGroup = (value: unknown): value is TafWindGroup => isRecord(value) &&
+  oneOf(value.kind, ["prevailing", "FM", "TEMPO", "PROB"]) && oneOf(value.windDirectionType, ["fixed", "variable", "missing"]) && isUtcMilliseconds(value.fromUtc) && isUtcMilliseconds(value.untilUtc) &&
+  Date.parse(value.fromUtc) < Date.parse(value.untilUtc) && isTafWind(value) && nullable(value.probabilityPercent, (n) => n === 30 || n === 40) &&
+  (value.kind === "PROB" ? value.probabilityPercent !== null : value.probabilityPercent === null) && isString(value.raw, 4096);
+const isTafPayload = (value: unknown): value is TafAnswer => isRecord(value) &&
+  isString(value.stationIcao, 4) && /^[A-Z0-9]{4}$/.test(value.stationIcao) && isUtcMilliseconds(value.issuedAt) &&
+  isUtcMilliseconds(value.validFrom) && isUtcMilliseconds(value.validUntil) && Date.parse(value.validFrom) < Date.parse(value.validUntil) &&
+  isString(value.rawTaf, 4096) && isBoundedArray(value.groups, 100, isTafGroup) &&
+  value.groups.filter((g) => g.kind === "prevailing").length === 1 && value.groups.every((g) => Date.parse(g.fromUtc) >= Date.parse(value.validFrom as string) && Date.parse(g.untilUtc) <= Date.parse(value.validUntil as string)) && isRequestId(value.requestId);
+
 const isRequestId = (value: unknown): value is string => isString(value, 128) && /^[0-9a-f-]{8,128}$/i.test(value);
+
+const POINT_QUERY_KEYS = ["latitudeDeg", "longitudeDeg", "altitudeFeetMsl", "plannedUtc"] as const;
+const POINT_PRODUCT_KEYS = ["region", "cycle", "cache"] as const;
+const POINT_CACHE_KEYS = ["status", "source", "ageSeconds", "fetchedAt", "expiresAt", "freshnessRemainingSeconds", "servedAt"] as const;
+const POINT_SOURCE_KEYS = ["stationId", "latitudeDeg", "longitudeDeg", "distanceNauticalMiles", "horizontalWeight", "lowerAltitudeFeet", "upperAltitudeFeet", "verticalWeight", "lowerWindFromDegTrue", "lowerWindSpeedKt", "upperWindFromDegTrue", "upperWindSpeedKt", "temperatureLowerAltitudeFeet", "temperatureUpperAltitudeFeet", "temperatureVerticalWeight", "temperatureLowerC", "temperatureUpperC"] as const;
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+const isAloftPointQuery = (value: unknown): value is AloftPointQuery => isRecord(value) && hasExactKeys(value, POINT_QUERY_KEYS) &&
+  isBoundedNumber(value.latitudeDeg, -90, 90) && isBoundedNumber(value.longitudeDeg, -180, 180) &&
+  isBoundedInteger(value.altitudeFeetMsl, 3000, 53000) && isUtcMilliseconds(value.plannedUtc);
+const isPointSourceIdentity = (value: Record<string, unknown>): boolean => typeof value.stationId === "string" && /^[A-Z0-9]{3}$/.test(value.stationId) &&
+  isBoundedNumber(value.latitudeDeg, -90, 90) && isBoundedNumber(value.longitudeDeg, -180, 180) && isBoundedNumber(value.distanceNauticalMiles, 0, 100);
+const isPointWindWeights = (value: Record<string, unknown>): boolean => isBoundedNumber(value.horizontalWeight, 0, 1) &&
+  isBoundedInteger(value.lowerAltitudeFeet, 0, 53000) && isBoundedInteger(value.upperAltitudeFeet, value.lowerAltitudeFeet as number, 53000) && isBoundedNumber(value.verticalWeight, 0, 1) &&
+  isPointWind(value.lowerWindFromDegTrue, value.lowerWindSpeedKt) && isPointWind(value.upperWindFromDegTrue, value.upperWindSpeedKt);
+const isPointTemperatureWeights = (value: Record<string, unknown>): boolean => {
+  if ([value.temperatureLowerAltitudeFeet, value.temperatureUpperAltitudeFeet, value.temperatureVerticalWeight, value.temperatureLowerC, value.temperatureUpperC].every((item) => item === null)) return true;
+  return isBoundedInteger(value.temperatureLowerAltitudeFeet, 0, 53000) &&
+    isBoundedInteger(value.temperatureUpperAltitudeFeet, value.temperatureLowerAltitudeFeet as number, 53000) &&
+    isBoundedNumber(value.temperatureVerticalWeight, 0, 1) && isBoundedNumber(value.temperatureLowerC, -100, 100) && isBoundedNumber(value.temperatureUpperC, -100, 100);
+};
+const isAloftSourceWeight = (value: unknown): value is AloftSourceWeight => isRecord(value) && hasExactKeys(value, POINT_SOURCE_KEYS) &&
+  isPointSourceIdentity(value) && isPointWindWeights(value) && isPointTemperatureWeights(value);
+const isPointSourceSet = (value: unknown): value is AloftSourceWeight[] => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3 || !value.every(isAloftSourceWeight)) return false;
+  return Math.abs(value.reduce((total, source) => total + source.horizontalWeight, 0) - 1) <= 0.001;
+};
+const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && value >= 0 && value <= 360;
+const isPointWind = (direction: unknown, speed: unknown): boolean => isBoundedNumber(speed, 0, 199) &&
+  ((speed === 0 && direction === null) || isPointDirection(direction));
+const isPointCacheProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_CACHE_KEYS) &&
+  oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh"]) && oneOf(value.source, ["edge", "kv", "upstream"]) &&
+  isFiniteNumber(value.ageSeconds) && value.ageSeconds >= 0 && isUtcMilliseconds(value.fetchedAt) && isUtcMilliseconds(value.expiresAt) &&
+  isFiniteNumber(value.freshnessRemainingSeconds) && value.freshnessRemainingSeconds > 0 && isUtcMilliseconds(value.servedAt);
+const isPointProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_PRODUCT_KEYS) &&
+  isRegion(value.region) && isForecastCycle(value.cycle) && isPointCacheProduct(value.cache);
+const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMilliseconds(value.issuedAt) && isUtcMilliseconds(value.useFrom) && isUtcMilliseconds(value.useUntil) &&
+  Date.parse(value.issuedAt) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse(value.useFrom) < Date.parse(value.useUntil) &&
+  Date.parse(value.useFrom) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse((value.query as AloftPointQuery).plannedUtc) < Date.parse(value.useUntil);
+const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "product", "requestId"] as const;
+const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && hasExactKeys(value, POINT_ANSWER_KEYS) &&
+  isAloftPointQuery(value.query) && isPointWind(value.windFromDegTrue, value.windSpeedKt) && nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)) &&
+  isPointAnswerTiming(value) && isForecastCycle(value.forecastCycle) && isPointSourceSet(value.sources) &&
+  oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]) && isPointProduct(value.product) && isRequestId(value.requestId);
 
 const isStationsPayload = (value: unknown): value is WindsStationsSuccessPayload =>
   isRecord(value) && all(
@@ -221,6 +287,8 @@ const defaultBaseUrl = (): string => {
   }
   return globalThis.location.origin;
 };
+
+const samePointQuery = (a: AloftPointQuery, b: AloftPointQuery): boolean => a.latitudeDeg === b.latitudeDeg && a.longitudeDeg === b.longitudeDeg && a.altitudeFeetMsl === b.altitudeFeetMsl && a.plannedUtc === b.plannedUtc;
 
 const ensureRoute = (route: readonly Coordinate[]): void => {
   if (route.length < 1 || route.length > 100 || !route.every((point) => isFiniteNumber(point.latitude) && point.latitude >= -90 && point.latitude <= 90 && isFiniteNumber(point.longitude) && point.longitude >= -180 && point.longitude <= 180)) {
@@ -305,7 +373,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
   }
 };
 
-export class WorkerWindsClient implements WindsTransportClient, MetarTransportClient {
+export class WorkerWindsClient implements WindsTransportClient, MetarTransportClient, TafTransportClient, AloftPointTransportClient {
   private readonly baseUrl: URL;
 
   public constructor(
@@ -351,6 +419,26 @@ export class WorkerWindsClient implements WindsTransportClient, MetarTransportCl
     return payload;
   }
 
+  public async fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> {
+    if (!isAloftPointQuery(query)) throw new WindsClientError("INVALID_INPUT", "Winds point query must include a bounded coordinate, supported MSL altitude, and canonical UTC instant.");
+    const canonicalQuery = { ...query, latitudeDeg: canonicalPointCoordinateDegrees(query.latitudeDeg), longitudeDeg: canonicalPointCoordinateDegrees(query.longitudeDeg) };
+    const url = new URL("/api/weather/winds/point", this.baseUrl);
+    url.searchParams.set("lat", canonicalQuery.latitudeDeg.toString());
+    url.searchParams.set("lon", canonicalQuery.longitudeDeg.toString());
+    url.searchParams.set("altitudeFeetMsl", String(canonicalQuery.altitudeFeetMsl));
+    url.searchParams.set("plannedUtc", canonicalQuery.plannedUtc);
+    const payload = await this.requestJson(url);
+    if (!isAloftPointAnswer(payload) || !samePointQuery(payload.query, canonicalQuery)) throw new WindsClientError("INVALID_RESPONSE", "Winds point response did not match the requested query and documented contract.");
+    return payload;
+  }
+
+  public async fetchTaf(icao: string): Promise<TafAnswer> {
+    const normalizedIcao = ensureIcao(icao);
+    const payload = await this.requestJson(new URL(`/api/weather/taf/${normalizedIcao}`, this.baseUrl));
+    if (!isTafPayload(payload) || payload.stationIcao !== normalizedIcao) throw new WindsClientError("INVALID_RESPONSE", "TAF response did not match the documented contract.");
+    return payload;
+  }
+
   private async requestJson(url: URL): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -364,7 +452,7 @@ export class WorkerWindsClient implements WindsTransportClient, MetarTransportCl
       const payload = await readBoundedJson(response);
       if (!response.ok) {
         if (isErrorPayload(payload)) {
-          throw new WindsClientError("API_FAILURE", `Winds API request failed: ${payload.code}.`, payload.requestId);
+          throw new WindsClientError("API_FAILURE", `Winds API request failed: ${payload.code}.`, payload.requestId, payload.code);
         }
         throw new WindsClientError("INVALID_RESPONSE", "Winds API returned an unsuccessful response without a valid error contract.");
       }

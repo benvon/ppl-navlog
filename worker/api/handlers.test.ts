@@ -8,6 +8,7 @@ import type { WindsStation } from './contracts';
 const fetcher: ServiceFetcher = { async fetch(request) { return Response.json(new URL(request.url).pathname === '/api/airport' ? { ...runwayPickerAirportFixture, cache: runwayPickerCacheFixture } : { ...runwayPickerMetarFixture, cache: runwayPickerCacheFixture }); } };
 const aviationData = createRunwayPickerAdapter(fetcher, 'https://runway-picker.internal');
 const windsData: WindsDataAdapter = {
+  async getWindsPoint() { throw new Error('not used in legacy handler tests'); },
   async getWindsStations(_route) {
     return { stations: [{ id: 'BRL', name: 'Burlington', coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: 'us', availableForecastCycles: ['06'], source: 'aviationweather' }], forecasts: [{ stationId: 'BRL', forecastCycle: '06', issuedAt: '2026-09-21T18:00:00.000Z', validAt: '2026-09-22T00:00:00.000Z', useFrom: '2026-09-21T20:00:00.000Z', useUntil: '2026-09-22T03:00:00.000Z' }], unavailableForecastCycles: [], provenance: [{ status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: '2026-09-21T18:00:00.000Z', expiresAt: '2026-09-21T18:20:00.000Z', freshnessRemainingSeconds: 1200, servedAt: '2026-09-21T18:00:00.000Z', ttlSeconds: 1200, maxPayloadAgeSeconds: 7200, key: 'winds:us:06', resource: 'winds-temps' }] };
   },
