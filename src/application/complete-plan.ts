@@ -4,8 +4,7 @@ import type { PlanDraft, RoutePoint, UserRouteLeg, JsonValue, WeatherReferenceSn
 import type { AircraftProfile } from "../domain/aircraft";
 import type { Coordinate } from "../domain/coordinates";
 import type { LoadedWindsData } from "../services/weather/winds-adapter";
-import type { AloftPointAnswer, MetarSuccessPayload, TafAnswer } from "../../worker/api/contracts";
-import type { SelectedArrivalWind } from "./arrival-taf-wind";
+import type { AloftPointAnswer, MetarSuccessPayload } from "../../worker/api/contracts";
 import type { NauticalMiles, TrueCourse } from "../domain/units";
 import { nauticalMiles } from "../domain/units";
 import {
@@ -40,10 +39,7 @@ export interface CompletePlanWeather {
   readonly selectedForecastValidTimeUtc?: string;
   /** Route-indexed point answers retained only for this current calculation. */
   readonly routeWeatherSamples?: readonly RouteWeatherSample[];
-  /** Destination TAF selection evidence for the terminal/pattern assumption. */
-  readonly arrivalTafWind?: SelectedArrivalWind;
   readonly departureMetarPayload?: MetarSuccessPayload;
-  readonly destinationTafPayload?: TafAnswer;
   /** Finalized one-pass route calculation, produced while advancing through weather events. */
   readonly progressiveCalculationSnapshot?: JsonValue;
   /** Legacy calculation timing hook; progressive route results are already final. */

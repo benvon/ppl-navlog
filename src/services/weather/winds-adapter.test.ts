@@ -411,6 +411,16 @@ describe("WorkerWindsAdapter", () => {
     await expect(extraProductField.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     const invalidCacheAge = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, product: { ...answer.product, cache: { ...answer.product.cache, ageSeconds: -1 } } }) }, "https://navlog.example");
     await expect(invalidCacheAge.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    for (const status of ["stale_on_error", "stale_while_refresh"] as const) {
+      const staleCacheStatus = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, product: { ...answer.product, cache: { ...answer.product.cache, status, source: "stale" } } }) }, "https://navlog.example");
+      await expect(staleCacheStatus.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    }
+    for (const freshnessRemainingSeconds of [0, -1]) {
+      const staleCacheFreshness = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, product: { ...answer.product, cache: { ...answer.product.cache, freshnessRemainingSeconds } } }) }, "https://navlog.example");
+      await expect(staleCacheFreshness.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    }
+    const staleCacheSource = new WorkerWindsClient({ fetch: async () => Response.json({ ...answer, product: { ...answer.product, cache: { ...answer.product.cache, source: "stale" } } }) }, "https://navlog.example");
+    await expect(staleCacheSource.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
 
     const preciseQuery = { ...query, latitudeDeg: 55.123456789012, longitudeDeg: -179.123456789012 };
     const sentCoordinateLengths: number[] = [];

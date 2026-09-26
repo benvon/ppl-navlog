@@ -7,7 +7,7 @@ The inspector stays read-only and does not silently select a leg. Draft cruise T
 ## Behavior
 
 - With no calculated value selected, the inspector shows a short prompt and no leg defaults, override controls, or first-leg fallback.
-- Selecting a calculated navlog value shows that row's stored value, point station identities, issue/use periods, wind and temperature altitude levels, interpolation weights, vector/leg math, destination TAF candidates and chosen group, and planning assumptions. Weather and user-provided strings render as text nodes.
+- Selecting a calculated navlog value shows that row's stored value, point station identities, issue/use periods, wind and temperature altitude levels, interpolation weights, vector/leg math, and planning assumptions. Weather and user-provided strings render as text nodes.
 - Changing any pilot input, switching plans, starting an update, or failing an update clears the current result and selected evidence. Submitted pilot inputs are saved before weather requests; a failure remains visible until a later successful update. Reload begins without weather results and requires a new update.
 - The navlog shows current-weather validity, calculated values, and relevant planning and fuel warnings. It contains no station identities, raw TAF, source periods, interpolation weights, or calculation traces. Calculated values remain selectable for the inspector.
 - The route editor lists each saved draft leg by origin and destination and offers an explicit `Edit TAS` action for that leg. No leg is selected by default, and opening the editor never chooses the first leg implicitly.

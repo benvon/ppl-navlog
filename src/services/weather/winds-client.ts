@@ -237,9 +237,9 @@ const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && v
 const isPointWind = (direction: unknown, speed: unknown): boolean => isBoundedNumber(speed, 0, 199) &&
   ((speed === 0 && direction === null) || isPointDirection(direction));
 const isPointCacheProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_CACHE_KEYS) &&
-  oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh", "stale_while_refresh", "stale_on_error"]) && oneOf(value.source, ["edge", "kv", "upstream", "stale"]) &&
+  oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh"]) && oneOf(value.source, ["edge", "kv", "upstream"]) &&
   isFiniteNumber(value.ageSeconds) && value.ageSeconds >= 0 && isUtcMilliseconds(value.fetchedAt) && isUtcMilliseconds(value.expiresAt) &&
-  isFiniteNumber(value.freshnessRemainingSeconds) && value.freshnessRemainingSeconds >= 0 && isUtcMilliseconds(value.servedAt);
+  isFiniteNumber(value.freshnessRemainingSeconds) && value.freshnessRemainingSeconds > 0 && isUtcMilliseconds(value.servedAt);
 const isPointProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_PRODUCT_KEYS) &&
   isRegion(value.region) && isForecastCycle(value.cycle) && isPointCacheProduct(value.cache);
 const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMilliseconds(value.issuedAt) && isUtcMilliseconds(value.useFrom) && isUtcMilliseconds(value.useUntil) &&

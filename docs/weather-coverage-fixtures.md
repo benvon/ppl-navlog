@@ -28,16 +28,16 @@ availability.
 
 ## Progressive aloft requests and route intervals (2026-09-25)
 
-Each Update plan makes exactly one point request per pilot waypoint and per generated top-of-climb (TOC) or top-of-descent (TOD). With the supported maximum of 25 checkpoints plus departure and destination, and both generated points, the upper bound is 29 requests. The examples below count pilot points; add one request for each generated TOC/TOD included in a plan. Requests occur in route order. Each point's weather calculates the following interval only: A's answer fully calculates A→B, while B's answer begins B→next. The planner carries position, altitude, UTC, fuel, and other completed state forward without recalculating prior intervals. The next point's weather cannot change a completed leg. One arrival estimate may set the next request time only.
+Each Update plan makes exactly one point request per pilot waypoint that starts an interval and per generated top-of-climb (TOC) or top-of-descent (TOD). The destination starts no interval and receives no aloft request. With the supported maximum of 25 checkpoints plus departure and both generated points, the upper bound is 28 requests. The examples below count pilot start points; add one request for each generated TOC/TOD included in a plan. Requests occur in route order. Each point's weather calculates the following interval only: A's answer fully calculates A→B, while B's answer begins B→next. The planner carries position, altitude, UTC, fuel, and other completed state forward without recalculating prior intervals. The next point's weather cannot change a completed leg. One arrival estimate may set the next request time only.
 
-TOC is placed at the planned climb-altitude crossing. TOD placement uses planned true airspeed and descent rate without wind; the weather fetched at TOD calculates the actual descent. If descent cannot reach destination target altitude, planning stops with an explanation. Departure METAR remains the surface anchor. At TOD, select the destination TAF group using projected arrival and apply it to the terminal/pattern row. TEMPO and PROB groups apply when their complete start/end validity interval contains projected arrival; choose the worst-case applicable wind. Completed arrival must remain in the same selected group's full interval, or the plan stops without recalculation.
+TOC is placed at the planned climb-altitude crossing. TOD placement uses planned true airspeed and descent rate without wind; the weather fetched at TOD calculates the following descent interval. If descent cannot reach destination target altitude, planning stops with an explanation. Departure METAR remains the surface anchor for the initial climb. The final segment uses weather fetched at its starting waypoint or generated TOD, like every other segment. Destination TAF/METAR are not required by the active planner.
 
-| Representative geometry | Coordinates in route order | Distance | Pilot points | Base aloft calls | Calls with TOC and TOD |
+| Representative geometry | Coordinates in route order | Distance | Pilot start points | Base aloft calls | Calls with TOC and TOD |
 | --- | --- | ---: | ---: | ---: | ---: |
-| KORD–checkpoint–KJVL short CONUS fixture | 41.9742, -87.9073 → 41.8000, -88.2000 → 42.6200, -89.0400 | 79 NM | 3 | 3 | 5 |
-| ABQ–ATL long CONUS station-pair geometry | 35.0402, -106.6090 → 33.6407, -84.4277 | 1,101 NM | 2 | 2 | 4 |
-| FAI–BRW Alaska station-pair geometry | 64.8031, -147.8761 → 71.2837, -156.7843 | 436 NM | 2 | 2 | 4 |
-| ITO–HNL Hawaii station-pair geometry | 19.7191, -155.0490 → 21.3187, -157.9224 | 188 NM | 2 | 2 | 4 |
+| KORD–checkpoint–KJVL short CONUS fixture | 41.9742, -87.9073 → 41.8000, -88.2000 → 42.6200, -89.0400 | 79 NM | 2 | 2 | 4 |
+| ABQ–ATL long CONUS station-pair geometry | 35.0402, -106.6090 → 33.6407, -84.4277 | 1,101 NM | 1 | 1 | 3 |
+| FAI–BRW Alaska station-pair geometry | 64.8031, -147.8761 → 71.2837, -156.7843 | 436 NM | 1 | 1 | 3 |
+| ITO–HNL Hawaii station-pair geometry | 19.7191, -155.0490 → 21.3187, -157.9224 | 188 NM | 1 | 1 | 3 |
 
 The latter three are station-pair geometries, not validated flight plans or proof of forecast coverage. The KORD checkpoint coordinates and distance are from the existing KORD→KJVL mixed-altitude fixture; distances are great-circle geometry rounded to the nearest nautical mile. FAI–BRW midpoint is outside the Worker 100 NM station limit; CONUS station fixtures are sparse. Every requested pilot or generated point must be individually resolved by the Worker. Each interval's report must cover its request UTC and calculated interval arrival; a missing or unusable report stops the plan before the next request. The calculation does not refetch or substitute another period.
 
@@ -57,4 +57,4 @@ The local development Worker queried current official AWC products after the reg
 | Sparse Alaska FAI–BRW gap, 4,500 ft | 404 `upstream_no_data` | 164 bytes | 14 ms | No verified source within the supported bound |
 | KJVL destination TAF | 200 | 1,302 bytes | 78 ms | Prevailing, PROB, FM groups |
 
-The Denver failures at 4,500 and 7,500 ft demonstrate that being inside a published region does not guarantee usable altitude levels. The 9,000-ft point resolved without extrapolation. The local TAF reported a 2026-09-24 23:30 UTC issue and validity from 2026-09-25 00:00 to 2026-09-26 00:00 UTC. A local Worker smoke does not test the deployed Worker binding or a complete browser flight plan.
+The Denver failures at 4,500 and 7,500 ft demonstrate that being inside a published region does not guarantee usable altitude levels. The 9,000-ft point resolved without extrapolation. The local TAF reported a 2026-09-24 23:30 UTC issue and validity from 2026-09-25 00:00 to 2026-09-26 00:00 UTC; this was a separate API smoke and the active planner does not request a destination TAF. A local Worker smoke does not test the deployed Worker binding or a complete browser flight plan.

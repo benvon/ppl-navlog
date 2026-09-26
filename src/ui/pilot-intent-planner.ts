@@ -9,22 +9,22 @@ import { parseCompactCoordinate } from "../domain/coordinate-input";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import type { PlanDraft, PlanRevision } from "../domain/route";
-import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type TafTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
+import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
   readonly airportLookup: AirportLookup;
-  readonly winds: WindsTransportClient & MetarTransportClient & TafTransportClient & AloftPointTransportClient;
+  readonly winds: WindsTransportClient & MetarTransportClient & AloftPointTransportClient;
   readonly ids: UseCaseIds;
   readonly clock: UseCaseClock;
 }
 
-const fieldNames = ["plan-title", "departure-time", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao", "destination-metar-icao", "destination-taf-icao"] as const;
+const fieldNames = ["plan-title", "departure-time", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
 type FieldName = typeof fieldNames[number];
 const initialFields: Readonly<Record<FieldName, string>> = {
   "plan-title": "New study route", "departure-time": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
-  "departure-icao": "", "destination-icao": "", "departure-metar-icao": "", "destination-metar-icao": "", "destination-taf-icao": "",
+  "departure-icao": "", "destination-icao": "", "departure-metar-icao": "",
 };
 
 export function renderPilotIntentPlanner(root: HTMLElement, dependencies: PilotIntentPlannerDependencies): void {
@@ -75,7 +75,7 @@ class PilotIntentPlanner {
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     fieldNames.forEach((name) => {
-      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)", "destination-metar-icao": "Destination METAR ICAO alternate (used only if destination has no METAR)", "destination-taf-icao": "Destination TAF ICAO alternate (blank uses airport ICAO)" };
+      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
       form.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
     const profileLabel = document.createElement("label"); profileLabel.append("Aircraft profile ");
@@ -387,7 +387,7 @@ class PilotIntentPlanner {
       destination,
       cruiseAltitudesFeetMsl: current.cruiseAltitudeTexts.map(Number),
     }, this.dependencies.ids);
-    const weatherSelection = weatherSelectionFromInputs(raw, departure.icao, destination.icao);
+    const weatherSelection = weatherSelectionFromInputs(raw, departure.icao);
     const draft = createPlanDraft({
       title: raw["plan-title"] ?? "",
       departureTimeUtc,
@@ -438,20 +438,16 @@ class PilotIntentPlanner {
     return draft;
   }
   private async fetchEndpointWeather(draft: PlanDraft) {
-    const departure = draft.route.points[0], destination = draft.route.points.at(-1);
-    if (departure?.kind !== "airport" || destination?.kind !== "airport") throw new Error("Route weather requires airport departure and destination endpoints.");
-    const [departureMetar, destinationTaf, destinationMetar] = await Promise.all([
-      fetchRequiredMetar(this.dependencies.winds, departure.icao, draft.weatherSelection?.departureMetarIcao),
-      fetchRequiredTaf(this.dependencies.winds, destination.icao, draft.weatherSelection?.destinationTafIcao),
-      fetchDestinationMetar(this.dependencies.winds, destination.icao, draft.weatherSelection?.destinationMetarIcao),
-    ]);
-    return { departureMetar, destinationMetar, destinationTaf };
+    const departure = draft.route.points[0];
+    if (departure?.kind !== "airport") throw new Error("Route weather requires an airport departure endpoint.");
+    const departureMetar = await fetchRequiredMetar(this.dependencies.winds, departure.icao, draft.weatherSelection?.departureMetarIcao);
+    return { departureMetar };
   }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
-    const { departureMetar, destinationMetar, destinationTaf } = await this.fetchEndpointWeather(draft);
+    const { departureMetar } = await this.fetchEndpointWeather(draft);
     const solution = await resolveRouteWeather(draft, profile, {
       fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
-    }, { departureMetar, destinationMetar, destinationTaf });
+    }, { departureMetar });
     const calc = await calculateCompletePlan(draft, profile, {
       weather: { resolve: async (): Promise<CompletePlanWeather> => solution.weather },
       calculations: createFullNavlogCalculationEngine(),
@@ -486,25 +482,8 @@ class PilotIntentPlanner {
   }
 }
 
-async function fetchDestinationMetar(
-  client: MetarTransportClient,
-  destinationIcao: string,
-  alternateIcao: string | undefined,
-): Promise<Awaited<ReturnType<MetarTransportClient["fetchMetar"]>> | undefined> {
-  if (!/^[A-Z0-9]{4}$/.test(destinationIcao)) return fetchMetarAlternate(client, alternateIcao);
-  try { return await client.fetchMetar(destinationIcao); }
-  catch (error) {
-    if (!(error instanceof WindsClientError) || error.apiCode !== "upstream_no_data") return undefined;
-    return fetchMetarAlternate(client, alternateIcao);
-  }
-}
-
 async function fetchRequiredMetar(client: MetarTransportClient, airportIdentifier: string, alternateIcao: string | undefined) {
   return fetchRequiredEndpoint(client.fetchMetar.bind(client), airportIdentifier, alternateIcao, "departure METAR");
-}
-
-async function fetchRequiredTaf(client: TafTransportClient, airportIdentifier: string, alternateIcao: string | undefined) {
-  return fetchRequiredEndpoint(client.fetchTaf.bind(client), airportIdentifier, alternateIcao, "destination TAF");
 }
 
 async function fetchRequiredEndpoint<T>(
@@ -524,26 +503,15 @@ async function fetchRequiredEndpoint<T>(
   }
 }
 
-async function fetchMetarAlternate(
-  client: MetarTransportClient,
-  alternateIcao: string | undefined,
-): Promise<Awaited<ReturnType<MetarTransportClient["fetchMetar"]>> | undefined> {
-  if (alternateIcao === undefined) return undefined;
-  try { return await client.fetchMetar(alternateIcao); }
-  catch { return undefined; }
-}
-
 function localUtcTextToIso(value: string): string {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(value)) throw new Error("Enter planned departure as a date and time in UTC.");
   const parsed = new Date(`${value}:00Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 16) !== value) throw new Error("Enter a real planned departure date and time in UTC.");
   return parsed.toISOString();
 }
-function buildWeatherSelection(departureMetarIcao: string | undefined, destinationTafIcao: string | undefined, destinationMetarIcao?: string) {
+function buildWeatherSelection(departureMetarIcao: string | undefined) {
   return {
     ...(departureMetarIcao === undefined ? {} : { departureMetarIcao }),
-    ...(destinationTafIcao === undefined ? {} : { destinationTafIcao }),
-    ...(destinationMetarIcao === undefined ? {} : { destinationMetarIcao }),
   };
 }
 function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record<string, string> {
@@ -553,25 +521,14 @@ function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record
     "departure-metar-icao": Object.hasOwn(rawFields, "departure-metar-icao")
       ? rawFields["departure-metar-icao"] ?? ""
       : rawFields["surface-weather-icao"] ?? "",
-    "destination-taf-icao": rawFields["destination-taf-icao"] ?? "",
-    "destination-metar-icao": rawFields["destination-metar-icao"] ?? "",
   };
 }
 function weatherSelectionFromInputs(
   raw: Readonly<Record<string, string>>,
   departureIdentifier: string,
-  destinationIdentifier: string,
 ) {
   resolveEndpointWeatherIcao(raw["departure-metar-icao"] ?? "", departureIdentifier, "departure METAR");
-  resolveEndpointWeatherIcao(raw["destination-taf-icao"] ?? "", destinationIdentifier, "destination TAF");
-  const destinationMetarText = raw["destination-metar-icao"]?.trim() ?? "";
-  const destinationMetarError = metarError(destinationMetarText, "Destination METAR alternate");
-  if (destinationMetarError) throw new Error(destinationMetarError);
-  return buildWeatherSelection(
-    optionalEndpointAlternate(raw["departure-metar-icao"]),
-    optionalEndpointAlternate(raw["destination-taf-icao"]),
-    destinationMetarText.toUpperCase() || undefined,
-  );
+  return buildWeatherSelection(optionalEndpointAlternate(raw["departure-metar-icao"]));
 }
 function optionalEndpointAlternate(value: string | undefined): string | undefined {
   const normalized = value?.trim().toUpperCase();
@@ -663,8 +620,7 @@ function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: Pil
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
     fuelError(fields), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
-    metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), metarError(fields["destination-metar-icao"] ?? "", "Destination METAR alternate"),
-    metarError(fields["destination-taf-icao"] ?? "", "Destination TAF"), tasOverrideError(plan, fields),
+    metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields), overrideConfirmationError(fields, confirmedOverrides),
   ];
   return checks.find((message) => message !== undefined);
@@ -729,9 +685,7 @@ function simpleFieldError(name: string, fields: Readonly<Record<string, string>>
   const value = fields[name] ?? "";
   return titleFieldError(name, value) ?? departureTimeFieldError(name, value) ?? fuelFieldError(name, value)
     ?? descentTargetFieldError(name, value) ?? airportFieldError(name, value)
-    ?? (name === "departure-metar-icao" ? metarError(value, "Departure METAR") : undefined)
-    ?? (name === "destination-taf-icao" ? metarError(value, "Destination TAF") : undefined)
-    ?? (name === "destination-metar-icao" ? metarError(value, "Destination METAR alternate") : undefined);
+    ?? (name === "departure-metar-icao" ? metarError(value, "Departure METAR") : undefined);
 }
 function titleFieldError(name: string, value: string): string | undefined {
   if (name !== "plan-title") return undefined;
