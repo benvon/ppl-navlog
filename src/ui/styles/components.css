@@ -3,6 +3,39 @@ body {
   background: var(--color-page);
 }
 
+.planner-shell > details {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+
+.planner-shell > details[data-active="true"] { border-inline-start: 0.35rem solid var(--color-focus); }
+.planner-shell > details > summary { padding: var(--space-2); font-size: 1.15rem; font-weight: 700; }
+.planner-shell > details[open] > summary { margin-block-end: var(--space-4); border-block-end: 1px solid var(--color-table-border); }
+.planner-shell > details > summary:focus-visible { outline: 3px solid var(--color-focus-ring); outline-offset: 2px; }
+
+[data-profile-editor] { margin-block-start: var(--space-4); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
+[data-profile-editor] > summary { cursor: pointer; font-weight: 700; }
+[data-profile-editor][open] > summary { margin-block-end: var(--space-4); }
+
+.planner-shell .route-form fieldset {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: #fafbfd;
+}
+
+.planner-shell [data-stage="calculate"] [data-update-plan] {
+  border-color: var(--color-focus);
+  background: var(--color-focus);
+  color: #fff;
+  font-weight: 700;
+}
+
+.planner-shell [data-stage="calculate"] [data-update-plan]:disabled { border-color: #6b7280; background: #d1d5db; color: #374151; }
+.planner-shell [data-stage="route"] > button { margin-block-start: var(--space-4); }
+
 .planner-feedback { min-height: 1.5rem; color: var(--color-ink); }
 .planner-feedback:not(:empty) {
   margin-block: var(--space-3);

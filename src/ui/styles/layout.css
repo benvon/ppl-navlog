@@ -11,7 +11,29 @@ body {
   padding: clamp(1rem, 3vw, 3rem);
 }
 
-.planner-shell { margin-block-start: var(--space-6); }
+.planner-shell { max-width: 88rem; margin: var(--space-6) auto 0; }
+
+.planner-shell > h2 { margin-block-end: var(--space-2); }
+
+.plan-picker { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin-block: var(--space-4) var(--space-6); }
+.plan-picker h3 { flex-basis: 100%; margin: 0; }
+.plan-picker select { width: min(100%, 22rem); }
+
+.planner-shell > details { min-width: 0; margin-block: var(--space-3); }
+.planner-shell > details > summary { cursor: pointer; }
+
+.planner-shell > [data-stage="aircraft"] > label { display: grid; gap: var(--space-1); max-width: 22rem; margin-block-end: var(--space-4); font-weight: 600; }
+.planner-shell > [data-stage="aircraft"] select { width: 100%; }
+
+.planner-shell .profile-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.planner-shell .profile-form button { width: fit-content; }
+.planner-shell .route-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+.planner-shell .route-form fieldset { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--space-3); min-width: 0; }
+.planner-shell .route-form fieldset legend { padding-inline: var(--space-2); font-weight: 700; }
+.planner-shell .route-form > div > section + section { margin-block-start: var(--space-4); }
+.planner-shell .route-form [name="departure-time"],
+.planner-shell .route-form [name="departure-local"] { max-width: 22rem; }
+.planner-shell [data-stage="calculate"] [data-update-plan] { width: fit-content; }
 
 .planner-content,
 .planner-layout { min-width: 0; }
@@ -58,4 +80,6 @@ body {
   .checkpoint-editor form,
   .leg-altitudes,
   .override-form { grid-template-columns: minmax(0, 1fr); }
+  .planner-shell .profile-form,
+  .planner-shell .route-form fieldset { grid-template-columns: minmax(0, 1fr); }
 }

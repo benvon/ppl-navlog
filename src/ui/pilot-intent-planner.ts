@@ -46,12 +46,14 @@ class PilotIntentPlanner {
   private saveError = "";
   private profileDraftDirty = false;
   private readonly openOverrideEditors = new Set<number>();
+  private readonly touchedFields = new Set<string>();
   private updating = false;
   private savingProfile = false;
   private saveQueue: Promise<void> = Promise.resolve();
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
   private clockTimer?: number;
+  private profileEditorOpen?: boolean;
 
   constructor(private readonly root: HTMLElement, private readonly dependencies: PilotIntentPlannerDependencies) {
     this.status.setAttribute("role", "status");
@@ -69,6 +71,8 @@ class PilotIntentPlanner {
   }
 
   private render(): void {
+    const priorProfileEditor = this.content.querySelector<HTMLDetailsElement>("details[data-profile-editor]");
+    if (priorProfileEditor) this.profileEditorOpen = priorProfileEditor.open;
     this.content.querySelectorAll<HTMLDetailsElement>("details[data-stage]").forEach((details) => {
       const stage = details.dataset.stage as keyof typeof this.stageOpen;
       if (stage in this.stageOpen) this.stageOpen[stage] = details.open;
@@ -101,9 +105,9 @@ class PilotIntentPlanner {
     const profile = document.createElement("select"); profile.name = "selectedProfileId"; profile.append(new Option("Choose profile", ""));
     this.profiles.forEach((p) => profile.append(new Option(p.name, p.id, false, p.id === this.current?.selectedProfileId)));
     profile.addEventListener("change", () => {
-      if (this.result) this.activateStage("aircraft");
       this.openOverrideEditors.clear();
       const selected = this.profiles.find((candidate) => candidate.id === profile.value);
+      this.activateStage(selected ? "route" : "aircraft");
       if (this.current) {
         const next = {
           ...this.current,
@@ -117,17 +121,21 @@ class PilotIntentPlanner {
       this.invalidate();
       this.refreshUpdateGate();
       void this.persist();
+      this.render();
     });
     profileLabel.append(profile);
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.arrival, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.fields[input.name] = input.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => { this.captureStructured(form); void this.persist(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.fields[input.name] = input.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("blur", () => { this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist(); });
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
     const aircraftStage = this.stage("aircraft", `Aircraft · ${this.profiles.find((p) => p.id === this.current?.selectedProfileId)?.name ?? "Select a profile"}`, profileLabel, this.renderProfileEditor());
     const routeStage = this.stage("route", "Route information", form);
+    const continueButton = document.createElement("button"); continueButton.type = "button"; continueButton.textContent = "Continue to Calculate";
+    continueButton.addEventListener("click", () => { this.activateStage("calculate"); this.content.querySelector<HTMLElement>('[data-stage="calculate"] summary')?.focus(); });
+    routeStage.append(continueButton);
     const calculateStage = this.stage("calculate", "Calculate", update, feedback);
     const navlogStage = this.stage("navlog", "Calculated navlog");
     navlogStage.append(this.renderCurrentResult());
@@ -169,7 +177,8 @@ class PilotIntentPlanner {
     const offsetMinutes = -now.getTimezoneOffset();
     const offset = `${offsetMinutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMinutes) % 60).padStart(2, "0")}`;
     const local = utcTextToLocalDateTime(now.toISOString().slice(0, 16))?.replace("T", " ") ?? "—";
-    clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}`));
+    const seconds = `:${String(now.getSeconds()).padStart(2, "0")}`;
+    clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
   }
 
   private clockLine(value: string): HTMLElement { const line = document.createElement("div"); line.textContent = value; return line; }
@@ -185,7 +194,7 @@ class PilotIntentPlanner {
 
   private stage(name: keyof typeof this.stageOpen, label: string, ...contents: HTMLElement[]): HTMLDetailsElement {
     const section = document.createElement("details"); section.dataset.stage = name; section.dataset.active = String(this.activeStage === name); section.open = this.stageOpen[name];
-    const summary = document.createElement("summary"); summary.textContent = label; section.append(summary, ...contents);
+    const summary = document.createElement("summary"); summary.textContent = label; summary.tabIndex = 0; section.append(summary, ...contents);
     return section;
   }
 
@@ -287,8 +296,9 @@ class PilotIntentPlanner {
     wrapper.append(checkpoints, altitudeSection); return wrapper;
   }
   private renderProfileEditor(): HTMLElement {
-    const section = document.createElement("section"); section.append(this.el("h3", "Aircraft profile"));
-    const form = document.createElement("form"); form.addEventListener("submit", (event) => { event.preventDefault(); void this.saveProfile(form); });
+    const section = document.createElement("details"); section.dataset.profileEditor = "true"; section.open = this.profileEditorOpen ?? this.profiles.length === 0;
+    const summary = document.createElement("summary"); summary.textContent = "Create aircraft profile"; section.append(summary);
+    const form = document.createElement("form"); form.className = "profile-form"; form.addEventListener("submit", (event) => { event.preventDefault(); void this.saveProfile(form); });
     const values: readonly [string, string][] = [["profile-name", "Profile name"], ["cruiseTasKnots", "Cruise TAS (kt)"], ["cruiseFuelFlowGallonsPerHour", "Cruise fuel flow (gal/hr)"], ["climbRateFeetPerMinute", "Climb rate (ft/min)"], ["climbTasKnots", "Climb TAS (kt)"], ["climbFuelFlowGallonsPerHour", "Climb fuel flow (gal/hr)"], ["descentRateFeetPerMinute", "Descent rate (ft/min)"], ["descentTasKnots", "Descent TAS (kt)"], ["descentFuelFlowGallonsPerHour", "Descent fuel flow (gal/hr)"], ["usableFuelGallons", "Usable fuel (gal, optional)"], ["compass-deviation-card", "Compass deviation entries (e.g. 000:+1, 090:-1)"]];
     values.forEach(([id, label]) => form.append(this.input(id, label, this.fields[`profile-${id}`] ?? "")));
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
@@ -343,6 +353,9 @@ class PilotIntentPlanner {
       this.profiles = [...this.profiles, saved];
       if (this.current) this.current = { ...this.current, selectedProfileId: saved.id, profileSnapshot: saved };
       this.profileDraftDirty = false;
+      this.profileEditorOpen = false;
+      const profileEditor = this.content.querySelector<HTMLDetailsElement>("details[data-profile-editor]");
+      if (profileEditor) profileEditor.open = false;
       await this.persist();
       this.setStatus(`Aircraft profile ${saved.name} saved.`);
       this.savingProfile = false;
@@ -366,6 +379,7 @@ class PilotIntentPlanner {
     this.inspected = undefined;
     this.updateError = "";
     this.profileDraftDirty = false;
+    this.touchedFields.clear();
     this.activateStage("aircraft");
     this.setStatus("Enter pilot inputs, then Update plan to retrieve current context and calculate.");
     this.render();
@@ -388,6 +402,7 @@ class PilotIntentPlanner {
     this.updateError = "";
     const selectedProfile = this.profiles.find((profile) => profile.id === plan.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selectedProfile);
+    this.touchedFields.clear();
     this.activateStage("route");
     this.setStatus("Opened saved pilot inputs. Update plan to fetch current context and calculate.");
     this.render();
@@ -466,6 +481,7 @@ class PilotIntentPlanner {
     } finally {
       this.updating = false;
       this.render();
+      this.content.querySelector<HTMLElement>(`[data-stage="${this.updateError ? "calculate" : "navlog"}"] summary`)?.focus();
     }
   }
   private async prepareDraft(): Promise<{ readonly draft: PlanDraft; readonly profile: AircraftProfile }> {
@@ -579,7 +595,8 @@ class PilotIntentPlanner {
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
-      const message = fieldErrorFor(input.name, this.fields, this.current, this.profiles);
+      const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
+      const message = showError ? fieldErrorFor(input.name, this.fields, this.current, this.profiles) : undefined;
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";

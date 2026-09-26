@@ -190,11 +190,51 @@ describe("pilot intent planner", () => {
   it("opens Calculate after a failed update without dropping route input", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile); repository.failSubmit = true;
     const root = await mount(repository);
+    document.body.append(root);
     await makeLocallyValid(root);
     button(root, "Update plan").click();
     await settle();
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true);
     expect(input(root, "fuel-aboard").value).toBe("20");
+    expect(document.activeElement).toBe(root.querySelector('[data-stage="calculate"] summary'));
+    root.remove();
+  });
+
+  it("uses native disclosure summaries and groups all starting fuel inputs", async () => {
+    const root = await mount(new MemoryInputs());
+    expect(root.querySelectorAll("details[data-stage] > summary")).toHaveLength(4);
+    const fuel = input(root, "fuel-aboard").closest("fieldset");
+    expect(fuel?.querySelector('[name="taxi-fuel"]')).not.toBeNull();
+    expect(fuel?.querySelector('[name="reserve-fuel"]')).not.toBeNull();
+    expect(fuel?.querySelector('[name^="override-tas-"]')).toBeNull();
+    expect(root.querySelector("#departure-icao-error")?.textContent).toBe("");
+    edit(root, "departure-icao", "A");
+    expect(root.querySelector("#departure-icao-error")?.textContent).toContain("three- or four-character");
+  });
+
+  it("advances from Aircraft when a saved profile is selected", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    const select = root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")!;
+    select.value = profile.id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')?.open).toBe(false);
+  });
+
+  it("keeps profile creation collapsed when a saved profile is available", async () => {
+    const empty = await mount(new MemoryInputs());
+    expect(empty.querySelector<HTMLDetailsElement>("details[data-profile-editor]")?.open).toBe(true);
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const saved = await mount(repository);
+    expect(saved.querySelector<HTMLDetailsElement>("details[data-profile-editor]")?.open).toBe(false);
+  });
+
+  it("offers a route-to-calculate step without submitting incomplete inputs", async () => {
+    const root = await mount(new MemoryInputs());
+    button(root, "Continue to Calculate").click();
+    expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true);
+    expect(root.querySelector('[data-local-error]')?.textContent).toContain("Unavailable");
   });
 
   it("constructs UTC from a local picker and keeps a visible format hint", async () => {
