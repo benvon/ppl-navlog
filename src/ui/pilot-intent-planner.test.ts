@@ -16,6 +16,8 @@ class MemoryInputs implements PilotInputRepository {
   readonly submissions: PilotInputPlan[] = [];
   readonly profiles: AircraftProfile[] = [];
   failSave = false;
+  saveAttempts = 0;
+  saveGate?: Promise<void>;
   failProfileSave = false;
   profileSaveGate?: Promise<void>;
   failSubmit = false;
@@ -26,6 +28,8 @@ class MemoryInputs implements PilotInputRepository {
     return this.plans.find((p) => p.id === id);
   }
   async saveWorkingCopy(plan: PilotInputPlan): Promise<void> {
+    this.saveAttempts += 1;
+    if (this.saveGate) await this.saveGate;
     if (this.failSave) throw new Error("write failed");
     this.replace(this.plans, plan);
   }
@@ -77,7 +81,8 @@ function input(root: HTMLElement, name: string): HTMLInputElement {
 }
 
 function button(root: HTMLElement, text: string): HTMLButtonElement {
-  const element = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === text);
+  const expected = text === "Update plan" ? "Update navlog" : text;
+  const element = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === expected);
   if (!element) throw new Error(`Missing button ${text}`);
   return element;
 }
@@ -517,6 +522,73 @@ describe("pilot intent planner", () => {
     });
   });
 
+  it("saves incomplete literal and structured inputs without submitting or requesting weather", async () => {
+    const repository = new MemoryInputs();
+    const fetchMetar = vi.fn(winds().fetchMetar);
+    const fetchPoint = vi.fn(winds().fetchPoint);
+    const root = await mount(repository, winds({ fetchMetar, fetchPoint }));
+    button(root, "Add checkpoint").click();
+    await settle();
+    edit(root, "plan-title", " Saved draft ");
+    edit(root, "checkpoint-name-0", "Farm strip");
+    edit(root, "checkpoint-coordinate-0", "N4145 W08730");
+    edit(root, "altitude-0", "not decided");
+    button(root, "Save changes").click();
+    await settle();
+
+    const saved = repository.plans.at(-1)!;
+    expect(saved.rawFields["plan-title"]).toBe(" Saved draft ");
+    expect(saved.checkpoints).toEqual([{ name: "Farm strip", coordinateText: "N4145 W08730" }]);
+    expect(saved.cruiseAltitudeTexts).toEqual(["not decided", "4500"]);
+    expect(repository.submissions).toHaveLength(0);
+    expect(fetchMetar).not.toHaveBeenCalled();
+    expect(fetchPoint).not.toHaveBeenCalled();
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
+  });
+
+  it("waits for queued autosaves and keeps the editor text after a failed explicit save and retry", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "plan-title", "typed without blur");
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    edit(root, "taxi-fuel", "1.25", true);
+    button(root, "Save changes").click();
+    await Promise.resolve();
+    expect(repository.plans).toHaveLength(0);
+    release();
+    repository.saveGate = undefined;
+    await settle();
+    expect(repository.plans.at(-1)?.rawFields).toMatchObject({ "plan-title": "typed without blur", "taxi-fuel": "1.25" });
+    expect(button(root, "Save changes").disabled).toBe(false);
+
+    repository.failSave = true;
+    edit(root, "plan-title", "retained after failure");
+    const attemptsBeforeFailure = repository.saveAttempts;
+    button(root, "Save changes").click();
+    await settle();
+    expect(repository.saveAttempts).toBeGreaterThan(attemptsBeforeFailure);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+    expect(input(root, "plan-title").value).toBe("retained after failure");
+    repository.failSave = false;
+    button(root, "Save changes").click();
+    await settle();
+    expect(repository.plans.at(-1)?.rawFields["plan-title"]).toBe("retained after failure");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
+  });
+
+  it("opens saved pilot inputs with editing and save guidance, separately from navlog calculation", async () => {
+    const repository = new MemoryInputs();
+    repository.plans.push({ id: "saved", title: "Saved route", rawFields: { "plan-title": "Saved route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    const root = await mount(repository);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("ready to edit");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Save changes");
+    expect(button(root, "Update navlog")).toBeTruthy();
+    expect(repository.submissions).toHaveLength(0);
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+  });
+
   it("keeps an autosave failure visible across Open and New until a later write succeeds", async () => {
     const repository = new MemoryInputs();
     const other: PilotInputPlan = {
@@ -894,7 +966,7 @@ describe("pilot intent planner", () => {
 
     edit(root, "plan-title", "Changed inputs");
     expect(root.querySelector("[data-current-result]")).toBeNull();
-    expect(root.querySelector('[data-stage="navlog"]')?.textContent).toContain("Update plan to display a current calculated navlog.");
+    expect(root.querySelector('[data-stage="navlog"]')?.textContent).toContain("Update navlog to retrieve current weather and display a calculated navlog.");
     failPoint = true;
     button(root, "Update plan").click();
     await settle();
@@ -1032,7 +1104,7 @@ describe("pilot intent planner", () => {
     await settle();
     expect(input(root, "plan-title").value).toBe("Synthetic route");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Opened saved pilot inputs");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Saved pilot inputs are ready to edit");
   });
 
   it("clears the temporary weather error when a plan is replaced or reopened", async () => {
@@ -1047,7 +1119,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
     choosePlan(root, "Synthetic route");
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Opened saved pilot inputs");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Saved pilot inputs are ready to edit");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
   });
 
