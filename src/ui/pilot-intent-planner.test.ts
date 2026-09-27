@@ -586,6 +586,27 @@ describe("pilot intent planner", () => {
     expect(checkpoint.textContent).toContain("Override TAS for leg 2");
   });
 
+  it("does not mark valid structured waypoint inputs invalid when opening a saved plan", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "valid-waypoint-plan", title: "Valid waypoint plan", rawFields: {
+        "plan-title": "Valid waypoint plan", "departure-time": "2026-09-21T22:00", "departure-icao": "KORD", "destination-icao": "KJVL",
+        "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3", "descent-target": "1800",
+      }, selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "6200"],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+
+    expect(input(root, "altitude-0").value).toBe("4500");
+    expect(input(root, "altitude-0").getAttribute("aria-invalid")).toBe("false");
+    expect(root.querySelector("#altitude-0-error")?.textContent).toBe("");
+    expect(input(root, "checkpoint-name-0").getAttribute("aria-invalid")).toBe("false");
+    expect(root.querySelector("#checkpoint-name-0-error")?.textContent).toBe("");
+    expect(input(root, "checkpoint-coordinate-0").getAttribute("aria-invalid")).toBe("false");
+    expect(root.querySelector("#checkpoint-coordinate-0-error")?.textContent).toBe("");
+  });
+
   it("preserves outbound altitude indexing and clears TAS overrides when adding or removing a checkpoint", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({

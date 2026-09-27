@@ -644,7 +644,8 @@ class PilotIntentPlanner {
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
       const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
-      const message = showError ? fieldErrorFor(input.name, this.fields, this.current, this.profiles) : undefined;
+      const fields = { ...this.fields, [input.name]: input.value };
+      const message = showError ? fieldErrorFor(input.name, fields, this.current, this.profiles) : undefined;
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";

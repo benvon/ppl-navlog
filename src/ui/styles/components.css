@@ -72,7 +72,8 @@ body {
 }
 .waypoint-group legend { padding-inline: var(--space-1); font-weight: 700; }
 .waypoint-group p { margin: 0; align-self: center; }
-.waypoint-group > button { align-self: start; }
+.waypoint-group > button,
+.waypoint-list > button { width: fit-content; max-width: 100%; align-self: start; }
 .waypoint-group > label,
 .waypoint-group > p { min-width: 0; }
 .navlog-fuel-warning,
