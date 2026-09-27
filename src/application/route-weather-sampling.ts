@@ -582,11 +582,20 @@ const pointAnswerCoversQuery = (query: AloftPointQuery, answer: AloftPointAnswer
 
 const validateDepartureMetar = (draft: PlanDraft, departure: Extract<CompletePlanRouteLeg["start"], { kind: "airport" }>, metar: MetarSuccessPayload): void => {
   const allowedIcaos = new Set([departure.icao, draft.weatherSelection?.departureMetarIcao, draft.weatherSelection?.surfaceWeatherIcao].filter((icao): icao is string => icao !== undefined));
-  if (!isFreshDepartureMetar(metar, allowedIcaos, Date.parse(draft.departureTimeUtc))) throw new RouteWeatherSamplingError("A fresh, identity-matched departure METAR is required for the departure surface anchor.");
+  const failure = departureMetarFailure(metar, allowedIcaos, Date.parse(draft.departureTimeUtc));
+  if (failure !== undefined) throw new RouteWeatherSamplingError(failure);
 };
-const isFreshDepartureMetar = (metar: MetarSuccessPayload, allowedIcaos: ReadonlySet<string>, departureMs: number): boolean => {
+const departureMetarFailure = (metar: MetarSuccessPayload, allowedIcaos: ReadonlySet<string>, departureMs: number): string | undefined => {
+  if (!allowedIcaos.has(metar.metar.icao)) return `The fetched departure METAR is for ${metar.metar.icao}, which is not the departure airport or selected alternate. Check the departure METAR ICAO alternate.`;
+  if (metar.provenance.cache.status === "stale_on_error" || metar.provenance.cache.status === "stale_while_refresh" || metar.provenance.cache.freshnessRemainingSeconds <= 0) {
+    return "The fetched departure METAR cache is stale. Try Update navlog again when current weather data is available.";
+  }
   const observed = metar.metar.observedAt === null ? Number.NaN : Date.parse(metar.metar.observedAt);
-  return allowedIcaos.has(metar.metar.icao) && Number.isFinite(observed) && observed <= departureMs && departureMs - observed <= MAX_METAR_AGE_MS && metar.provenance.cache.status !== "stale_on_error" && metar.provenance.cache.freshnessRemainingSeconds > 0 && metarWind(metar) !== null;
+  if (!Number.isFinite(observed)) return "The fetched departure METAR has no observation time, so it cannot anchor departure weather. Check the selected station's report.";
+  if (observed > departureMs) return "The fetched departure METAR was observed after the planned departure UTC. For a past departure, choose Use current UTC, then Update navlog.";
+  if (!Number.isFinite(departureMs) || departureMs - observed > MAX_METAR_AGE_MS) return "The fetched departure METAR observation is more than two hours before planned departure UTC. Choose a departure time within two hours of the observation, or try Update navlog later when a newer report is available.";
+  if (metarWind(metar) === null) return "The fetched departure METAR has no usable fixed or calm wind. Check the selected station's report or departure METAR ICAO alternate.";
+  return undefined;
 };
 
 const weatherFor = (

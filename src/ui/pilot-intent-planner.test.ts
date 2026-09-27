@@ -268,6 +268,55 @@ describe("pilot intent planner", () => {
     expect(root.querySelector('[data-current-clock]')?.textContent).toContain("UTC");
   });
 
+  it("lets a saved past departure explicitly use current UTC and fetches weather only on Update navlog", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "past-plan", title: "Past route", rawFields: {
+        "plan-title": "Past route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const client = winds();
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const clockNow = vi.spyOn(clock, "now");
+    try {
+      const root = await mount(repository, client);
+      expect(input(root, "departure-time").value).toBe("2026-09-21T22:00");
+      expect(root.querySelector<HTMLButtonElement>("button[data-use-current-utc]")?.hidden).toBe(true);
+
+      button(root, "Update navlog").click();
+      await settle();
+      expect(root.querySelector("[data-current-result]")).not.toBeNull();
+
+      clockNow.mockReturnValue(new Date("2026-09-21T23:04:50.000Z"));
+      button(root, "Override TAS for leg 1").click();
+      expect(root.querySelector("button[data-use-current-utc]")?.textContent).toBe("Use current UTC");
+      expect(root.querySelector("[data-current-result]")).not.toBeNull();
+      const requestCounts = { metar: fetchMetar.mock.calls.length, points: fetchPoint.mock.calls.length };
+
+      button(root, "Use current UTC").click();
+      await settle();
+
+      expect(input(root, "departure-time").value).toBe("2026-09-21T23:04");
+      expect(repository.plans.find((plan) => plan.id === "past-plan")?.rawFields["departure-time"]).toBe("2026-09-21T23:04");
+      expect(repository.submissions).toHaveLength(1);
+      expect(fetchMetar).toHaveBeenCalledTimes(requestCounts.metar);
+      expect(fetchPoint).toHaveBeenCalledTimes(requestCounts.points);
+      expect(root.querySelector("[data-current-result]")).toBeNull();
+
+      button(root, "Update navlog").click();
+      await settle();
+      expect(fetchMetar).toHaveBeenCalledTimes(requestCounts.metar + 1);
+      expect(fetchMetar).toHaveBeenLastCalledWith("KORD");
+      expect(fetchPoint.mock.calls.length).toBeGreaterThan(requestCounts.points);
+      expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    } finally {
+      clockNow.mockRestore();
+    }
+  });
+
   it("preserves invalid UTC text and leaves the local picker unset", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);

@@ -170,7 +170,18 @@ class PilotIntentPlanner {
     utcInput.addEventListener("input", () => { picker.value = utcTextToLocalDateTime(utcInput.value) ?? ""; localError.textContent = ""; });
     localLabel.append(picker, localError);
     const clock = document.createElement("div"); clock.dataset.currentClock = "true"; clock.className = "current-clock";
-    group.append(hint, localLabel, clock);
+    const useCurrentUtc = document.createElement("button");
+    useCurrentUtc.type = "button";
+    useCurrentUtc.dataset.useCurrentUtc = "true";
+    useCurrentUtc.textContent = "Use current UTC";
+    useCurrentUtc.addEventListener("click", () => {
+      if (!this.shouldOfferCurrentUtc()) return;
+      utcInput.value = this.dependencies.clock.now().toISOString().slice(0, 16);
+      utcInput.dispatchEvent(new Event("input", { bubbles: true }));
+      utcInput.dispatchEvent(new Event("blur", { bubbles: true }));
+    });
+    useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
+    group.append(hint, localLabel, useCurrentUtc, clock);
     this.updateClock(clock);
   }
 
@@ -483,6 +494,7 @@ class PilotIntentPlanner {
       .then(async () => {
         await this.dependencies.repository.saveWorkingCopy(snapshot);
         this.plans = [...this.plans.filter((plan) => plan.id !== snapshot.id), snapshot];
+        this.refreshUpdateGate();
         this.saveError = "";
         this.setStatus(successMessage);
       });
@@ -642,6 +654,8 @@ class PilotIntentPlanner {
     if (update) update.disabled = this.updating || reason !== undefined;
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
+    const useCurrentUtc = this.content.querySelector<HTMLButtonElement>("button[data-use-current-utc]");
+    if (useCurrentUtc) useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
       const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
       const fields = { ...this.fields, [input.name]: input.value };
@@ -650,6 +664,17 @@ class PilotIntentPlanner {
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
     });
+  }
+
+  private shouldOfferCurrentUtc(): boolean {
+    if (!this.current || !this.plans.some((plan) => plan.id === this.current?.id)) return false;
+    try {
+      const departureMs = Date.parse(localUtcTextToIso(this.fields["departure-time"] ?? ""));
+      const nowText = this.dependencies.clock.now().toISOString().slice(0, 16);
+      return departureMs < this.dependencies.clock.now().getTime() && this.fields["departure-time"] !== nowText;
+    } catch {
+      return false;
+    }
   }
 }
 

@@ -93,6 +93,35 @@ const assertProgressiveCallContract = (draft: ReturnType<typeof planDraft>, outc
 };
 
 describe("route waypoint weather sampling", () => {
+  it("accepts a recent same-station METAR returned from a fresh cache hit", async () => {
+    const cachedMetar = {
+      ...metar(),
+      provenance: { ...metar().provenance, cache: { ...metar().provenance.cache, status: "edge_hit", freshnessRemainingSeconds: 45 } as never },
+    };
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
+    const solution = await resolveRouteWeather(draft, aircraftProfile(), {
+      async fetchPoint(query) { return answer(query, 270, 15); },
+    }, { departureMetar: cachedMetar });
+
+    expect(solution.weather.departureMetarPayload?.requestId).toBe("metar-request");
+  });
+
+  it.each([
+    ["after planned departure", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, observedAt: "2029-09-21T12:01:00.000Z" } }), /observed after the planned departure/i],
+    ["more than two hours old", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, observedAt: "2029-09-21T09:59:59.999Z" } }), /more than two hours before planned departure/i],
+    ["wrong station", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, icao: "KJVL" } }), /not the departure airport/i],
+    ["stale cache", (source: MetarSuccessPayload) => ({ ...source, provenance: { ...source.provenance, cache: { ...source.provenance.cache, status: "stale_on_error", freshnessRemainingSeconds: 0 } as never } }), /cache.*stale/i],
+    ["missing observation time", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, observedAt: null } }), /no observation time/i],
+    ["unusable wind", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, wind: { ...source.metar.wind, directionType: "variable" as const, directionDegTrue: null } } }), /usable fixed or calm wind/i],
+  ])("reports why a departure METAR is ineligible: %s", async (_case, transform, expected) => {
+    const source = transform(metar());
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
+
+    await expect(resolveRouteWeather(draft, aircraftProfile(), {
+      async fetchPoint(query) { return answer(query, 270, 15); },
+    }, { departureMetar: source })).rejects.toThrow(expected);
+  });
+
   it("makes one call at every interval start and generated TOC/TOD in route order", async () => {
     const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const outcome = await planWith(draft, () => 270);
