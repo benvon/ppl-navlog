@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Cloudflare local development state
 .wrangler/
+
+# Local Git worktree checkouts
+.worktrees/

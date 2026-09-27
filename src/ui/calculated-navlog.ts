@@ -21,25 +21,48 @@ export interface CalculatedNavlogViewOptions {
 }
 
 export const renderCalculatedNavlog = (revision: PlanRevision, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
-  const snapshot = revision.calculationSnapshot;
-  if (!record(snapshot) || snapshot.schema !== "complete-navlog/v1") return undefined;
+  const snapshot = completeNavlogSnapshot(revision.calculationSnapshot);
+  if (snapshot === undefined) return undefined;
   const section = document.createElement("section");
   section.className = "calculated-navlog";
   if (snapshot.status === "infeasible-phase-allocation") {
-    const message = document.createElement("p");
-    message.textContent = "The required climb, transition, and descent distances overlap or extend beyond this route. No flyable navlog was invented.";
-    section.append(message);
-    section.append(details("Phase allocation evidence", snapshot.phaseAllocation));
-    return section;
+    return renderInfeasibleNavlog(section, snapshot);
   }
+  const navlog = calculatedNavlog(snapshot);
+  if (navlog === undefined) return renderIncompleteNavlog(section);
+  const phaseAllocation = nested(snapshot, "phaseAllocation");
+  return renderCalculatedResult(section, navlog, revision, options, phaseAllocation?.boundaries, patternEndpointDistance(phaseAllocation));
+};
+
+const completeNavlogSnapshot = (snapshot: unknown): RecordValue | undefined =>
+  record(snapshot) && snapshot.schema === "complete-navlog/v1" ? snapshot : undefined;
+
+const calculatedNavlog = (snapshot: RecordValue): RecordValue | undefined => {
   const navlog = nested(snapshot, "navlog");
-  if (snapshot.status !== "calculated" || !Array.isArray(navlog?.rows) || !navlog.rows.every(record)) {
-    const message = document.createElement("p");
-    message.textContent = "The saved calculation is incomplete or cannot be displayed safely.";
-    section.append(message);
-    return section;
-  }
-  return renderCalculatedResult(section, navlog, revision, options);
+  return snapshot.status === "calculated" && Array.isArray(navlog?.rows) && navlog.rows.every(record) ? navlog : undefined;
+};
+
+const patternEndpointDistance = (phaseAllocation: RecordValue | undefined): number | undefined => {
+  const endpoint = nested(phaseAllocation, "navlogEndpoint");
+  return endpoint?.kind === "pattern-altitude-3nm"
+    && typeof endpoint.routeDistanceNauticalMiles === "number"
+    && Number.isFinite(endpoint.routeDistanceNauticalMiles)
+    ? endpoint.routeDistanceNauticalMiles
+    : undefined;
+};
+
+const renderInfeasibleNavlog = (section: HTMLElement, snapshot: RecordValue): HTMLElement => {
+  const message = document.createElement("p");
+  message.textContent = "The required climb, transition, and descent distances overlap or extend beyond this route. No flyable navlog was invented.";
+  section.append(message, details("Phase allocation evidence", snapshot.phaseAllocation));
+  return section;
+};
+
+const renderIncompleteNavlog = (section: HTMLElement): HTMLElement => {
+  const message = document.createElement("p");
+  message.textContent = "The saved calculation is incomplete or cannot be displayed safely.";
+  section.append(message);
+  return section;
 };
 
 const renderCalculatedResult = (
@@ -47,6 +70,8 @@ const renderCalculatedResult = (
   navlog: RecordValue,
   revision: PlanRevision,
   options: CalculatedNavlogViewOptions,
+  boundaries: unknown,
+  endpointDistance: number | undefined,
 ): HTMLElement => {
   const rows = navlog.rows as readonly RecordValue[];
   if (options.currentWeatherValidated) {
@@ -60,16 +85,19 @@ const renderCalculatedResult = (
   caption.textContent = "Calculated visual flight log";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
-  rows.forEach((row, index) => body.append(navlogRow(row, revision, index, options)));
+  rows.forEach((row, index) => body.append(navlogRow(row, rows, revision, index, options, boundaries, endpointDistance)));
   table.append(body);
   const scroll = document.createElement("div");
   scroll.className = "navlog-table-scroll";
   scroll.append(table);
   const summary = nested(navlog, "fuelSummary");
   const fuel = document.createElement("p");
-  fuel.textContent = `Fuel required including taxi/run-up and reserve: ${fuelAmount(summary?.requiredFuel)} gal. Enroute: ${fuelAmount(summary?.enrouteFuel)} gal.`;
+  const fuelScope = endpointDistance === undefined
+    ? "Fuel required including taxi/run-up and reserve"
+    : "Fuel required through 3 NM point, including taxi/run-up and reserve";
+  fuel.textContent = `${fuelScope}: ${fuelAmount(summary?.requiredFuel)} gal. Enroute: ${fuelAmount(summary?.enrouteFuel)} gal.`;
   section.append(scroll, fuel);
-  const aboardFuel = aboardFuelNotice(summary);
+  const aboardFuel = aboardFuelNotice(summary, endpointDistance !== undefined);
   if (aboardFuel !== undefined) section.append(aboardFuel);
   const usableFuel = usableFuelNotice(summary);
   if (usableFuel !== undefined) section.append(usableFuel);
@@ -84,11 +112,14 @@ const fuelAmount = (value: unknown): string => typeof value !== "number" || !Num
 const fuelBalance = (value: unknown): string => typeof value !== "number" || !Number.isFinite(value)
   ? "—"
   : value < 0 ? `Deficit: ${fuelAmount(Math.abs(value))} gal` : `${fuelAmount(value)} gal`;
-const arrivalBalance = (value: unknown): string => typeof value === "number" && Number.isFinite(value) && value < 0
-  ? `Estimated arrival deficit: ${fuelAmount(Math.abs(value))} gal`
-  : `Estimated arrival balance: ${fuelBalance(value)}`;
+const endpointFuelBalance = (value: unknown, isPatternEndpoint: boolean): string => {
+  const location = isPatternEndpoint ? "at 3 NM point" : "at arrival";
+  return typeof value === "number" && Number.isFinite(value) && value < 0
+    ? `Estimated deficit ${location}: ${fuelAmount(Math.abs(value))} gal`
+    : `Estimated balance ${location}: ${fuelBalance(value)}`;
+};
 
-const aboardFuelNotice = (summary: RecordValue | undefined): HTMLElement | undefined => {
+const aboardFuelNotice = (summary: RecordValue | undefined, isPatternEndpoint: boolean): HTMLElement | undefined => {
   if (typeof summary?.fuelAboard !== "number") return undefined;
   const section = document.createElement("section");
   section.className = "aboard-fuel-summary";
@@ -99,7 +130,7 @@ const aboardFuelNotice = (summary: RecordValue | undefined): HTMLElement | undef
   const sufficiency = typeof summary.sufficientAboardFuel === "boolean"
     ? `Aboard-fuel sufficiency: ${summary.sufficientAboardFuel ? "sufficient" : "insufficient"} for taxi, route, and reserve.`
     : "";
-  details.textContent = `Fuel aboard (pilot input): ${fuelAmount(summary.fuelAboard)} gal. Taxi/run-up (pilot input): ${fuelAmount(summary.taxiRunupFuel)} gal; post-taxi balance (calculated): ${fuelBalance(summary.fuelAfterTaxi)}. ${arrivalBalance(summary.estimatedArrivalFuel)}. Reserve (pilot input): ${fuelAmount(summary.reserveFuel)} gal. ${reserveAssessment} ${sufficiency}`;
+  details.textContent = `Fuel aboard (pilot input): ${fuelAmount(summary.fuelAboard)} gal. Taxi/run-up (pilot input): ${fuelAmount(summary.taxiRunupFuel)} gal; post-taxi balance (calculated): ${fuelBalance(summary.fuelAfterTaxi)}. ${endpointFuelBalance(summary.estimatedArrivalFuel, isPatternEndpoint)}. Reserve (pilot input): ${fuelAmount(summary.reserveFuel)} gal. ${reserveAssessment} ${sufficiency}`;
   section.append(details);
   const capacity = capacityComparisonNotice(summary);
   if (capacity) section.append(capacity);
@@ -164,7 +195,7 @@ const revisionWarnings = (revision: PlanRevision): HTMLElement | undefined => {
 const navlogHeader = (): HTMLTableSectionElement => {
   const head = document.createElement("thead");
   const row = document.createElement("tr");
-  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Fuel used gal", "Balance after row"].forEach((label) => {
+  ["Leg / phase", "Altitude ft MSL", "TC°", "Wind true", "WCA°", "TH°", "Var°", "MH°", "Dev°", "CH°", "NM", "GS kt", "ETE min", "Cumulative NM", "Cumulative ETE min", "Fuel used gal", "Balance after row"].forEach((label) => {
     const heading = document.createElement("th");
     heading.scope = "col";
     heading.textContent = label;
@@ -174,41 +205,123 @@ const navlogHeader = (): HTMLTableSectionElement => {
   return head;
 };
 
-const navlogRow = (row: RecordValue, revision: PlanRevision, rowIndex: number, options: CalculatedNavlogViewOptions): HTMLTableRowElement => {
+const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: PlanRevision, rowIndex: number, options: CalculatedNavlogViewOptions, boundaries: unknown, endpointDistance: number | undefined): HTMLTableRowElement => {
   const tr = document.createElement("tr");
   const subleg = nested(row, "subleg");
-  const labels = sourceLabels(revision, subleg);
-  const wind = nested(nested(row, "effectiveWind")?.wind, "effectiveValue");
-  const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}`;
-  const valueCell = (field: NavlogInspectionField, value: string): HTMLTableCellElement => {
-    if (options.onInspect === undefined) return cell(value);
-    const control = document.createElement("button");
-    control.type = "button";
-    control.className = "navlog-value";
-    control.textContent = value;
-    control.dataset.rowIndex = String(rowIndex);
-    control.dataset.inspectField = field;
-    control.setAttribute("aria-label", `Inspect ${field} for ${labels.from} to ${labels.to} ${text(subleg?.phase)} subleg`);
-    control.setAttribute("aria-pressed", String(options.selected?.rowIndex === rowIndex && options.selected.field === field));
-    control.addEventListener("click", () => options.onInspect?.({ rowIndex, field }));
-    return cell(control);
-  };
+  const source = sourceLabels(revision, subleg);
+  const nextSubleg = nested(rows[rowIndex + 1], "subleg");
+  const wind = navlogWind(row);
+  const endpoint = generatedEndpoint(subleg, nextSubleg, nested(row, "cumulative"), boundaries, endpointDistance, rowIndex, rows.length, source.to, source.toCoordinate);
+  const labels = { ...source, to: endpoint };
+  const phaseLabel = `${labels.from} → ${endpoint} · ${text(subleg?.phase)}`;
+  const cumulative = nested(row, "cumulative");
   tr.append(
-    cell(phaseLabel), valueCell("altitude", `${number(subleg?.startingAltitude)} → ${number(subleg?.endingAltitude)}`), valueCell("trueCourse", number(subleg?.trueCourse)),
-    valueCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`), valueCell("windCorrectionAngle", number(row.windCorrectionAngle)), valueCell("trueHeading", number(row.trueHeading)),
-    valueCell("variation", number(nested(row, "variation")?.effectiveValue)), valueCell("magneticHeading", number(row.magneticHeading)), valueCell("compassDeviation", number(row.compassDeviation)),
-    valueCell("compassHeading", number(row.compassHeading)), valueCell("distance", number(subleg?.distance)), valueCell("groundspeed", number(row.groundspeed)), valueCell("estimatedTimeEnroute", number(row.estimatedTimeEnroute)),
-    valueCell("fuel", fuelAmount(row.fuel)), cell(fuelBalance(nested(row, "cumulative")?.fuelRemaining)),
+    cell(phaseLabel), inspectionCell("altitude", `${number(subleg?.startingAltitude)} → ${number(subleg?.endingAltitude)}`, subleg, labels, rowIndex, options), inspectionCell("trueCourse", number(subleg?.trueCourse), subleg, labels, rowIndex, options),
+    inspectionCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`, subleg, labels, rowIndex, options), inspectionCell("windCorrectionAngle", number(row.windCorrectionAngle), subleg, labels, rowIndex, options), inspectionCell("trueHeading", number(row.trueHeading), subleg, labels, rowIndex, options),
+    inspectionCell("variation", number(nested(row, "variation")?.effectiveValue), subleg, labels, rowIndex, options), inspectionCell("magneticHeading", number(row.magneticHeading), subleg, labels, rowIndex, options), inspectionCell("compassDeviation", number(row.compassDeviation), subleg, labels, rowIndex, options),
+    inspectionCell("compassHeading", number(row.compassHeading), subleg, labels, rowIndex, options), inspectionCell("distance", number(subleg?.distance), subleg, labels, rowIndex, options), inspectionCell("groundspeed", number(row.groundspeed), subleg, labels, rowIndex, options), inspectionCell("estimatedTimeEnroute", number(row.estimatedTimeEnroute), subleg, labels, rowIndex, options),
+    cell(number(cumulative?.routeDistance)), cell(number(cumulative?.estimatedTimeEnroute)),
+    inspectionCell("fuel", fuelAmount(row.fuel), subleg, labels, rowIndex, options), cell(fuelBalance(cumulative?.fuelRemaining)),
   );
   return tr;
 };
 
-const sourceLabels = (revision: PlanRevision, subleg: RecordValue | undefined): { from: string; to: string } => {
+const navlogWind = (row: RecordValue): RecordValue | undefined => {
+  const effectiveWind = nested(row, "effectiveWind");
+  const wind = nested(effectiveWind, "wind");
+  return nested(wind, "effectiveValue");
+};
+
+const inspectionCell = (
+  field: NavlogInspectionField,
+  value: string,
+  subleg: RecordValue | undefined,
+  labels: { from: string; to: string; toCoordinate: unknown },
+  rowIndex: number,
+  options: CalculatedNavlogViewOptions,
+): HTMLTableCellElement => {
+  if (options.onInspect === undefined) return cell(value);
+  const control = document.createElement("button");
+  control.type = "button";
+  control.className = "navlog-value";
+  control.textContent = value;
+  control.dataset.rowIndex = String(rowIndex);
+  control.dataset.inspectField = field;
+  control.setAttribute("aria-label", `Inspect ${field} for ${labels.from} to ${labels.to} ${text(subleg?.phase)} subleg`);
+  control.setAttribute("aria-pressed", String(options.selected?.rowIndex === rowIndex && options.selected.field === field));
+  control.addEventListener("click", () => options.onInspect?.({ rowIndex, field }));
+  return cell(control);
+};
+
+const generatedEndpoint = (
+  subleg: RecordValue | undefined,
+  nextSubleg: RecordValue | undefined,
+  cumulative: RecordValue | undefined,
+  boundaries: unknown,
+  endpointDistance: number | undefined,
+  rowIndex: number,
+  rowCount: number,
+  routeEndpoint: string,
+  routeEndpointCoordinate: unknown,
+): string => {
+  const phase = subleg?.phase;
+  const phaseId = subleg?.phaseId;
+  const routeDistance = cumulative?.routeDistance;
+  return boundaryEndpointLabel(boundaries, routeDistance, routeEndpoint, routeEndpointCoordinate)
+    ?? patternEndpointLabel(phase, routeDistance, endpointDistance, rowIndex, rowCount)
+    ?? legacyGeneratedEndpoint(phase, phaseId, nextSubleg)
+    ?? routeEndpoint;
+};
+
+const boundaryEndpointLabel = (boundaries: unknown, routeDistance: unknown, routeEndpoint: string, routeEndpointCoordinate: unknown): string | undefined => {
+  if (!Array.isArray(boundaries) || typeof routeDistance !== "number" || !Number.isFinite(routeDistance)) return undefined;
+  const matched = boundaries.filter((candidate) => boundaryMatchesDistance(candidate, routeDistance));
+  const names = [...new Set(matched.map(boundaryName).filter((name): name is string => name !== undefined))];
+  if (names.length === 0) return undefined;
+  const includesWaypoint = matched.some((candidate) => record(candidate) && coordinatesMatch(candidate.coordinate, routeEndpointCoordinate));
+  return `${includesWaypoint ? `${routeEndpoint} / ` : ""}${names.join(" / ")}`;
+};
+
+const boundaryMatchesDistance = (candidate: unknown, routeDistance: number): boolean => {
+  if (!record(candidate)) return false;
+  if (candidate.kind !== "top-of-climb" && candidate.kind !== "top-of-descent") return false;
+  const boundaryDistance = candidate.routeDistanceNauticalMiles;
+  return typeof boundaryDistance === "number" && Number.isFinite(boundaryDistance) && Math.abs(boundaryDistance - routeDistance) <= 0.01;
+};
+
+const boundaryName = (candidate: unknown): string | undefined => {
+  if (!record(candidate)) return undefined;
+  if (candidate.kind === "top-of-climb") return "TOC";
+  return candidate.kind === "top-of-descent" ? "TOD" : undefined;
+};
+
+const patternEndpointLabel = (phase: unknown, routeDistance: unknown, endpointDistance: number | undefined, rowIndex: number, rowCount: number): string | undefined => {
+  const endsAtPatternPoint = endpointDistance !== undefined && typeof routeDistance === "number"
+    && Math.abs(endpointDistance - routeDistance) <= 0.01;
+  return phase === "descent" && rowIndex === rowCount - 1 && endsAtPatternPoint
+    ? "3 NM before destination (pattern altitude)"
+    : undefined;
+};
+
+const legacyGeneratedEndpoint = (phase: unknown, phaseId: unknown, nextSubleg: RecordValue | undefined): string | undefined => {
+  if (phase === "climb" && phaseId === "departure-climb" && nextSubleg?.phase === "cruise") return "TOC";
+  if (phase === "cruise" && typeof phaseId === "string" && phaseId.endsWith(":to-tod") && nextSubleg?.phaseId === "arrival-descent") return "TOD";
+  return undefined;
+};
+
+const sourceLabels = (revision: PlanRevision, subleg: RecordValue | undefined): { from: string; to: string; toCoordinate: unknown } => {
   const source = revision.draftSnapshot.route.legs.find((leg) => leg.id === subleg?.sourceLegId);
   const from = revision.draftSnapshot.route.points.find((point) => point.id === source?.fromPointId)?.name ?? text(subleg?.sourceLegId);
-  const to = revision.draftSnapshot.route.points.find((point) => point.id === source?.toPointId)?.name ?? "—";
-  return { from, to };
+  const destination = revision.draftSnapshot.route.points.find((point) => point.id === source?.toPointId);
+  const to = destination?.name ?? "—";
+  return { from, to, toCoordinate: destination?.coordinate };
 };
+
+const coordinatesMatch = (first: unknown, second: unknown): boolean => record(first) && record(second)
+  && typeof first.latitude === "number" && typeof first.longitude === "number"
+  && typeof second.latitude === "number" && typeof second.longitude === "number"
+  && Math.abs(first.latitude - second.latitude) <= 1e-8
+  && Math.abs(first.longitude - second.longitude) <= 1e-8;
 
 const details = (label: string, value: unknown): HTMLDetailsElement => {
   const element = document.createElement("details");

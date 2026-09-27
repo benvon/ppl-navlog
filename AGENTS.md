@@ -2,6 +2,13 @@
 
 Read and apply the applicable parent or user-level `AGENTS.md` (including `~/.codex/AGENTS.md` when present) alongside this file. If their directives conflict, this repository's `AGENTS.md` takes precedence.
 
+## Default Engineering Workflow
+
+* For substantial, separable changes, work as architect and reviewer. Inspect the repository and issue, state confirmed requirements and material assumptions, and write a shared behavioral contract with acceptance criteria before implementation.
+* Delegate bounded implementation tasks to GPT-6 Luna at medium reasoning when agent tools are available. Give each agent the same contract, explicit interfaces, and a clear file or responsibility boundary. Use a lighter workflow for small or tightly coupled changes, or when the user requests another approach.
+* Review each delegated result and the combined user-visible flow. Return concrete findings for correction, then run the relevant local and remote checks. Report what passed, failed, or could not be verified.
+* Preserve isolated branches or worktrees and unrelated user work throughout. Do not open a pull request or claim completion until the integrated result is reviewable and verified.
+
 ## Requirements and Model Selection
 
 * Before designing a domain-heavy feature, identify the decisions the user needs to make, the outputs that support those decisions, and explicit non-goals. Ask for an authoritative reference or representative worked example when the domain has an established workflow.

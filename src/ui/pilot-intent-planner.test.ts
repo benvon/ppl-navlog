@@ -143,8 +143,9 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
 }
 
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
-  expect(callOrder).toEqual(["metar", "point", "point", "point"]);
-  expect(queries).toHaveLength(3);
+  expect(callOrder).toEqual(["metar", ...queries.map(() => "point")]);
+  expect(queries.length).toBeGreaterThanOrEqual(3);
+  expect(queries.length).toBeLessThanOrEqual(14);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
   const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
@@ -152,9 +153,11 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
   const interiorDistances = queries.slice(1).map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
   expect(queries[0]?.latitudeDeg).toBeCloseTo(departure.value.latitude, 4);
   expect(queries[0]?.longitudeDeg).toBeCloseTo(departure.value.longitude, 4);
-  expect(interiorDistances[0]).toBeGreaterThan(0);
-  expect(interiorDistances[0]).toBeLessThan(interiorDistances[1]!);
-  expect(interiorDistances[1]).toBeLessThan(routeGeometry.value.distance);
+  interiorDistances.forEach((distance) => {
+    expect(distance).toBeGreaterThan(0);
+    expect(distance).toBeLessThan(routeGeometry.value.distance);
+  });
+  expect(interiorDistances.at(-1)).toBeGreaterThan(interiorDistances[0]!);
 }
 
 function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
@@ -583,7 +586,7 @@ describe("pilot intent planner", () => {
     expect(fetchMetar).toHaveBeenCalledTimes(1);
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
     expect(fetchTaf).not.toHaveBeenCalled();
-    expect(fetchPoint).toHaveBeenCalledTimes(3);
+    expect(fetchPoint).toHaveBeenCalledTimes(pointQueries.length);
     assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
     expect(discovery).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
@@ -722,7 +725,7 @@ describe("pilot intent planner", () => {
     expect(checkpoint.textContent).toContain("Override TAS for leg 2");
   });
 
-  it("keeps outbound altitude labels stable when checkpoint names and destination ICAO change", async () => {
+  it("labels checkpoint altitude requirements and the final cruise target when route details change", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
       id: "stable-waypoint-labels", title: "Stable waypoint labels", rawFields: {
@@ -740,9 +743,17 @@ describe("pilot intent planner", () => {
     const departure = waypointGroup(root, "departure");
     const checkpoint = waypointGroup(root, "checkpoint-0");
     expect(departure.querySelector("legend")?.textContent).toBe("Departure — outbound to Checkpoint 1");
-    expect(groupInput(departure, "altitude-0").parentElement?.textContent).toContain("Cruise altitude outbound to Checkpoint 1");
+    expect(groupInput(departure, "altitude-0").parentElement?.textContent).toContain("Altitude required at Checkpoint 1 (feet MSL)");
     expect(checkpoint.querySelector("legend")?.textContent).toBe("Checkpoint 1 — outbound to Destination");
-    expect(groupInput(checkpoint, "altitude-1").parentElement?.textContent).toContain("Cruise altitude outbound to Destination");
+    expect(groupInput(checkpoint, "altitude-1").parentElement?.textContent).toContain("Final cruise target before top of descent (feet MSL)");
+    expect(root.querySelector(".waypoint-list h3")?.textContent).toBe("Waypoint altitudes and final cruise target");
+  });
+
+  it("labels the direct-route altitude as the final cruise target before top of descent", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+
+    expect(input(root, "altitude-0").parentElement?.textContent).toContain("Final cruise target before top of descent (feet MSL)");
   });
 
   it("does not mark valid structured waypoint inputs invalid when opening a saved plan", async () => {
