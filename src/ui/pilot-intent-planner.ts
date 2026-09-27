@@ -202,6 +202,7 @@ class PilotIntentPlanner {
       if (!this.root.isConnected) { window.clearInterval(this.clockTimer); this.clockTimer = undefined; return; }
       const clock = this.content.querySelector<HTMLElement>("[data-current-clock]");
       if (clock) this.updateClock(clock);
+      this.refreshCurrentUtcControl();
     }, 1000);
   }
 
@@ -238,12 +239,11 @@ class PilotIntentPlanner {
     const route = document.createElement("section");
     route.className = "waypoint-list";
     route.append(this.el("h3", "Route waypoints and outbound cruise altitudes"));
-    const departureDestination = checkpoints[0]?.name.trim() || (checkpoints.length > 0 ? "Checkpoint 1" : this.fields["destination-icao"]?.trim() || "destination");
+    const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
     route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
     checkpoints.forEach((point, index) => {
-      const destination = checkpoints[index + 1]?.name.trim()
-        || (index + 1 < checkpoints.length ? `Checkpoint ${index + 2}` : this.fields["destination-icao"]?.trim() || "destination");
-      route.append(this.renderWaypointGroup(`checkpoint-${index}`, `Checkpoint ${index + 1}${point.name.trim() ? ` — ${point.name.trim()}` : ""}`, destination, index + 1, index, point));
+      const destination = index + 1 < checkpoints.length ? `Checkpoint ${index + 2}` : "Destination";
+      route.append(this.renderWaypointGroup(`checkpoint-${index}`, `Checkpoint ${index + 1}`, destination, index + 1, index, point));
     });
     const add = document.createElement("button");
     add.type = "button";
@@ -653,8 +653,7 @@ class PilotIntentPlanner {
     if (update) update.disabled = this.updating || reason !== undefined;
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
-    const useCurrentUtc = this.content.querySelector<HTMLButtonElement>("button[data-use-current-utc]");
-    if (useCurrentUtc) useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
+    this.refreshCurrentUtcControl();
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
       const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
       const fields = { ...this.fields, [input.name]: input.value };
@@ -663,6 +662,11 @@ class PilotIntentPlanner {
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
     });
+  }
+
+  private refreshCurrentUtcControl(): void {
+    const useCurrentUtc = this.content.querySelector<HTMLButtonElement>("button[data-use-current-utc]");
+    if (useCurrentUtc) useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
   }
 
   private shouldOfferCurrentUtc(): boolean {

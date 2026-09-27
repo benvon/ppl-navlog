@@ -316,6 +316,41 @@ describe("pilot intent planner", () => {
     expect(currentClock.children[1]?.textContent).toMatch(/^UTC: \d{4}-\d\d-\d\d /);
   });
 
+  it("offers Use current UTC when an open plan's future departure becomes past", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "future-plan", title: "Future route", rawFields: {
+        "plan-title": "Future route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    let tick: (() => void) | undefined;
+    const setInterval = vi.spyOn(window, "setInterval").mockImplementation((handler) => {
+      tick = handler as () => void;
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const clockNow = vi.spyOn(clock, "now").mockReturnValue(new Date("2026-09-21T21:59:59.000Z"));
+    const root = document.createElement("div");
+    document.body.append(root);
+    try {
+      renderPilotIntentPlanner(root, { repository, airportLookup: createLocalStudyAirportLookup(), winds: winds(), ids, clock });
+      await settle();
+      const control = root.querySelector<HTMLButtonElement>("button[data-use-current-utc]");
+      expect(control?.hidden).toBe(true);
+
+      clockNow.mockReturnValue(new Date("2026-09-21T22:01:01.000Z"));
+      expect(control?.hidden).toBe(true);
+      tick?.();
+      expect(control?.hidden).toBe(false);
+    } finally {
+      root.remove();
+      tick?.();
+      setInterval.mockRestore();
+      clockNow.mockRestore();
+    }
+  });
+
   it("lets a saved past departure explicitly use current UTC and fetches weather only on Update navlog", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
@@ -679,8 +714,31 @@ describe("pilot intent planner", () => {
     expect(groupInput(checkpoint, "checkpoint-name-0").value).toBe("Farm strip");
     expect(groupInput(checkpoint, "checkpoint-coordinate-0")).toBeTruthy();
     expect(groupInput(checkpoint, "altitude-1")).toBeTruthy();
-    expect(checkpoint.textContent).toContain("KJVL");
+    expect(checkpoint.textContent).toContain("Destination");
     expect(checkpoint.textContent).toContain("Override TAS for leg 2");
+  });
+
+  it("keeps outbound altitude labels stable when checkpoint names and destination ICAO change", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "stable-waypoint-labels", title: "Stable waypoint labels", rawFields: {
+        "plan-title": "Stable waypoint labels", "departure-icao": "KORD", "destination-icao": "KJVL",
+      }, selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "6200"],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+
+    edit(root, "checkpoint-name-0", "Renamed strip");
+    edit(root, "destination-icao", "KMSN");
+    button(root, "Override TAS for leg 1").click();
+
+    const departure = waypointGroup(root, "departure");
+    const checkpoint = waypointGroup(root, "checkpoint-0");
+    expect(departure.querySelector("legend")?.textContent).toBe("Departure — outbound to Checkpoint 1");
+    expect(groupInput(departure, "altitude-0").parentElement?.textContent).toContain("Cruise altitude outbound to Checkpoint 1");
+    expect(checkpoint.querySelector("legend")?.textContent).toBe("Checkpoint 1 — outbound to Destination");
+    expect(groupInput(checkpoint, "altitude-1").parentElement?.textContent).toContain("Cruise altitude outbound to Destination");
   });
 
   it("does not mark valid structured waypoint inputs invalid when opening a saved plan", async () => {
