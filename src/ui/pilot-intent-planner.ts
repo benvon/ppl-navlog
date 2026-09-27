@@ -393,6 +393,7 @@ class PilotIntentPlanner {
       await this.dependencies.repository.saveProfile(saved);
       this.profiles = [...this.profiles, saved];
       if (this.current) this.current = { ...this.current, selectedProfileId: saved.id, profileSnapshot: saved };
+      this.invalidate();
       this.profileDraftDirty = false;
       this.profileEditorOpen = false;
       const profileEditor = this.content.querySelector<HTMLDetailsElement>("details[data-profile-editor]");
@@ -461,6 +462,8 @@ class PilotIntentPlanner {
   private invalidate(): void {
     this.result = undefined;
     this.inspected = undefined;
+    this.updateError = "";
+    this.setStatus("Inputs changed. Save changes or Update navlog to use the current inputs.");
     const output = this.content.querySelector("[data-current-result]");
     output?.replaceWith(document.createTextNode("Update navlog to retrieve current weather and display a calculated navlog."));
   }
@@ -476,6 +479,7 @@ class PilotIntentPlanner {
   private async saveChanges(): Promise<void> {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
+    this.updateError = "";
     const button = this.content.querySelector<HTMLButtonElement>("button[data-save-changes]");
     if (button) button.disabled = true;
     try {

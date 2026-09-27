@@ -199,6 +199,8 @@ describe("pilot intent planner", () => {
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-21T21:30");
     expect(repository.plans.find((plan) => plan.id === "past-weather-plan")?.rawFields["departure-time"]).toBe("2026-09-21T21:30");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved");
+    expect(root.querySelector("[role='status']")?.textContent).not.toContain("observed after the planned departure UTC");
     expect(fetchMetar).toHaveBeenCalledTimes(1);
     expect(fetchPoint).not.toHaveBeenCalled();
 
@@ -1207,6 +1209,8 @@ describe("pilot intent planner", () => {
     edit(root, "plan-title", "Changed inputs");
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(root.querySelector('[data-stage="navlog"]')?.textContent).toContain("Update navlog to retrieve current weather and display a calculated navlog.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Inputs changed");
+    expect(root.querySelector("[role='status']")?.textContent).not.toContain("Plan updated");
     failPoint = true;
     button(root, "Update navlog").click();
     await settle();
@@ -1215,12 +1219,30 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
 
+    edit(root, "departure-time", "2026-09-21T22:15");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Inputs changed");
+    expect(root.querySelector("[role='status']")?.textContent).not.toContain("point service unavailable");
     failPoint = false;
     button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(3);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
+  });
+
+  it("shows Save changes success after an update failure even when the inputs were not edited", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository, winds({ fetchPoint: async () => { throw new Error("point service unavailable"); } }));
+    await makeLocallyValid(root, true);
+    button(root, "Update navlog").click();
+    await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
+
+    button(root, "Save changes").click();
+    await settle();
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
+    expect(root.querySelector("[role='status']")?.textContent).not.toContain("point service unavailable");
   });
 
   it("preserves but does not use a saved legacy forecast period", async () => {
