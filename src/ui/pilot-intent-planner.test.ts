@@ -80,6 +80,18 @@ function input(root: HTMLElement, name: string): HTMLInputElement {
   return element;
 }
 
+function waypointGroup(root: HTMLElement, id: string): HTMLElement {
+  const group = root.querySelector<HTMLElement>(`[data-waypoint-group="${id}"]`);
+  if (!group) throw new Error(`Missing waypoint group ${id}`);
+  return group;
+}
+
+function groupInput(group: HTMLElement, name: string): HTMLInputElement {
+  const field = group.querySelector<HTMLInputElement>(`[name="${name}"]`);
+  if (!field) throw new Error(`Missing grouped input ${name}`);
+  return field;
+}
+
 function button(root: HTMLElement, text: string): HTMLButtonElement {
   const element = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === text);
   if (!element) throw new Error(`Missing button ${text}`);
@@ -544,6 +556,59 @@ describe("pilot intent planner", () => {
     expect(fetchPoint).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
+  });
+
+  it("groups each outbound altitude and TAS control with its source waypoint", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    edit(root, "departure-icao", "KORD");
+    edit(root, "destination-icao", "KJVL");
+    button(root, "Add checkpoint").click();
+    await settle();
+    edit(root, "checkpoint-name-0", "Farm strip");
+    edit(root, "checkpoint-coordinate-0", "N4145 W08730");
+    await settle();
+
+    const departure = waypointGroup(root, "departure");
+    const checkpoint = waypointGroup(root, "checkpoint-0");
+    expect(departure.tagName).toBe("FIELDSET");
+    expect(departure.querySelector("legend")?.textContent).toContain("Departure");
+    expect(groupInput(departure, "altitude-0")).toBeTruthy();
+    expect(departure.querySelector("legend")?.textContent).toContain("Checkpoint 1");
+    expect(departure.textContent).toContain("Override TAS for leg 1");
+
+    expect(checkpoint.tagName).toBe("FIELDSET");
+    expect(checkpoint.querySelector("legend")?.textContent).toContain("Checkpoint 1");
+    expect(groupInput(checkpoint, "checkpoint-name-0").value).toBe("Farm strip");
+    expect(groupInput(checkpoint, "checkpoint-coordinate-0")).toBeTruthy();
+    expect(groupInput(checkpoint, "altitude-1")).toBeTruthy();
+    expect(checkpoint.textContent).toContain("KJVL");
+    expect(checkpoint.textContent).toContain("Override TAS for leg 2");
+  });
+
+  it("preserves outbound altitude indexing and clears TAS overrides when adding or removing a checkpoint", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "waypoint-altitudes", title: "Waypoint altitudes", rawFields: {
+        "plan-title": "Waypoint altitudes", "departure-icao": "KORD", "destination-icao": "KJVL",
+        "override-tas-0": "102", "override-reason-0": "Training comparison",
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4100"],
+      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+    button(root, "Add checkpoint").click();
+    await settle();
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100", "4500"]);
+    expect(repository.plans[0]?.overrideReasons).toEqual({});
+    expect(repository.plans[0]?.rawFields).not.toHaveProperty("override-tas-0");
+
+    edit(root, "altitude-1", "6200", true);
+    await settle();
+    button(root, "Remove checkpoint 1").click();
+    await settle();
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100"]);
+    expect(repository.plans[0]?.overrideReasons).toEqual({});
+    expect(input(root, "altitude-0").value).toBe("4100");
   });
 
   it("waits for queued autosaves and keeps the editor text after a failed explicit save and retry", async () => {

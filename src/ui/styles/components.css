@@ -58,14 +58,23 @@ body {
 
 [data-utc-format] { margin: 0; color: var(--color-muted); font-size: 0.875rem; }
 
-.leg-inputs {
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
+.route-waypoints { grid-column: 1 / -1; min-width: 0; }
+.waypoint-list {
+  display: grid;
+  gap: var(--space-3);
 }
-
-.leg-inputs + .leg-inputs { margin-block-start: var(--space-3); }
-.leg-inputs p { margin-block: var(--space-2); }
+.waypoint-list > h3 { margin: 0; }
+.waypoint-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-3);
+}
+.waypoint-group legend { padding-inline: var(--space-1); font-weight: 700; }
+.waypoint-group p { margin: 0; align-self: center; }
+.waypoint-group > button { align-self: start; }
+.waypoint-group > label,
+.waypoint-group > p { min-width: 0; }
 .navlog-fuel-warning,
 .navlog-warnings {
   padding: var(--space-2);

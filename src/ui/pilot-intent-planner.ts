@@ -223,8 +223,18 @@ class PilotIntentPlanner {
   }
   private renderRouteCollections(): HTMLElement {
     const wrapper = document.createElement("div");
-    const checkpoints = document.createElement("section"); checkpoints.append(this.el("h3", "Checkpoints (order is preserved)"));
-    (this.current?.checkpoints ?? []).forEach((point, index) => { checkpoints.append(this.input(`checkpoint-name-${index}`, `Checkpoint ${index + 1} name`, point.name), this.input(`checkpoint-coordinate-${index}`, "SkyVector or decimal latitude, longitude", point.coordinateText)); });
+    wrapper.className = "route-waypoints";
+    const checkpoints = this.current?.checkpoints ?? [];
+    const route = document.createElement("section");
+    route.className = "waypoint-list";
+    route.append(this.el("h3", "Route waypoints and outbound cruise altitudes"));
+    const departureDestination = checkpoints[0]?.name.trim() || (checkpoints.length > 0 ? "Checkpoint 1" : this.fields["destination-icao"]?.trim() || "destination");
+    route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
+    checkpoints.forEach((point, index) => {
+      const destination = checkpoints[index + 1]?.name.trim()
+        || (index + 1 < checkpoints.length ? `Checkpoint ${index + 2}` : this.fields["destination-icao"]?.trim() || "destination");
+      route.append(this.renderWaypointGroup(`checkpoint-${index}`, `Checkpoint ${index + 1}${point.name.trim() ? ` — ${point.name.trim()}` : ""}`, destination, index + 1, index, point));
+    });
     const add = document.createElement("button");
     add.type = "button";
     add.textContent = "Add checkpoint";
@@ -245,58 +255,76 @@ class PilotIntentPlanner {
         if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
       });
     });
-    checkpoints.append(add);
-    (this.current?.checkpoints ?? []).forEach((_point, index) => {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = `Remove checkpoint ${index + 1}`;
-      remove.addEventListener("click", () => {
-        const hadOverrides = this.clearRouteOverrides();
-        const current = this.current;
-        if (!current) return;
-        const nextCheckpoints = [...current.checkpoints];
-        nextCheckpoints.splice(index, 1);
-        const altitudes = [...current.cruiseAltitudeTexts];
-        if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
-        this.current = this.withIdentity({
-          ...current,
-          checkpoints: nextCheckpoints,
-          cruiseAltitudeTexts: altitudes,
-          overrideReasons: {},
-        });
-        this.invalidate();
-        this.render();
-        void this.persist().then(() => {
-          if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
-        });
+    route.append(add);
+    wrapper.append(route);
+    return wrapper;
+  }
+  private renderWaypointGroup(
+    groupId: string,
+    sourceLabel: string,
+    destinationLabel: string,
+    legIndex: number,
+    checkpointIndex?: number,
+    checkpoint?: PilotInputPlan["checkpoints"][number],
+  ): HTMLFieldSetElement {
+    const group = document.createElement("fieldset");
+    group.className = "waypoint-group";
+    group.dataset.waypointGroup = groupId;
+    const legend = document.createElement("legend");
+    legend.textContent = `${sourceLabel} — outbound to ${destinationLabel}`;
+    group.append(legend);
+    if (checkpoint !== undefined && checkpointIndex !== undefined) this.appendCheckpointEditor(group, checkpoint, checkpointIndex);
+    const altitude = this.current?.cruiseAltitudeTexts[legIndex] ?? "4500";
+    group.append(this.input(`altitude-${legIndex}`, `Cruise altitude outbound to ${destinationLabel} (feet MSL)`, altitude));
+    this.appendTasControls(group, legIndex);
+    return group;
+  }
+  private appendCheckpointEditor(group: HTMLFieldSetElement, checkpoint: PilotInputPlan["checkpoints"][number], index: number): void {
+    group.append(
+      this.input(`checkpoint-name-${index}`, `Checkpoint ${index + 1} name`, checkpoint.name),
+      this.input(`checkpoint-coordinate-${index}`, "SkyVector or decimal latitude, longitude", checkpoint.coordinateText),
+    );
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = `Remove checkpoint ${index + 1}`;
+    remove.addEventListener("click", () => this.removeCheckpoint(index));
+    group.append(remove);
+  }
+  private removeCheckpoint(index: number): void {
+    const hadOverrides = this.clearRouteOverrides();
+    const current = this.current;
+    if (!current) return;
+    const nextCheckpoints = [...current.checkpoints];
+    nextCheckpoints.splice(index, 1);
+    const altitudes = [...current.cruiseAltitudeTexts];
+    if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
+    this.current = this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} });
+    this.invalidate();
+    this.render();
+    void this.persist().then(() => {
+      if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
+    });
+  }
+  private appendTasControls(group: HTMLFieldSetElement, legIndex: number): void {
+    const override = this.fields[`override-tas-${legIndex}`]?.trim() ?? "";
+    const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
+    const summary = document.createElement("p");
+    summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
+    group.append(summary);
+    if (override || this.openOverrideEditors.has(legIndex)) {
+      group.append(this.input(`override-tas-${legIndex}`, `Leg ${legIndex + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${legIndex}`, `Leg ${legIndex + 1} override reason`, this.current?.overrideReasons[`tas-${legIndex}`] ?? ""));
+      const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${legIndex + 1}`;
+      restore.addEventListener("click", () => {
+        delete this.fields[`override-tas-${legIndex}`]; delete this.fields[`override-reason-${legIndex}`];
+        if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.current = { ...this.current, overrideReasons: reasons }; }
+        this.openOverrideEditors.delete(legIndex); this.invalidate(); this.render(); void this.persist();
       });
-      checkpoints.append(remove);
-    });
-    const altitudeSection = document.createElement("section"); altitudeSection.append(this.el("h3", "Cruise altitude per leg (feet MSL)"));
-    (this.current?.cruiseAltitudeTexts ?? ["4500"]).forEach((alt, index) => {
-      const leg = document.createElement("div"); leg.className = "leg-inputs";
-      leg.append(this.input(`altitude-${index}`, `Leg ${index + 1} cruise altitude`, alt));
-      const override = this.fields[`override-tas-${index}`]?.trim() ?? "";
-      const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
-      const summary = document.createElement("p"); summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
-      leg.append(summary);
-      if (override || this.openOverrideEditors.has(index)) {
-        leg.append(this.input(`override-tas-${index}`, `Leg ${index + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${index}`, `Leg ${index + 1} override reason`, this.current?.overrideReasons[`tas-${index}`] ?? ""));
-        const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${index + 1}`;
-        restore.addEventListener("click", () => {
-          delete this.fields[`override-tas-${index}`]; delete this.fields[`override-reason-${index}`];
-          if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${index}`]; this.current = { ...this.current, overrideReasons: reasons }; }
-          this.openOverrideEditors.delete(index); this.invalidate(); this.render(); void this.persist();
-        });
-        leg.append(restore);
-      } else {
-        const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${index + 1}`;
-        reveal.addEventListener("click", () => { this.openOverrideEditors.add(index); this.render(); });
-        leg.append(reveal);
-      }
-      altitudeSection.append(leg);
-    });
-    wrapper.append(checkpoints, altitudeSection); return wrapper;
+      group.append(restore);
+    } else {
+      const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${legIndex + 1}`;
+      reveal.addEventListener("click", () => { this.openOverrideEditors.add(legIndex); this.render(); });
+      group.append(reveal);
+    }
   }
   private renderProfileEditor(): HTMLElement {
     const section = document.createElement("details"); section.dataset.profileEditor = "true"; section.open = this.profileEditorOpen ?? this.profiles.length === 0;
