@@ -604,6 +604,8 @@ describe("pilot intent planner", () => {
     expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
     expect(inspector.textContent).toContain("KORD");
     expect(inspector.textContent).toContain("horizontal weight");
+    expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
+    expect(inspector.querySelector("details")?.open).toBe(false);
 
   });
 
