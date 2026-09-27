@@ -3,20 +3,34 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("describes wind from the right as a leftward push requiring a right correction", () => {
+    const revision = teachingRevision();
+    const row = revision.calculationSnapshot.navlog.rows[0]!;
+    row.subleg.trueCourse = 90;
+    row.effectiveWind.wind.effectiveValue.directionFrom = 180;
+    row.traces.windTriangle.intermediateValues[0]!.value = 0;
+    row.traces.windTriangle.intermediateValues[1]!.value = -10;
+    row.traces.windTriangle.intermediateValues[2]!.value = Math.sqrt(110 ** 2 - 10 ** 2);
+    row.windCorrectionAngle = 5.216;
+    row.trueHeading = 95.216;
+    row.groundspeed = Math.sqrt(110 ** 2 - 10 ** 2);
+    const walkthrough = renderCalculationInspector(revision, { rowIndex: 0, field: "windCorrectionAngle" }).querySelector(".calculation-walkthrough")?.textContent;
+    expect(walkthrough).toContain("10 kt crosswind from the right pushes left; steer 5.216° right into the wind");
+  });
   it("teaches the full fuel and compass chains from stored row evidence", () => {
     const revision = teachingRevision();
     const fuel = renderCalculationInspector(revision, { rowIndex: 0, field: "fuel" });
     const walkthrough = fuel.querySelector(".calculation-walkthrough")?.textContent ?? "";
     expect(walkthrough).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Groundspeed[\s\S]*Time enroute[\s\S]*Fuel consumed/);
     expect(walkthrough).toContain("-8.572 kt wind along track + 109.879 kt airspeed along track ≈ 101.307 kt");
-    expect(walkthrough).toContain("5.15 kt crosswind from the right ÷ 110 kt TAS; arcsin(5.15 ÷ 110) ≈ 2.68° left");
+    expect(walkthrough).toContain("5.15 kt crosswind from the left pushes right; steer 2.68° left into the wind");
     expect(walkthrough).toContain("10 NM ÷ 101.307 kt");
     expect(walkthrough).toContain("8 gal/hr");
     expect(fuel.querySelector("details")?.open).toBe(false);
     expect(fuel.querySelector("details")?.textContent).toContain("wind-1");
     const compass = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector(".calculation-walkthrough")?.textContent ?? "";
     expect(compass).toMatch(/Wind correction[\s\S]*True heading[\s\S]*Magnetic heading[\s\S]*Compass heading/);
-    expect(compass).toContain("5.15 kt crosswind from the right ÷ 110 kt TAS; arcsin(5.15 ÷ 110) ≈ 2.68° left");
+    expect(compass).toContain("5.15 kt crosswind from the left pushes right; steer 2.68° left into the wind");
     expect(compass).toContain("subtract 7° for east variation");
     expect(compass).toContain("add 2° for west deviation");
     const headingDetails = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector("details")?.textContent ?? "";

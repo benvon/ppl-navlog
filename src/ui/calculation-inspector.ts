@@ -156,9 +156,11 @@ function windCorrectionCalculation(row: RecordValue, traces: RecordValue | undef
   if (!record(right) || typeof right.value !== "number" || typeof tas !== "number" || typeof row.windCorrectionAngle !== "number") {
     return `The stored wind-triangle result is ${stepValue(row.windCorrectionAngle)}°`;
   }
-  const side = right.value > 0 ? "right" : right.value < 0 ? "left" : "no crosswind";
+  if (right.value === 0) return "No crosswind pushes the aircraft off course; wind correction is 0°.";
+  const sourceSide = right.value > 0 ? "left" : "right";
+  const pushSide = right.value > 0 ? "right" : "left";
   const direction = row.windCorrectionAngle < 0 ? "left" : row.windCorrectionAngle > 0 ? "right" : "no correction";
-  return `${stepValue(Math.abs(right.value))} kt crosswind from the ${side} ÷ ${stepValue(tas)} kt TAS; arcsin(${stepValue(Math.abs(right.value))} ÷ ${stepValue(tas)}) ≈ ${stepValue(Math.abs(row.windCorrectionAngle))}° ${direction}`;
+  return `${stepValue(Math.abs(right.value))} kt crosswind from the ${sourceSide} pushes ${pushSide}; steer ${stepValue(Math.abs(row.windCorrectionAngle))}° ${direction} into the wind. arcsin(${stepValue(Math.abs(right.value))} ÷ ${stepValue(tas)} kt TAS) gives approximately that correction`;
 }
 
 function signedHeadingOperation(value: unknown, label: string): string {
