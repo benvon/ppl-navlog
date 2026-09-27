@@ -3,6 +3,42 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("teaches the full fuel and compass chains from stored row evidence", () => {
+    const revision = teachingRevision();
+    const fuel = renderCalculationInspector(revision, { rowIndex: 0, field: "fuel" });
+    const walkthrough = fuel.querySelector(".calculation-walkthrough")?.textContent ?? "";
+    expect(walkthrough).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Groundspeed[\s\S]*Time enroute[\s\S]*Fuel consumed/);
+    expect(walkthrough).toContain("-8.572 kt wind along track + 109.879 kt airspeed along track ≈ 101.307 kt");
+    expect(walkthrough).toContain("5.15 kt crosswind from the right ÷ 110 kt TAS; arcsin(5.15 ÷ 110) ≈ 2.68° left");
+    expect(walkthrough).toContain("10 NM ÷ 101.307 kt");
+    expect(walkthrough).toContain("8 gal/hr");
+    expect(fuel.querySelector("details")?.open).toBe(false);
+    expect(fuel.querySelector("details")?.textContent).toContain("wind-1");
+    const compass = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector(".calculation-walkthrough")?.textContent ?? "";
+    expect(compass).toMatch(/Wind correction[\s\S]*True heading[\s\S]*Magnetic heading[\s\S]*Compass heading/);
+    expect(compass).toContain("5.15 kt crosswind from the right ÷ 110 kt TAS; arcsin(5.15 ÷ 110) ≈ 2.68° left");
+    expect(compass).toContain("subtract 7° for east variation");
+    expect(compass).toContain("add 2° for west deviation");
+    const headingDetails = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector("details")?.textContent ?? "";
+    expect(headingDetails).toContain("Effective wind source");
+    expect(headingDetails).toContain("Formula: point-wind");
+    expect(compass).not.toContain("- -2°");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).textContent).toContain("Result: 23.3° as shown in the navlog. Stored unrounded value: 23.32.");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "variation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("east-positive variation input");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassDeviation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("aircraft deviation table");
+  });
+
+  it("limits walkthrough precision while retaining exact selected values and traces", () => {
+    const revision = teachingRevisionWithLongDecimals();
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "groundspeed" });
+    const walkthrough = rendered.querySelector(".calculation-walkthrough")?.textContent ?? "";
+    expect(walkthrough).toContain("Course 31.123° true; true airspeed 110.123 kt");
+    expect(walkthrough).toContain("≈");
+    expect(walkthrough).not.toContain("31.123456");
+    expect(rendered.textContent).toContain("Stored unrounded value: 101.");
+    expect(rendered.querySelector("details")?.textContent).toContain("110.123456");
+  });
+
   it("renders structured formula steps, unrounded values, assumptions, and overrides as safe text", () => {
     const revision = {
       ...planRevision(),
@@ -90,8 +126,66 @@ describe("calculation inspector", () => {
     expect(wind.textContent).toContain("Origin: interpolated. Source: METAR-to-FB bridge");
     expect(wind.textContent).toContain("Surface anchor applied");
     const distance = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
+    expect(distance.querySelector(".calculation-walkthrough")?.textContent).toContain("distance allocated to this route/phase row");
     expect(distance.textContent).toContain("route or phase allocation");
     expect(distance.textContent).toContain("no detailed trace was stored");
     expect(distance.textContent).not.toContain("phase-boundary evidence in the navlog");
   });
 });
+
+function teachingRevision() {
+  return {
+    ...planRevision(),
+    calculationSnapshot: {
+      schema: "complete-navlog/v1", status: "calculated",
+      weather: { endpointSources: { departureMetar: { stationIcao: "KORD", requestId: "dep-1", cache: { status: "kv_hit" } } } },
+      navlog: { rows: [{
+        subleg: { sourceLegId: "leg-1", phase: "cruise", trueCourse: 31, distance: 10 },
+        effectiveWind: { wind: { effectiveValue: { directionFrom: 360, speed: 10 } }, trace: { formulaId: "point-wind", inputs: [{ name: "point request id", value: "wind-1" }], intermediateValues: [], result: { name: "wind", value: 10 } } },
+        trueAirspeed: { effectiveValue: 110 }, fuelFlow: { effectiveValue: 8 },
+        windCorrectionAngle: -2.68, trueHeading: 28.32, groundspeed: 101.307, estimatedTimeEnroute: 10 / 101.307 * 60, fuel: (10 / 101.307 * 60) / 60 * 8,
+        variation: { effectiveValue: 7 }, magneticHeading: 21.32, compassDeviation: -2, compassHeading: 23.32,
+        traces: {
+          windTriangle: { formulaId: "wind-triangle-vector-solution", inputs: [], intermediateValues: [{ name: "wind along-track component", value: -8.572, unit: "knots" }, { name: "wind right-of-track component", value: 5.15, unit: "knots" }, { name: "airspeed along-track component", value: 109.879, unit: "knots" }], result: { name: "groundspeed", value: 101.307, unit: "knots" } },
+          estimatedTimeEnroute: { formulaId: "estimated-time-enroute", inputs: [], intermediateValues: [], result: { name: "estimated time enroute", value: 10 / 101.307 * 60, unit: "minutes" } },
+          fuel: { formulaId: "fuel-for-duration", inputs: [], intermediateValues: [], result: { name: "fuel", value: (10 / 101.307 * 60) / 60 * 8, unit: "gallons" } },
+        },
+        assumptions: [], appliedOverrides: [],
+      }] },
+    },
+  };
+}
+
+function teachingRevisionWithLongDecimals() {
+  const revision = teachingRevision();
+  const calculationSnapshot = revision.calculationSnapshot as unknown as { navlog: { rows: Array<Record<string, unknown>> } };
+  const row = calculationSnapshot.navlog.rows[0]!;
+  const subleg = row.subleg as Record<string, unknown>;
+  const course = 31.123456;
+  const tas = 110.123456;
+  const windRadians = course * Math.PI / 180;
+  const along = -10 * Math.cos(windRadians);
+  const cross = 10 * Math.sin(windRadians);
+  const airAlong = Math.sqrt(tas ** 2 - cross ** 2);
+  const groundspeed = along + airAlong;
+  const correction = -Math.asin(cross / tas) * 180 / Math.PI;
+  subleg.trueCourse = course;
+  row.trueAirspeed = { effectiveValue: tas };
+  row.windCorrectionAngle = correction;
+  row.trueHeading = course + correction;
+  row.groundspeed = groundspeed;
+  row.estimatedTimeEnroute = 10 / groundspeed * 60;
+  row.fuel = (row.estimatedTimeEnroute as number) / 60 * 8;
+  const traces = row.traces as Record<string, unknown>;
+  traces.windTriangle = {
+    formulaId: "wind-triangle-vector-solution",
+    inputs: [{ name: "true airspeed", value: tas, unit: "knots" }],
+    intermediateValues: [
+      { name: "wind along-track component", value: along, unit: "knots" },
+      { name: "wind right-of-track component", value: cross, unit: "knots" },
+      { name: "airspeed along-track component", value: airAlong, unit: "knots" },
+    ],
+    result: { name: "groundspeed", value: groundspeed, unit: "knots" },
+  };
+  return revision;
+}
