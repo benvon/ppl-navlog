@@ -54,6 +54,7 @@ class PilotIntentPlanner {
   private readonly content = document.createElement("div");
   private clockTimer?: number;
   private profileEditorOpen?: boolean;
+  private readonly handleSaveChanges = (): void => { void this.saveChanges(); };
 
   constructor(private readonly root: HTMLElement, private readonly dependencies: PilotIntentPlannerDependencies) {
     this.status.setAttribute("role", "status");
@@ -129,10 +130,12 @@ class PilotIntentPlanner {
       input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.fields[input.name] = input.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist(); });
     });
-    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update plan"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
+    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
     const aircraftStage = this.stage("aircraft", `Aircraft · ${this.profiles.find((p) => p.id === this.current?.selectedProfileId)?.name ?? "Select a profile"}`, profileLabel, this.renderProfileEditor());
     const routeStage = this.stage("route", "Route information", form);
+    const saveChanges = document.createElement("button"); saveChanges.type = "button"; saveChanges.dataset.saveChanges = "true"; saveChanges.textContent = "Save changes"; saveChanges.disabled = this.savingProfile; saveChanges.addEventListener("click", this.handleSaveChanges);
+    routeStage.append(saveChanges);
     const continueButton = document.createElement("button"); continueButton.type = "button"; continueButton.textContent = "Continue to Calculate";
     continueButton.addEventListener("click", () => { this.activateStage("calculate"); this.content.querySelector<HTMLElement>('[data-stage="calculate"] summary')?.focus(); });
     routeStage.append(continueButton);
@@ -167,18 +170,28 @@ class PilotIntentPlanner {
     utcInput.addEventListener("input", () => { picker.value = utcTextToLocalDateTime(utcInput.value) ?? ""; localError.textContent = ""; });
     localLabel.append(picker, localError);
     const clock = document.createElement("div"); clock.dataset.currentClock = "true"; clock.className = "current-clock";
-    group.append(hint, localLabel, clock);
+    const useCurrentUtc = document.createElement("button");
+    useCurrentUtc.type = "button";
+    useCurrentUtc.dataset.useCurrentUtc = "true";
+    useCurrentUtc.textContent = "Use current UTC";
+    useCurrentUtc.addEventListener("click", () => {
+      if (!this.shouldOfferCurrentUtc()) return;
+      utcInput.value = this.dependencies.clock.now().toISOString().slice(0, 16);
+      utcInput.dispatchEvent(new Event("input", { bubbles: true }));
+      utcInput.dispatchEvent(new Event("blur", { bubbles: true }));
+    });
+    useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
+    group.append(hint, localLabel, useCurrentUtc, clock);
     this.updateClock(clock);
   }
 
   private updateClock(clock: HTMLElement): void {
     const now = new Date();
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const offsetMinutes = -now.getTimezoneOffset();
     const offset = `${offsetMinutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMinutes) % 60).padStart(2, "0")}`;
     const local = utcTextToLocalDateTime(now.toISOString().slice(0, 16))?.replace("T", " ") ?? "—";
     const seconds = `:${String(now.getUTCSeconds()).padStart(2, "0")}`;
-    clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
+    clock.replaceChildren(this.clockLine(`Local UTC${offset}: ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
   }
 
   private clockLine(value: string): HTMLElement { const line = document.createElement("div"); line.textContent = value; return line; }
@@ -189,6 +202,7 @@ class PilotIntentPlanner {
       if (!this.root.isConnected) { window.clearInterval(this.clockTimer); this.clockTimer = undefined; return; }
       const clock = this.content.querySelector<HTMLElement>("[data-current-clock]");
       if (clock) this.updateClock(clock);
+      this.refreshCurrentUtcControl();
     }, 1000);
   }
 
@@ -199,7 +213,7 @@ class PilotIntentPlanner {
   }
 
   private renderCurrentResult(): Node {
-    if (this.result === undefined) return document.createTextNode("Update plan to display a current calculated navlog.");
+    if (this.result === undefined) return document.createTextNode("Update navlog to retrieve current weather and display a calculated navlog.");
     const output = document.createElement("section"); output.dataset.currentResult = "true";
     const navlog = renderCalculatedNavlog(this.result, { currentWeatherValidated: true, selected: this.inspected, onInspect: (selection) => { this.inspected = selection; this.render(); } });
     if (navlog) output.append(navlog, renderCalculationInspector(this.result, this.inspected));
@@ -220,8 +234,17 @@ class PilotIntentPlanner {
   }
   private renderRouteCollections(): HTMLElement {
     const wrapper = document.createElement("div");
-    const checkpoints = document.createElement("section"); checkpoints.append(this.el("h3", "Checkpoints (order is preserved)"));
-    (this.current?.checkpoints ?? []).forEach((point, index) => { checkpoints.append(this.input(`checkpoint-name-${index}`, `Checkpoint ${index + 1} name`, point.name), this.input(`checkpoint-coordinate-${index}`, "SkyVector or decimal latitude, longitude", point.coordinateText)); });
+    wrapper.className = "route-waypoints";
+    const checkpoints = this.current?.checkpoints ?? [];
+    const route = document.createElement("section");
+    route.className = "waypoint-list";
+    route.append(this.el("h3", "Route waypoints and outbound cruise altitudes"));
+    const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
+    route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
+    checkpoints.forEach((point, index) => {
+      const destination = index + 1 < checkpoints.length ? `Checkpoint ${index + 2}` : "Destination";
+      route.append(this.renderWaypointGroup(`checkpoint-${index}`, `Checkpoint ${index + 1}`, destination, index + 1, index, point));
+    });
     const add = document.createElement("button");
     add.type = "button";
     add.textContent = "Add checkpoint";
@@ -242,58 +265,76 @@ class PilotIntentPlanner {
         if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
       });
     });
-    checkpoints.append(add);
-    (this.current?.checkpoints ?? []).forEach((_point, index) => {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = `Remove checkpoint ${index + 1}`;
-      remove.addEventListener("click", () => {
-        const hadOverrides = this.clearRouteOverrides();
-        const current = this.current;
-        if (!current) return;
-        const nextCheckpoints = [...current.checkpoints];
-        nextCheckpoints.splice(index, 1);
-        const altitudes = [...current.cruiseAltitudeTexts];
-        if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
-        this.current = this.withIdentity({
-          ...current,
-          checkpoints: nextCheckpoints,
-          cruiseAltitudeTexts: altitudes,
-          overrideReasons: {},
-        });
-        this.invalidate();
-        this.render();
-        void this.persist().then(() => {
-          if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
-        });
+    route.append(add);
+    wrapper.append(route);
+    return wrapper;
+  }
+  private renderWaypointGroup(
+    groupId: string,
+    sourceLabel: string,
+    destinationLabel: string,
+    legIndex: number,
+    checkpointIndex?: number,
+    checkpoint?: PilotInputPlan["checkpoints"][number],
+  ): HTMLFieldSetElement {
+    const group = document.createElement("fieldset");
+    group.className = "waypoint-group";
+    group.dataset.waypointGroup = groupId;
+    const legend = document.createElement("legend");
+    legend.textContent = `${sourceLabel} — outbound to ${destinationLabel}`;
+    group.append(legend);
+    if (checkpoint !== undefined && checkpointIndex !== undefined) this.appendCheckpointEditor(group, checkpoint, checkpointIndex);
+    const altitude = this.current?.cruiseAltitudeTexts[legIndex] ?? "4500";
+    group.append(this.input(`altitude-${legIndex}`, `Cruise altitude outbound to ${destinationLabel} (feet MSL)`, altitude));
+    this.appendTasControls(group, legIndex);
+    return group;
+  }
+  private appendCheckpointEditor(group: HTMLFieldSetElement, checkpoint: PilotInputPlan["checkpoints"][number], index: number): void {
+    group.append(
+      this.input(`checkpoint-name-${index}`, `Checkpoint ${index + 1} name`, checkpoint.name),
+      this.input(`checkpoint-coordinate-${index}`, "SkyVector or decimal latitude, longitude", checkpoint.coordinateText),
+    );
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = `Remove checkpoint ${index + 1}`;
+    remove.addEventListener("click", () => this.removeCheckpoint(index));
+    group.append(remove);
+  }
+  private removeCheckpoint(index: number): void {
+    const hadOverrides = this.clearRouteOverrides();
+    const current = this.current;
+    if (!current) return;
+    const nextCheckpoints = [...current.checkpoints];
+    nextCheckpoints.splice(index, 1);
+    const altitudes = [...current.cruiseAltitudeTexts];
+    if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
+    this.current = this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} });
+    this.invalidate();
+    this.render();
+    void this.persist().then(() => {
+      if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
+    });
+  }
+  private appendTasControls(group: HTMLFieldSetElement, legIndex: number): void {
+    const override = this.fields[`override-tas-${legIndex}`]?.trim() ?? "";
+    const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
+    const summary = document.createElement("p");
+    summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
+    group.append(summary);
+    if (override || this.openOverrideEditors.has(legIndex)) {
+      group.append(this.input(`override-tas-${legIndex}`, `Leg ${legIndex + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${legIndex}`, `Leg ${legIndex + 1} override reason`, this.current?.overrideReasons[`tas-${legIndex}`] ?? ""));
+      const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${legIndex + 1}`;
+      restore.addEventListener("click", () => {
+        delete this.fields[`override-tas-${legIndex}`]; delete this.fields[`override-reason-${legIndex}`];
+        if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.current = { ...this.current, overrideReasons: reasons }; }
+        this.openOverrideEditors.delete(legIndex); this.invalidate(); this.render(); void this.persist();
       });
-      checkpoints.append(remove);
-    });
-    const altitudeSection = document.createElement("section"); altitudeSection.append(this.el("h3", "Cruise altitude per leg (feet MSL)"));
-    (this.current?.cruiseAltitudeTexts ?? ["4500"]).forEach((alt, index) => {
-      const leg = document.createElement("div"); leg.className = "leg-inputs";
-      leg.append(this.input(`altitude-${index}`, `Leg ${index + 1} cruise altitude`, alt));
-      const override = this.fields[`override-tas-${index}`]?.trim() ?? "";
-      const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
-      const summary = document.createElement("p"); summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
-      leg.append(summary);
-      if (override || this.openOverrideEditors.has(index)) {
-        leg.append(this.input(`override-tas-${index}`, `Leg ${index + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${index}`, `Leg ${index + 1} override reason`, this.current?.overrideReasons[`tas-${index}`] ?? ""));
-        const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${index + 1}`;
-        restore.addEventListener("click", () => {
-          delete this.fields[`override-tas-${index}`]; delete this.fields[`override-reason-${index}`];
-          if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${index}`]; this.current = { ...this.current, overrideReasons: reasons }; }
-          this.openOverrideEditors.delete(index); this.invalidate(); this.render(); void this.persist();
-        });
-        leg.append(restore);
-      } else {
-        const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${index + 1}`;
-        reveal.addEventListener("click", () => { this.openOverrideEditors.add(index); this.render(); });
-        leg.append(reveal);
-      }
-      altitudeSection.append(leg);
-    });
-    wrapper.append(checkpoints, altitudeSection); return wrapper;
+      group.append(restore);
+    } else {
+      const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${legIndex + 1}`;
+      reveal.addEventListener("click", () => { this.openOverrideEditors.add(legIndex); this.render(); });
+      group.append(reveal);
+    }
   }
   private renderProfileEditor(): HTMLElement {
     const section = document.createElement("details"); section.dataset.profileEditor = "true"; section.open = this.profileEditorOpen ?? this.profiles.length === 0;
@@ -352,6 +393,7 @@ class PilotIntentPlanner {
       await this.dependencies.repository.saveProfile(saved);
       this.profiles = [...this.profiles, saved];
       if (this.current) this.current = { ...this.current, selectedProfileId: saved.id, profileSnapshot: saved };
+      this.invalidate();
       this.profileDraftDirty = false;
       this.profileEditorOpen = false;
       const profileEditor = this.content.querySelector<HTMLDetailsElement>("details[data-profile-editor]");
@@ -382,7 +424,7 @@ class PilotIntentPlanner {
     this.profileDraftDirty = false;
     this.touchedFields.clear();
     this.activateStage(selectedProfile ? "route" : "aircraft");
-    this.setStatus("Enter pilot inputs, then Update plan to retrieve current context and calculate.");
+    this.setStatus("Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates.");
     this.render();
   }
 
@@ -405,7 +447,7 @@ class PilotIntentPlanner {
     this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selectedProfile);
     this.touchedFields.clear();
     this.activateStage("route");
-    this.setStatus("Opened saved pilot inputs. Update plan to fetch current context and calculate.");
+    this.setStatus("Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates.");
     this.render();
   }
   private captureStructured(form: HTMLFormElement): void {
@@ -420,8 +462,10 @@ class PilotIntentPlanner {
   private invalidate(): void {
     this.result = undefined;
     this.inspected = undefined;
+    this.updateError = "";
+    this.setStatus("Inputs changed. Save changes or Update navlog to use the current inputs.");
     const output = this.content.querySelector("[data-current-result]");
-    output?.replaceWith(document.createTextNode("Update plan to display a current calculated navlog."));
+    output?.replaceWith(document.createTextNode("Update navlog to retrieve current weather and display a calculated navlog."));
   }
   private clearRouteOverrides(): boolean {
     const hadOverrides = Object.entries(this.fields).some(([key, value]) =>
@@ -432,7 +476,19 @@ class PilotIntentPlanner {
     if (this.current) this.current = { ...this.current, overrideReasons: {} };
     return hadOverrides;
   }
-  private async persist(): Promise<void> {
+  private async saveChanges(): Promise<void> {
+    const form = this.content.querySelector("form.route-form");
+    if (form instanceof HTMLFormElement) this.captureStructured(form);
+    this.updateError = "";
+    const button = this.content.querySelector<HTMLButtonElement>("button[data-save-changes]");
+    if (button) button.disabled = true;
+    try {
+      await this.persist("Changes saved.");
+    } finally {
+      if (button) button.disabled = this.savingProfile || this.updating;
+    }
+  }
+  private async persist(successMessage = "Pilot inputs saved."): Promise<void> {
     if (!this.current) return;
     const snapshot = this.withIdentity({ ...this.current, rawFields: { ...this.fields } });
     this.current = snapshot;
@@ -441,8 +497,9 @@ class PilotIntentPlanner {
       .then(async () => {
         await this.dependencies.repository.saveWorkingCopy(snapshot);
         this.plans = [...this.plans.filter((plan) => plan.id !== snapshot.id), snapshot];
+        this.refreshUpdateGate();
         this.saveError = "";
-        this.setStatus("Pilot inputs saved.");
+        this.setStatus(successMessage);
       });
     this.saveQueue = operation;
     try {
@@ -469,7 +526,7 @@ class PilotIntentPlanner {
       await this.saveQueue.catch(() => undefined);
       const invalid = this.localError();
       if (invalid) throw new Error(invalid);
-      this.setStatus("Updating plan…");
+      this.setStatus("Updating navlog…");
       const current = this.current;
       const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
       this.current = { ...current, profileSnapshot: selectedProfile };
@@ -600,13 +657,31 @@ class PilotIntentPlanner {
     if (update) update.disabled = this.updating || reason !== undefined;
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
+    this.refreshCurrentUtcControl();
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
       const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
-      const message = showError ? fieldErrorFor(input.name, this.fields, this.current, this.profiles) : undefined;
+      const fields = { ...this.fields, [input.name]: input.value };
+      const message = showError ? fieldErrorFor(input.name, fields, this.current, this.profiles) : undefined;
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
     });
+  }
+
+  private refreshCurrentUtcControl(): void {
+    const useCurrentUtc = this.content.querySelector<HTMLButtonElement>("button[data-use-current-utc]");
+    if (useCurrentUtc) useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
+  }
+
+  private shouldOfferCurrentUtc(): boolean {
+    if (!this.current || !this.plans.some((plan) => plan.id === this.current?.id)) return false;
+    try {
+      const departureMs = Date.parse(localUtcTextToIso(this.fields["departure-time"] ?? ""));
+      const nowText = this.dependencies.clock.now().toISOString().slice(0, 16);
+      return departureMs < this.dependencies.clock.now().getTime() && this.fields["departure-time"] !== nowText;
+    } catch {
+      return false;
+    }
   }
 }
 

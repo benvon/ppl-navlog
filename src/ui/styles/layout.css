@@ -33,6 +33,7 @@ body {
 .planner-shell .route-form > div > section + section { margin-block-start: var(--space-4); }
 .planner-shell .route-form [name="departure-time"],
 .planner-shell .route-form [name="departure-local"] { max-width: 22rem; }
+.planner-shell .route-form [data-use-current-utc] { width: fit-content; max-width: 100%; justify-self: start; align-self: start; }
 .planner-shell [data-stage="calculate"] [data-update-plan] { width: fit-content; }
 
 .planner-content,
