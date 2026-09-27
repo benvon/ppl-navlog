@@ -4,7 +4,7 @@ import type { AirportLookup } from "../application/airport-lookup";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
 import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
-import type { AloftPointAnswer, AloftPointQuery } from "../../worker/api/contracts";
+import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { coordinate, type Coordinate } from "../domain/coordinates";
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
@@ -168,6 +168,51 @@ function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordin
 }
 
 describe("pilot intent planner", () => {
+  it("recovers a saved past departure from a fetched newer METAR and reuses the same report", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "past-weather-plan", title: "Past weather route", rawFields: {
+        "plan-title": "Past weather route", "departure-time": "2026-09-21T20:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
+        "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T20:00:00.000Z", submissions: [],
+    });
+    const returnedReports: MetarSuccessPayload[] = [];
+    const client = winds({ fetchMetar: async (icao) => {
+      const report = await completeFlightWeatherClient.fetchMetar(icao);
+      returnedReports.push(report);
+      return report;
+    } });
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const root = await mount(repository, client);
+
+    button(root, "Update navlog").click();
+    await settle();
+    expect(fetchMetar).toHaveBeenCalledTimes(1);
+    expect(fetchMetar).toHaveBeenLastCalledWith("KORD");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("observed after the planned departure UTC");
+    expect(fetchPoint).not.toHaveBeenCalled();
+    expect(root.querySelector("[data-current-result]")).toBeNull();
+
+    button(root, "Use current UTC").click();
+    await settle();
+    expect(input(root, "departure-time").value).toBe("2026-09-21T21:30");
+    expect(repository.plans.find((plan) => plan.id === "past-weather-plan")?.rawFields["departure-time"]).toBe("2026-09-21T21:30");
+    expect(fetchMetar).toHaveBeenCalledTimes(1);
+    expect(fetchPoint).not.toHaveBeenCalled();
+
+    button(root, "Update navlog").click();
+    await settle();
+    expect(fetchMetar).toHaveBeenCalledTimes(2);
+    expect(fetchMetar).toHaveBeenLastCalledWith("KORD");
+    expect(returnedReports).toHaveLength(2);
+    expect(returnedReports[1]).toEqual(returnedReports[0]);
+    expect(returnedReports[1]?.requestId).toBe(returnedReports[0]?.requestId);
+    expect(fetchPoint).toHaveBeenCalled();
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
+  });
+
   it("opens aircraft first and groups fuel aboard with plan inputs", async () => {
     const root = await mount(new MemoryInputs());
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="aircraft"]')?.open).toBe(true);

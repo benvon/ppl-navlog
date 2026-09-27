@@ -111,6 +111,7 @@ describe("route waypoint weather sampling", () => {
     ["more than two hours old", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, observedAt: "2029-09-21T09:59:59.999Z" } }), /more than two hours before planned departure/i],
     ["wrong station", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, icao: "KJVL" } }), /not the departure airport/i],
     ["stale cache", (source: MetarSuccessPayload) => ({ ...source, provenance: { ...source.provenance, cache: { ...source.provenance.cache, status: "stale_on_error", freshnessRemainingSeconds: 0 } as never } }), /cache.*stale/i],
+    ["refreshing stale cache", (source: MetarSuccessPayload) => ({ ...source, provenance: { ...source.provenance, cache: { ...source.provenance.cache, status: "stale_while_refresh", freshnessRemainingSeconds: 30 } as never } }), /cache.*stale/i],
     ["missing observation time", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, observedAt: null } }), /no observation time/i],
     ["unusable wind", (source: MetarSuccessPayload) => ({ ...source, metar: { ...source.metar, wind: { ...source.metar.wind, directionType: "variable" as const, directionDegTrue: null } } }), /usable fixed or calm wind/i],
   ])("reports why a departure METAR is ineligible: %s", async (_case, transform, expected) => {
