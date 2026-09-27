@@ -17,30 +17,35 @@ describe("calculated visual flight log generated event timing", () => {
       calculationSnapshot: {
         schema: "complete-navlog/v1", status: "calculated", phaseAllocation: {
           boundaries: [
-            { kind: "top-of-climb", routeDistanceNauticalMiles: 8 },
+            { kind: "top-of-climb", routeDistanceNauticalMiles: 8.16 },
             { kind: "top-of-descent", routeDistanceNauticalMiles: 45 },
-          ], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 52 },
+          ], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 52 },
         }, navlog: {
           rows: [
-            { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", startingAltitude: 680, endingAltitude: 4500, distance: 8 }, cumulative: { routeDistance: 8, estimatedTimeEnroute: 10 } },
+            { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", startingAltitude: 679.6, endingAltitude: 4500.4, distance: 8.16 }, estimatedTimeEnroute: 9.8, fuel: 1.26, cumulative: { routeDistance: 8.16, estimatedTimeEnroute: 10.3 } },
             { subleg: { sourceLegId: "leg-1", phaseId: "route-cruise-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, distance: 22 }, cumulative: { routeDistance: 30, estimatedTimeEnroute: 24 } },
             { subleg: { sourceLegId: "leg-2", phaseId: "route-cruise-2:to-tod", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, distance: 15 }, cumulative: { routeDistance: 45, estimatedTimeEnroute: 34 } },
             { subleg: { sourceLegId: "leg-2", phaseId: "arrival-descent", phase: "descent", startingAltitude: 4500, endingAltitude: 1800, distance: 7 }, cumulative: { routeDistance: 52, estimatedTimeEnroute: 41 } },
           ], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 },
         },
-      },
+      } as const,
     };
 
     const rendered = renderCalculatedNavlog(revision);
     const labels = rowLabels(rendered);
-    expect(labels[0]).toContain("TOC");
+    expect(labels[0]).toContain("Chicago O'Hare → TOC");
+    expect(labels[1]).toContain("TOC →");
     expect(labels[2]).toContain("TOD");
-    expect(labels[3]).toContain("3 NM before destination");
+    expect(labels[3]).toContain("TOD → Southern Wisconsin Regional (pattern altitude)");
     expect(labels[3]).toContain("pattern altitude");
     expect(rendered?.textContent).toContain("Cumulative NM");
     expect(rendered?.textContent).toContain("Cumulative ETE min");
-    expect(tableCellText(rendered, 13)).toBe("8.0");
-    expect(tableCellText(rendered, 14)).toBe("10.0");
+    expect(tableCellText(rendered, 1)).toBe("680 → 4500");
+    expect(tableCellText(rendered, 10)).toBe("8.2");
+    expect(tableCellText(rendered, 12)).toBe("10");
+    expect(tableCellText(rendered, 13)).toBe("8.2");
+    expect(tableCellText(rendered, 14)).toBe("10");
+    expect(tableCellText(rendered, 15)).toBe("1.3");
   });
 });
 
@@ -53,19 +58,21 @@ describe("direct route generated event labels", () => {
         phaseAllocation: { boundaries: [
           { kind: "top-of-climb", routeDistanceNauticalMiles: 8 },
           { kind: "top-of-descent", routeDistanceNauticalMiles: 45 },
-        ], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 52 } },
+        ], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 52 } },
         navlog: { rows: [
           { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", startingAltitude: 680, endingAltitude: 4500, distance: 8 }, cumulative: { routeDistance: 8, estimatedTimeEnroute: 10 } },
           { subleg: { sourceLegId: "leg-1", phaseId: "route-cruise-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, distance: 37 }, cumulative: { routeDistance: 45, estimatedTimeEnroute: 35 } },
-          { subleg: { sourceLegId: "leg-1", phaseId: "arrival-descent", phase: "descent", startingAltitude: 4500, endingAltitude: 1800, distance: 7 }, cumulative: { routeDistance: 52, estimatedTimeEnroute: 42 } },
+          { subleg: { sourceLegId: "leg-2", phaseId: "arrival-descent", phase: "descent", startingAltitude: 4500, endingAltitude: 1800, distance: 7 }, cumulative: { routeDistance: 52, estimatedTimeEnroute: 42 } },
         ], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } },
       },
     };
 
-    const labels = rowLabels(renderCalculatedNavlog(revision));
+    const rendered = renderCalculatedNavlog(revision, { onInspect: vi.fn() });
+    const labels = rowLabels(rendered);
     expect(labels[0]).toContain("TOC");
     expect(labels[1]).toContain("TOD");
-    expect(labels[2]).toContain("3 NM before destination");
+    expect(labels[2]).toContain("Southern Wisconsin Regional (pattern altitude)");
+    expect(rendered?.querySelector<HTMLButtonElement>('button[data-row-index="1"][data-inspect-field="altitude"]')?.getAttribute("aria-label")).toContain("TOC to TOD");
   });
 });
 
@@ -107,6 +114,24 @@ describe("generated navlog event labels", () => {
     expect(rendered?.textContent).toContain("Fuel required including taxi/run-up and reserve");
     expect(rendered?.textContent).toContain("Estimated balance at arrival: 2.0 gal");
   });
+
+  it("keeps the prior 3 NM endpoint wording for saved snapshots with that marker", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 20 } },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phaseId: "arrival-descent", phase: "descent", startingAltitude: 4500, endingAltitude: 1800, distance: 7 }, cumulative: { routeDistance: 20, estimatedTimeEnroute: 42 } },
+        ], fuelSummary: { requiredFuel: 10, enrouteFuel: 6, fuelAboard: 12, taxiRunupFuel: 1, fuelAfterTaxi: 11, estimatedArrivalFuel: 2, reserveFuel: 1, reserveMargin: 1 } },
+      },
+    };
+
+    const rendered = renderCalculatedNavlog(revision);
+    expect(rowLabels(rendered)[0]).toContain("3 NM before destination (pattern altitude)");
+    expect(rendered?.textContent).toContain("Fuel required through 3 NM point");
+    expect(rendered?.textContent).toContain("Estimated balance at 3 NM point: 2.0 gal");
+  });
 });
 
 describe("calculated visual flight log", () => {
@@ -114,7 +139,7 @@ describe("calculated visual flight log", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
-        schema: "complete-navlog/v1", status: "calculated", weather: { selectedForecastValidTimeUtc: "2026-09-21T18:00:00.000Z" }, phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 12 } },
+        schema: "complete-navlog/v1", status: "calculated", weather: { selectedForecastValidTimeUtc: "2026-09-21T18:00:00.000Z" }, phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 12 } },
         navlog: {
           rows: [{
             subleg: { sourceLegId: "leg-1", phase: "climb", startingAltitude: 680, endingAltitude: 4500, trueCourse: 280, distance: 12 },
@@ -135,7 +160,7 @@ describe("calculated visual flight log", () => {
     expect(rendered?.textContent).not.toContain("METAR at field elevation");
     expect(rendered?.textContent).not.toContain("Raw row evidence");
     expect(rendered?.textContent).not.toContain("Phase boundaries and weather selection");
-    expect(rendered?.textContent).toContain("Fuel required through 3 NM point, including taxi/run-up and reserve: 10.0 gal");
+    expect(rendered?.textContent).toContain("Fuel required through destination at pattern altitude, including taxi/run-up and reserve: 10.0 gal");
     expect(rendered?.querySelector("unsafe")).toBeNull();
   });
 
@@ -163,7 +188,7 @@ describe("calculated visual flight log", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
-        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 20 } }, weather: {},
+        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 20 } }, weather: {},
         navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, fuel: 9, cumulative: { routeDistance: 20, fuelRemaining: 0 } }], fuelSummary: {
           fuelAboard: 10, taxiRunupFuel: 1, fuelAfterTaxi: 9, estimatedArrivalFuel: 0, enrouteFuel: 9, reserveFuel: 0,
           reserveMargin: 0, reserveShortfall: 0, fuelExhaustionDeficit: 0, fuelExhausted: true, sufficientAboardFuel: false,
@@ -174,7 +199,7 @@ describe("calculated visual flight log", () => {
     expect(rendered?.textContent).toContain("Fuel aboard (pilot input): 10.0 gal");
     expect(rendered?.textContent).toContain("Taxi/run-up (pilot input): 1.0 gal");
     expect(rendered?.textContent).toContain("post-taxi balance (calculated): 9.0 gal");
-    expect(rendered?.textContent).toContain("Estimated balance at 3 NM point: 0.0 gal");
+    expect(rendered?.textContent).toContain("Estimated balance at destination: 0.0 gal");
     expect(rendered?.textContent).toContain("Fuel exhausted at arrival");
     expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Fuel exhausted at arrival");
     expect(rendered?.textContent).toContain("Balance after row");
@@ -184,7 +209,7 @@ describe("calculated visual flight log", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
-        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 20 } }, weather: {},
+        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 20 } }, weather: {},
         navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, fuel: 11.25, cumulative: { fuelRemaining: -2.25 } }], fuelSummary: {
           fuelAboard: 10, taxiRunupFuel: 1, fuelAfterTaxi: 9, estimatedArrivalFuel: -2.25, enrouteFuel: 11.25, reserveFuel: 1,
           reserveMargin: -3.25, reserveShortfall: 3.25, fuelExhaustionDeficit: 2.25, fuelExhausted: true, sufficientAboardFuel: false,
@@ -193,7 +218,7 @@ describe("calculated visual flight log", () => {
     };
     const rendered = renderCalculatedNavlog(revision);
     expect(rendered?.textContent).toContain("capacity comparison unavailable");
-    expect(rendered?.textContent).toContain("Estimated deficit at 3 NM point: 2.3 gal");
+    expect(rendered?.textContent).toContain("Estimated deficit at destination: 2.3 gal");
     expect(rendered?.textContent).toContain("Deficit: 2.3 gal");
     expect(rendered?.textContent).not.toContain("-2.3 gal available");
     expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Fuel exhaustion deficit");
@@ -202,13 +227,13 @@ describe("calculated visual flight log", () => {
   it("does not round small positive fuel into an exhaustion warning", () => {
     const revision = {
       ...planRevision(),
-      calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-3nm", routeDistanceNauticalMiles: 0 } }, weather: {}, navlog: { rows: [], fuelSummary: {
+      calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 0 } }, weather: {}, navlog: { rows: [], fuelSummary: {
         fuelAboard: 1, taxiRunupFuel: 0, fuelAfterTaxi: 1, estimatedArrivalFuel: 0.04, enrouteFuel: 0.96, reserveFuel: 0,
         reserveMargin: 0.04, reserveShortfall: 0, fuelExhaustionDeficit: 0, fuelExhausted: false, sufficientAboardFuel: true,
       } } },
     };
     const rendered = renderCalculatedNavlog(revision);
-    expect(rendered?.textContent).toContain("Estimated balance at 3 NM point: <0.1 gal");
+    expect(rendered?.textContent).toContain("Estimated balance at destination: <0.1 gal");
     expect(rendered?.querySelector(".navlog-fuel-warning")).toBeNull();
   });
 

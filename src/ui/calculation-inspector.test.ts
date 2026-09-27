@@ -3,6 +3,20 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("matches whole-minute navlog ETE while retaining its unrounded value", () => {
+    const rendered = renderCalculationInspector(teachingRevision(), { rowIndex: 0, field: "estimatedTimeEnroute" });
+    expect(rendered.textContent).toContain("Result: 6 min as shown in the navlog.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 5.922");
+  });
+  it("matches whole-foot navlog altitude while retaining its unrounded values", () => {
+    const revision = teachingRevision();
+    const subleg = revision.calculationSnapshot.navlog.rows[0]!.subleg as Record<string, unknown>;
+    subleg.startingAltitude = 1798.3;
+    subleg.endingAltitude = 1800.2;
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
+    expect(rendered.textContent).toContain("Result: 1798 → 1800 ft MSL as shown in the navlog.");
+    expect(rendered.textContent).toContain("1798.3");
+  });
   it("describes wind from the right as a leftward push requiring a right correction", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;

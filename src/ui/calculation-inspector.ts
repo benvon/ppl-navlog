@@ -219,7 +219,7 @@ function worksheetValue(value: unknown, field: NavlogInspectionField, row: Recor
 
 function worksheetAltitude(row: RecordValue): string {
   const subleg = nested(row, "subleg");
-  return `${worksheetNumber(subleg?.startingAltitude)} → ${worksheetNumber(subleg?.endingAltitude)}`;
+  return `${worksheetWholeNumber(subleg?.startingAltitude)} → ${worksheetWholeNumber(subleg?.endingAltitude)}`;
 }
 
 function worksheetWind(value: unknown): string {
@@ -230,11 +230,16 @@ function worksheetWind(value: unknown): string {
 function worksheetScalar(value: unknown, field: NavlogInspectionField): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return displayValue(value);
   if (field === "fuel" && value !== 0 && Math.abs(value) < 0.1) return `${value < 0 ? "−" : ""}<0.1`;
+  if (field === "estimatedTimeEnroute") return worksheetWholeNumber(value);
   return worksheetNumber(value);
 }
 
 function worksheetNumber(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
+}
+
+function worksheetWholeNumber(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(0) : "—";
 }
 
 function selectedUnit(field: NavlogInspectionField): string {
