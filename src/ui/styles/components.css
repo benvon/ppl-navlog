@@ -56,6 +56,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+@media (max-width: 34rem) {
+  .current-clock { max-width: 100%; padding: var(--space-1) var(--space-2); font-size: clamp(0.7rem, 3.4vw, 0.8rem); }
+  .current-clock > div { white-space: nowrap; }
+}
+
 [data-utc-format] { margin: 0; color: var(--color-muted); font-size: 0.875rem; }
 
 .route-waypoints { grid-column: 1 / -1; min-width: 0; }

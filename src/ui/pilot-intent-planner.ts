@@ -187,12 +187,11 @@ class PilotIntentPlanner {
 
   private updateClock(clock: HTMLElement): void {
     const now = new Date();
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const offsetMinutes = -now.getTimezoneOffset();
     const offset = `${offsetMinutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMinutes) % 60).padStart(2, "0")}`;
     const local = utcTextToLocalDateTime(now.toISOString().slice(0, 16))?.replace("T", " ") ?? "—";
     const seconds = `:${String(now.getUTCSeconds()).padStart(2, "0")}`;
-    clock.replaceChildren(this.clockLine(`Local (${zone}, UTC${offset}): ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
+    clock.replaceChildren(this.clockLine(`Local UTC${offset}: ${local}${seconds}`), this.clockLine(`UTC: ${now.toISOString().slice(0, 16).replace("T", " ")}${seconds}`));
   }
 
   private clockLine(value: string): HTMLElement { const line = document.createElement("div"); line.textContent = value; return line; }

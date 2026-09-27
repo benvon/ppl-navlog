@@ -310,7 +310,10 @@ describe("pilot intent planner", () => {
     const expectedUtc = new Date(2026, 8, 26, 20, 30).toISOString().slice(0, 16);
     expect(input(root, "departure-time").value).toBe(expectedUtc);
     expect(root.querySelector('[data-utc-format]')?.textContent).toContain("YYYY-MM-DDTHH:mm");
-    expect(root.querySelector('[data-current-clock]')?.textContent).toContain("UTC");
+    const currentClock = root.querySelector<HTMLElement>("[data-current-clock]")!;
+    expect(currentClock.children).toHaveLength(2);
+    expect(currentClock.children[0]?.textContent).toMatch(/Local UTC[−+]\d{2}:\d{2}: \d{4}-\d\d-\d\d /);
+    expect(currentClock.children[1]?.textContent).toMatch(/^UTC: \d{4}-\d\d-\d\d /);
   });
 
   it("lets a saved past departure explicitly use current UTC and fetches weather only on Update navlog", async () => {
