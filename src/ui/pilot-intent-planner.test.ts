@@ -81,8 +81,7 @@ function input(root: HTMLElement, name: string): HTMLInputElement {
 }
 
 function button(root: HTMLElement, text: string): HTMLButtonElement {
-  const expected = text === "Update plan" ? "Update navlog" : text;
-  const element = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === expected);
+  const element = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === text);
   if (!element) throw new Error(`Missing button ${text}`);
   return element;
 }
@@ -183,7 +182,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="navlog"]')?.open).toBe(true);
     edit(root, "fuel-aboard", "19", true);
@@ -197,7 +196,7 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     document.body.append(root);
     await makeLocallyValid(root);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true);
     expect(input(root, "fuel-aboard").value).toBe("20");
@@ -288,7 +287,7 @@ describe("pilot intent planner", () => {
     edit(root, "departure-icao", "1C8", true);
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
   });
 
   it("saves an incomplete aboard-fuel working copy but gates Update until a valid value within capacity is entered", async () => {
@@ -297,27 +296,27 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root);
     edit(root, "fuel-aboard", "", true);
     await settle();
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("");
     expect(repository.submissions).toHaveLength(0);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("Enter a finite, nonnegative");
 
     edit(root, "fuel-aboard", "24");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
     edit(root, "fuel-aboard", "24.01");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("exceeds usable capacity");
     edit(root, "fuel-aboard", "not-a-number");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("finite, nonnegative");
     edit(root, "fuel-aboard", "not-a-number", true);
     await settle();
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("not-a-number");
     expect(repository.submissions).toHaveLength(0);
     edit(root, "fuel-aboard", "-0.1");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     edit(root, "fuel-aboard", "0");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
   it("restores a legacy plan without fuel aboard as blank and preserves its other literal inputs", async () => {
@@ -327,7 +326,7 @@ describe("pilot intent planner", () => {
     expect(input(root, "fuel-aboard").value).toBe("");
     expect(input(root, "departure-icao").value).toBe("1C8");
     expect(input(root, "taxi-fuel").value).toBe("1.25");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
   });
 
   it("allows an entered aboard amount above 24 gallons when the profile has no capacity value", async () => {
@@ -335,9 +334,9 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     await makeLocallyValid(root);
     edit(root, "fuel-aboard", "99");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toBe("");
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector(".calculated-navlog")?.textContent).toContain("capacity comparison unavailable");
@@ -389,7 +388,7 @@ describe("pilot intent planner", () => {
     edit(root, "departure-metar-icao", "KOR");
     expect(input(root, "departure-metar-icao").getAttribute("aria-invalid")).toBe("true");
     expect(root.querySelector("#departure-metar-icao-error")?.textContent).toContain("four-character ICAO");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
 
     edit(root, "departure-metar-icao", "kord");
     expect(input(root, "departure-metar-icao").getAttribute("aria-invalid")).toBe("false");
@@ -409,7 +408,7 @@ describe("pilot intent planner", () => {
     const root = await mount(repository, winds(), airportLookup);
     await makeLocallyValid(root);
     edit(root, "departure-icao", "1C8");
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
 
     expect(repository.submissions).toHaveLength(1);
@@ -431,7 +430,7 @@ describe("pilot intent planner", () => {
     const fetchTaf = vi.spyOn(client, "fetchTaf");
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
 
     expect(repository.submissions).toHaveLength(1);
@@ -474,8 +473,8 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
     expect(root.querySelector("[name='forecast-choice']")).toBeNull();
     expect([...root.querySelectorAll("button")].some((candidate) => candidate.textContent === "Load published forecast periods")).toBe(false);
-    expect(button(root, "Update plan").disabled).toBe(false);
-    button(root, "Update plan").click();
+    expect(button(root, "Update navlog").disabled).toBe(false);
+    button(root, "Update navlog").click();
     await settle();
 
     expect(repository.submissions).toHaveLength(1);
@@ -637,12 +636,12 @@ describe("pilot intent planner", () => {
     expect(reopened.querySelector(".calculated-navlog")).toBeNull();
   });
 
-  it("gates Update plan on required inputs and a profile without requiring a forecast period", async () => {
+  it("gates Update navlog on required inputs and a profile without requiring a forecast period", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     await makeLocallyValid(root);
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
   it("autosaves malformed airport codes but blocks submission before airport lookup", async () => {
@@ -655,11 +654,11 @@ describe("pilot intent planner", () => {
     await settle();
 
     expect(repository.plans.at(-1)?.rawFields["departure-icao"]).toBe("K-ORD");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("[data-local-error]")?.textContent).toContain("exactly 3 or 4 letters or numbers");
     lookupSpy.mockClear();
-    button(root, "Update plan").disabled = false;
-    button(root, "Update plan").click();
+    button(root, "Update navlog").disabled = false;
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(0);
     expect(lookupSpy).not.toHaveBeenCalled();
@@ -674,10 +673,10 @@ describe("pilot intent planner", () => {
     edit(root, "departure-icao", " kord ");
     edit(root, "destination-icao", "kjvl");
     expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
     lookupSpy.mockClear();
 
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(lookupSpy).toHaveBeenCalledWith("KORD");
@@ -708,10 +707,10 @@ describe("pilot intent planner", () => {
     const corrupt = { ...repository.plans[0]!, checkpoints: Array.from({ length: 26 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })), cruiseAltitudeTexts: Array(27).fill("4500"), overrideReasons: {} };
     repository.plans[0] = corrupt;
     const reopened = await mount(repository);
-    expect(button(reopened, "Update plan").disabled).toBe(true);
+    expect(button(reopened, "Update navlog").disabled).toBe(true);
     expect(reopened.querySelector("[data-local-error]")?.textContent).toContain("no more than 25 checkpoints");
-    button(reopened, "Update plan").disabled = false;
-    button(reopened, "Update plan").click();
+    button(reopened, "Update navlog").disabled = false;
+    button(reopened, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(0);
   });
@@ -728,8 +727,8 @@ describe("pilot intent planner", () => {
     const title = input(root, "plan-title");
     expect(title.getAttribute("aria-invalid")).toBe("true");
     expect(root.querySelector(`#${title.name}-error`)?.textContent).toBe("Plan title must be 120 characters or fewer.");
-    expect(button(root, "Update plan").disabled).toBe(true);
-    button(root, "Update plan").click();
+    expect(button(root, "Update navlog").disabled).toBe(true);
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(0);
     expect(fetchForecast).not.toHaveBeenCalled();
@@ -737,8 +736,8 @@ describe("pilot intent planner", () => {
 
     edit(root, "plan-title", `  ${"a".repeat(120)}  `);
     expect(title.getAttribute("aria-invalid")).toBe("false");
-    expect(button(root, "Update plan").disabled).toBe(false);
-    button(root, "Update plan").click();
+    expect(button(root, "Update navlog").disabled).toBe(false);
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(fetchForecast).not.toHaveBeenCalled();
@@ -778,7 +777,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")?.value).toBe(profile.id);
     expect(input(root, "cruiseTasKnots").value).toBe("102");
     expect(String(profile.cruiseTasKnots)).toBe("95");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("[data-local-error]")?.textContent).toContain("Save the edited aircraft profile first.");
 
     const draftValues: Record<string, string> = {
@@ -792,7 +791,7 @@ describe("pilot intent planner", () => {
     await settle();
     expect(repository.profiles.at(-1)?.cruiseTasKnots).toBe(102);
     expect(root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")?.value).toBe(repository.profiles.at(-1)?.id);
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
   it("recomputes the restored profile draft gate when another matching saved profile is selected", async () => {
@@ -814,7 +813,7 @@ describe("pilot intent planner", () => {
     });
     const root = await mount(repository);
     expect(input(root, "cruiseTasKnots").value).toBe("102");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("[data-local-error]")?.textContent).toContain("Save the edited aircraft profile first.");
 
     const selection = root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")!;
@@ -822,7 +821,7 @@ describe("pilot intent planner", () => {
     selection.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
     expect(input(root, "cruiseTasKnots").value).toBe("102");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
     expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
     expect(repository.plans.find((plan) => plan.id === "profile-choice-plan")?.selectedProfileId).toBe(alternateProfile.id);
   });
@@ -908,9 +907,9 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root);
     button(root, "Override TAS for leg 1").click();
     edit(root, "override-tas-0", "-5");
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.textContent).toContain("Leg 1 TAS override must be a positive number of knots.");
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(0);
   });
@@ -935,10 +934,10 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("input[type='checkbox']")).toBeNull();
     button(root, "Override TAS for leg 1").click();
     edit(root, "override-tas-0", "100", true);
-    expect(button(root, "Update plan").disabled).toBe(true);
+    expect(button(root, "Update navlog").disabled).toBe(true);
     edit(root, "override-reason-0", "Training comparison", true);
     await settle();
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
     choosePlan(root, "Second plan");
     await settle();
     expect(input(root, "plan-title").value).toBe("Second plan");
@@ -959,7 +958,7 @@ describe("pilot intent planner", () => {
     } });
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(repository.submissions).toHaveLength(1);
@@ -968,7 +967,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(root.querySelector('[data-stage="navlog"]')?.textContent).toContain("Update navlog to retrieve current weather and display a calculated navlog.");
     failPoint = true;
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(2);
     expect(repository.submissions[1]?.rawFields["plan-title"]).toBe("Changed inputs");
@@ -976,7 +975,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
 
     failPoint = false;
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(3);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
@@ -997,7 +996,7 @@ describe("pilot intent planner", () => {
     });
     const root = await mount(repository, client);
     expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
@@ -1013,7 +1012,7 @@ describe("pilot intent planner", () => {
     const fetchMetar = vi.spyOn(client, "fetchMetar");
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
@@ -1040,7 +1039,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[name='override-tas-1']")).toBeNull();
     expect(root.querySelector("[name='override-reason-1']")).toBeNull();
     expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
-    expect(button(root, "Update plan").disabled).toBe(false);
+    expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
   it("keeps the second leg override reason when another route field changes", async () => {
@@ -1086,7 +1085,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root, true);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
@@ -1111,7 +1110,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
@@ -1139,7 +1138,7 @@ describe("pilot intent planner", () => {
     };
     repository.plans.push(firstPlan, otherPlan);
     const root = await mount(repository);
-    button(root, "Update plan").click();
+    button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
