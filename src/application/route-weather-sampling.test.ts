@@ -178,6 +178,88 @@ describe("route waypoint weather sampling", () => {
     expect(rows.at(-1)!.subleg.routeEndDistance).toBeCloseTo(rows.at(-1)!.cumulative.routeDistance, 6);
   });
 
+  it("reconciles provisional TOD during climb when forecast headwind moves TOD after TOC", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(11);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the short route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const queries: AloftPointQuery[] = [];
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, (query) => {
+      queries.push(query);
+      return 90;
+    }, { speed: 50 });
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    const rows = navRows(outcome.result);
+    const climbEnd = rows.find((row) => row.subleg.phase === "climb")!.subleg.routeEndDistance;
+    const descent = rows.find((row) => row.subleg.phase === "descent")!;
+    const profile = aircraftProfile();
+    const noWindSeed = distance.value - profile.descentTasKnots * ((4_500 - base.descentTargetAltitudeFeetMsl.effectiveValue) / profile.descentRateFeetPerMinute) / 60;
+    expect(noWindSeed).toBeLessThan(climbEnd);
+    expect(climbEnd).toBeLessThan(descent.subleg.routeStartDistance);
+    const seedDistance = nauticalMiles(noWindSeed);
+    if (!seedDistance.ok) throw new Error(seedDistance.error.message);
+    const seedPoint = pointAlongGreatCircle(start.coordinate, course.value, seedDistance.value);
+    if (!seedPoint.ok) throw new Error(seedPoint.error.message);
+    expect(queries.some((query) => Math.abs(query.latitudeDeg - seedPoint.value.latitude) < 0.001 && Math.abs(query.longitudeDeg - seedPoint.value.longitude) < 0.001)).toBe(true);
+    expect(queries.some((query) => Math.abs(query.latitudeDeg - descent.subleg.start.latitude) < 0.001 && Math.abs(query.longitudeDeg - descent.subleg.start.longitude) < 0.001)).toBe(true);
+  });
+
+  it("accepts a TOD that reaches the climb target within 50 ft without adding a level segment", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const course = trueCourse(90);
+    if (!course.ok) throw new Error(course.error.message);
+    const distance = nauticalMiles(13.85);
+    if (!distance.ok) throw new Error(distance.error.message);
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, () => 90, { speed: 25 });
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    const rows = navRows(outcome.result);
+    const climbIndices = rows.map((row, index) => row.subleg.phase === "climb" ? index : -1).filter((index) => index >= 0);
+    const finalClimbIndex = climbIndices.at(-1)!;
+    const finalClimb = rows[finalClimbIndex]!;
+    const descentIndex = rows.findIndex((row) => row.subleg.phase === "descent");
+    const firstDescent = rows[descentIndex]!;
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeGreaterThan(0);
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeLessThanOrEqual(50);
+    expect(firstDescent.subleg.startingAltitude).toBe(finalClimb.subleg.endingAltitude);
+    expect(finalClimb.subleg.routeEndDistance).toBeCloseTo(firstDescent.subleg.routeStartDistance, 8);
+    expect(descentIndex).toBe(finalClimbIndex + 1);
+    if (outcome.result.status !== "ready") throw new Error(outcome.result.message);
+    const snapshot = outcome.result.calculationSnapshot as { readonly phaseAllocation: { readonly boundaries: readonly { readonly kind: string; readonly routeDistanceNauticalMiles: number }[] } };
+    const toc = snapshot.phaseAllocation.boundaries.find((boundary) => boundary.kind === "top-of-climb");
+    const tod = snapshot.phaseAllocation.boundaries.find((boundary) => boundary.kind === "top-of-descent");
+    expect(toc).toBeDefined();
+    expect(tod).toBeDefined();
+    expect(toc!.routeDistanceNauticalMiles).toBeCloseTo(tod!.routeDistanceNauticalMiles, 8);
+  });
+
+  it("fails clearly when reconciled TOD still overlaps an active climb", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(11);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the short route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), {
+      async fetchPoint(query) { return answer(query, 90, 20); },
+    }, endpoints)).rejects.toThrow(/wind-adjusted top of descent still overlaps an active climb/i);
+  });
+
   it("reconciles a headwind TOD that moves from before to after a checkpoint", async () => {
     const base = routePlanDraft();
     const departurePoint = base.route.points[0]!;
@@ -295,7 +377,7 @@ describe("route waypoint weather sampling", () => {
     const distance = nauticalMiles(5);
     if (!distance.ok) throw new Error(distance.error.message);
     const projected = solution.weather.phaseWindResolver.resolveEffectiveWind({ phase: "descent", start: midpoint.value, courseDegreesTrue: geometry.value.initialTrueCourse, startingAltitudeFeetMsl: 4_500, targetAltitudeFeetMsl: 3_000, estimatedDistanceNauticalMiles: distance.value, iteration: 1 });
-    expect(queries).toHaveLength(3);
+    expect(queries).toHaveLength(4);
     expect(projected.ok && projected.value.directionFrom).toBeCloseTo(270, 0);
   });
 
@@ -381,11 +463,50 @@ describe("route waypoint weather sampling", () => {
     expect(rows.some((row) => row.subleg.routeEndDistance > row.subleg.routeStartDistance && row.effectiveWind.wind.effectiveValue.speed > 0)).toBe(true);
   });
 
+  it("ends a climb at a waypoint within 50 feet and carries the actual altitude into the next leg", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const checkpoint = base.route.points[1]!;
+    const destination = base.route.points.at(-1)!;
+    const course = trueCourse(90);
+    const checkpointDistance = nauticalMiles(9.75);
+    const destinationDistance = nauticalMiles(35);
+    if (!course.ok || !checkpointDistance.ok || !destinationDistance.ok) throw new Error("Could not build the waypoint-altitude fixture.");
+    const checkpointCoordinate = pointAlongGreatCircle(start.coordinate, course.value, checkpointDistance.value);
+    const destinationCoordinate = pointAlongGreatCircle(start.coordinate, course.value, destinationDistance.value);
+    if (!checkpointCoordinate.ok || !destinationCoordinate.ok) throw new Error("Could not project waypoint coordinates.");
+    const points = [start, { ...checkpoint, coordinate: checkpointCoordinate.value }, { ...destination, coordinate: destinationCoordinate.value }];
+    const route = {
+      ...base.route,
+      points,
+      legs: [
+        { ...base.route.legs[0]!, toPointId: points[1]!.id, cruiseAltitudeFeetMsl: 4_500 },
+        { ...base.route.legs[1]!, fromPointId: points[1]!.id, toPointId: points[2]!.id, cruiseAltitudeFeetMsl: 4_500 },
+      ],
+    };
+    const { queries, result } = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270, { speed: 0 });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "ready" });
+    const rows = navRows(result);
+    const climbRows = rows.filter((row) => row.subleg.phase === "climb");
+    expect(climbRows.length).toBeGreaterThan(0);
+    expect(climbRows.every((row) => row.subleg.routeEndDistance <= checkpointDistance.value + 1e-6)).toBe(true);
+    const finalClimb = climbRows.at(-1)!;
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeGreaterThan(0);
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeLessThanOrEqual(50);
+    const nextLegRows = rows.filter((row) => row.subleg.sourceLegId === route.legs[1]!.id);
+    expect(nextLegRows[0]!.subleg.startingAltitude).toBe(finalClimb.subleg.endingAltitude);
+    expect(queries.filter((query) => Math.abs(query.latitudeDeg - checkpointCoordinate.value.latitude) < 0.001 && Math.abs(query.longitudeDeg - checkpointCoordinate.value.longitude) < 0.001)).toHaveLength(1);
+    if (result.status !== "ready") throw new Error(result.message);
+    const snapshot = result.calculationSnapshot as { readonly phaseAllocation: { readonly boundaries: readonly { readonly kind: string; readonly routeDistanceNauticalMiles: number }[] } };
+    const toc = snapshot.phaseAllocation.boundaries.find((boundary) => boundary.kind === "top-of-climb");
+    expect(toc?.routeDistanceNauticalMiles).toBeCloseTo(checkpointDistance.value, 6);
+  });
+
   it("rejects an early waypoint where the selected inbound altitude cannot be reached", async () => {
     const base = routePlanDraft();
     const earlyCheckpoint = { ...base.route.points[1]!, coordinate: asCoordinate(41.95, -87.98) };
     const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, points: [base.route.points[0]!, earlyCheckpoint, base.route.points[2]!] } };
-    await expect(planWith(draft, () => 350)).rejects.toThrow(/selected inbound altitude cannot be reached at waypoint 2/i);
+    await expect(planWith(draft, () => 350)).rejects.toThrow(/selected inbound altitude cannot be reached within 50 ft at waypoint 2/i);
   });
 
   it("uses the projected climb-start position without adding its already-traveled phase distance", async () => {

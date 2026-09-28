@@ -114,7 +114,7 @@ function appendWalkthrough(section: HTMLElement, row: RecordValue, field: Navlog
     item.append(label, document.createTextNode(explanation));
     list.append(item);
   }
-  section.append(list, paragraph("Navlog values are displayed to one decimal where applicable; calculations carry the stored values forward without reusing rounded display values."));
+  section.append(list, paragraph("Navlog table angles, speeds, and elapsed times use whole units; altitude is rounded to the nearest 100 ft, and distance and fuel to 0.1. Calculation traces retain stored unrounded values."));
 }
 
 const isWindDerivedField = (field: NavlogInspectionField): boolean => ["windCorrectionAngle", "trueHeading", "magneticHeading", "compassHeading", "groundspeed", "estimatedTimeEnroute", "fuel"].includes(field);
@@ -219,19 +219,23 @@ function worksheetValue(value: unknown, field: NavlogInspectionField, row: Recor
 
 function worksheetAltitude(row: RecordValue): string {
   const subleg = nested(row, "subleg");
-  return `${worksheetWholeNumber(subleg?.startingAltitude)} → ${worksheetWholeNumber(subleg?.endingAltitude)}`;
+  return `${worksheetWholeHundredsOfFeet(subleg?.startingAltitude)} → ${worksheetWholeHundredsOfFeet(subleg?.endingAltitude)}`;
 }
 
 function worksheetWind(value: unknown): string {
   if (!record(value) || typeof value.directionFrom !== "number" || typeof value.speed !== "number") return displayValue(value);
-  return `${worksheetNumber(value.directionFrom)}° / ${worksheetNumber(value.speed)} kt`;
+  return `${worksheetWholeNumber(value.directionFrom)}° / ${worksheetWholeNumber(value.speed)} kt`;
 }
 
 function worksheetScalar(value: unknown, field: NavlogInspectionField): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return displayValue(value);
   if (field === "fuel" && value !== 0 && Math.abs(value) < 0.1) return `${value < 0 ? "−" : ""}<0.1`;
-  if (field === "estimatedTimeEnroute") return worksheetWholeNumber(value);
+  if (field === "estimatedTimeEnroute" || field === "groundspeed" || isWholeDegreeField(field)) return worksheetWholeNumber(value);
   return worksheetNumber(value);
+}
+
+function isWholeDegreeField(field: NavlogInspectionField): boolean {
+  return ["trueCourse", "windCorrectionAngle", "trueHeading", "variation", "magneticHeading", "compassDeviation", "compassHeading"].includes(field);
 }
 
 function worksheetNumber(value: unknown): string {
@@ -240,6 +244,10 @@ function worksheetNumber(value: unknown): string {
 
 function worksheetWholeNumber(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(0) : "—";
+}
+
+function worksheetWholeHundredsOfFeet(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(Math.round(value / 100) * 100) : "—";
 }
 
 function selectedUnit(field: NavlogInspectionField): string {

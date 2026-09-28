@@ -40,7 +40,7 @@ describe("calculated visual flight log generated event timing", () => {
     expect(labels[3]).toContain("pattern altitude");
     expect(rendered?.textContent).toContain("Cumulative NM");
     expect(rendered?.textContent).toContain("Cumulative ETE min");
-    expect(tableCellText(rendered, 1)).toBe("680 → 4500");
+    expect(tableCellText(rendered, 1)).toBe("700 → 4500");
     expect(tableCellText(rendered, 10)).toBe("8.2");
     expect(tableCellText(rendered, 12)).toBe("10");
     expect(tableCellText(rendered, 13)).toBe("8.2");
@@ -111,7 +111,7 @@ describe("generated navlog event labels", () => {
 
     const rendered = renderCalculatedNavlog(revision);
     expect(rendered?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[0]?.textContent).not.toContain("3 NM before destination");
-    expect(rendered?.textContent).toContain("Fuel required including taxi/run-up and reserve");
+    expect(rendered?.textContent).toContain("Estimated fuel required including taxi/run-up and reserve");
     expect(rendered?.textContent).toContain("Estimated balance at arrival: 2.0 gal");
   });
 
@@ -129,7 +129,7 @@ describe("generated navlog event labels", () => {
 
     const rendered = renderCalculatedNavlog(revision);
     expect(rowLabels(rendered)[0]).toContain("3 NM before destination (pattern altitude)");
-    expect(rendered?.textContent).toContain("Fuel required through 3 NM point");
+    expect(rendered?.textContent).toContain("Estimated fuel required through 3 NM point");
     expect(rendered?.textContent).toContain("Estimated balance at 3 NM point: 2.0 gal");
   });
 });
@@ -142,10 +142,10 @@ describe("calculated visual flight log", () => {
         schema: "complete-navlog/v1", status: "calculated", weather: { selectedForecastValidTimeUtc: "2026-09-21T18:00:00.000Z" }, phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: 12 } },
         navlog: {
           rows: [{
-            subleg: { sourceLegId: "leg-1", phase: "climb", startingAltitude: 680, endingAltitude: 4500, trueCourse: 280, distance: 12 },
-            effectiveWind: { wind: { effectiveValue: { directionFrom: 270, speed: 12 } } },
-            windCorrectionAngle: 2, trueHeading: 282, variation: { effectiveValue: -3 }, magneticHeading: 285,
-            compassDeviation: 1, compassHeading: 286, groundspeed: 95, estimatedTimeEnroute: 8, fuel: 1,
+            subleg: { sourceLegId: "leg-1", phase: "climb", startingAltitude: 680, endingAltitude: 4500, trueCourse: 280.4, distance: 12 },
+            effectiveWind: { wind: { effectiveValue: { directionFrom: 270.4, speed: 12.4 } } },
+            windCorrectionAngle: 2.4, trueHeading: 282.4, variation: { effectiveValue: -3.4 }, magneticHeading: 285.4,
+            compassDeviation: 1.4, compassHeading: 286.4, groundspeed: 95.4, estimatedTimeEnroute: 8, fuel: 1,
             assumptions: ["METAR at field elevation vector-interpolated to first FB level. <unsafe>"], traces: { windTriangle: { formulaId: "wind-triangle" } },
             cumulative: { routeDistance: 12 }, appliedOverrides: [],
           }], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 },
@@ -155,12 +155,16 @@ describe("calculated visual flight log", () => {
     const rendered = renderCalculatedNavlog(revision, { currentWeatherValidated: true });
     expect(rendered?.textContent).toContain("TC°");
     expect(rendered?.textContent).toContain("Current weather validated for this calculation.");
+    expect([...rendered!.querySelector<HTMLTableRowElement>("tbody tr")!.cells].slice(2, 10).map((heading) => heading.textContent)).toEqual([
+      "280", "270° / 12 kt", "2", "282", "-3", "285", "1", "286",
+    ]);
+    expect(tableCellText(rendered, 11)).toBe("95");
     expect(rendered?.textContent).not.toContain("Explanation");
     expect(rendered?.textContent).not.toContain("Assumption explained");
     expect(rendered?.textContent).not.toContain("METAR at field elevation");
     expect(rendered?.textContent).not.toContain("Raw row evidence");
     expect(rendered?.textContent).not.toContain("Phase boundaries and weather selection");
-    expect(rendered?.textContent).toContain("Fuel required through destination at pattern altitude, including taxi/run-up and reserve: 10.0 gal");
+    expect(rendered?.textContent).toContain("Estimated fuel required through destination at pattern altitude, including taxi/run-up and reserve: 10.0 gal");
     expect(rendered?.querySelector("unsafe")).toBeNull();
   });
 
@@ -181,6 +185,8 @@ describe("calculated visual flight log", () => {
     const rendered = renderCalculatedNavlog(revision);
 
     expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("short 1.5 gal");
+    expect(rendered?.textContent).toContain("Usable fuel is 12.0 gal");
+    expect(rendered?.textContent).not.toContain("Estimated usable fuel");
     expect(rendered?.querySelector(".navlog-warnings")?.textContent).toContain("stale cache");
   });
 
@@ -200,8 +206,9 @@ describe("calculated visual flight log", () => {
     expect(rendered?.textContent).toContain("Taxi/run-up (pilot input): 1.0 gal");
     expect(rendered?.textContent).toContain("post-taxi balance (calculated): 9.0 gal");
     expect(rendered?.textContent).toContain("Estimated balance at destination: 0.0 gal");
-    expect(rendered?.textContent).toContain("Fuel exhausted at arrival");
-    expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Fuel exhausted at arrival");
+    expect(rendered?.textContent).toContain("Forecast burn is estimated. Estimated fuel status: insufficient for taxi, route, and entered reserve under the entered assumptions.");
+    expect(rendered?.textContent).toContain("Estimated fuel exhausted at the calculated endpoint");
+    expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Estimated fuel exhausted at the calculated endpoint");
     expect(rendered?.textContent).toContain("Balance after row");
   });
 
@@ -221,7 +228,7 @@ describe("calculated visual flight log", () => {
     expect(rendered?.textContent).toContain("Estimated deficit at destination: 2.3 gal");
     expect(rendered?.textContent).toContain("Deficit: 2.3 gal");
     expect(rendered?.textContent).not.toContain("-2.3 gal available");
-    expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Fuel exhaustion deficit");
+    expect(rendered?.querySelector(".navlog-fuel-warning")?.textContent).toContain("Estimated fuel exhaustion deficit");
   });
 
   it("does not round small positive fuel into an exhaustion warning", () => {
@@ -234,6 +241,7 @@ describe("calculated visual flight log", () => {
     };
     const rendered = renderCalculatedNavlog(revision);
     expect(rendered?.textContent).toContain("Estimated balance at destination: <0.1 gal");
+    expect(rendered?.textContent).toContain("Estimated reserve margin: <0.1 gal above entered reserve.");
     expect(rendered?.querySelector(".navlog-fuel-warning")).toBeNull();
   });
 

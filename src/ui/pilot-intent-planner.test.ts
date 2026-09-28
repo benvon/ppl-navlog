@@ -602,7 +602,7 @@ describe("pilot intent planner", () => {
     if (!inspector) throw new Error("Missing current calculation inspector.");
     const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
-    expect(Number(storedMatch[1]).toFixed(1)).toBe(Number(displayedGroundspeed).toFixed(1));
+    expect(Math.round(Number(storedMatch[1]))).toBe(Number.parseInt(displayedGroundspeed, 10));
     expect(inspector.textContent).toContain("BRL");
     expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
     expect(inspector.textContent).toContain("KORD");

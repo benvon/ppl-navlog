@@ -7,6 +7,9 @@ const record = (value: unknown): value is RecordValue => typeof value === "objec
 const nested = (value: unknown, key: string): RecordValue | undefined => record(value) && record(value[key]) ? value[key] : undefined;
 const number = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
 const wholeNumber = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? String(Math.round(value)) : "—";
+const wholeDegrees = (value: unknown): string => wholeNumber(value);
+const wholeKnots = (value: unknown): string => wholeNumber(value);
+const wholeHundredsOfFeet = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? String(Math.round(value / 100) * 100) : "—";
 const text = (value: unknown): string => typeof value === "string" ? value : "—";
 const cell = (content: string | HTMLElement): HTMLTableCellElement => {
   const element = document.createElement("td");
@@ -107,9 +110,9 @@ const renderCalculatedResult = (
 };
 
 const fuelRequiredScope = (endpoint: NavlogEndpoint | undefined): string => {
-  if (endpoint?.kind === "pattern-altitude-airport") return "Fuel required through destination at pattern altitude, including taxi/run-up and reserve";
-  if (endpoint?.kind === "pattern-altitude-3nm") return "Fuel required through 3 NM point, including taxi/run-up and reserve";
-  return "Fuel required including taxi/run-up and reserve";
+  if (endpoint?.kind === "pattern-altitude-airport") return "Estimated fuel required through destination at pattern altitude, including taxi/run-up and reserve";
+  if (endpoint?.kind === "pattern-altitude-3nm") return "Estimated fuel required through 3 NM point, including taxi/run-up and reserve";
+  return "Estimated fuel required including taxi/run-up and reserve";
 };
 
 const fuelAmount = (value: unknown): string => typeof value !== "number" || !Number.isFinite(value)
@@ -132,10 +135,10 @@ const aboardFuelNotice = (summary: RecordValue | undefined, endpoint: NavlogEndp
   section.className = "aboard-fuel-summary";
   const details = document.createElement("p");
   const reserveAssessment = typeof summary.reserveShortfall === "number" && summary.reserveShortfall > 0
-    ? `Reserve shortfall: ${fuelAmount(summary.reserveShortfall)} gal.`
-    : `Reserve margin: ${fuelAmount(summary.reserveMargin)} gal above reserve.`;
+    ? `Estimated reserve shortfall: ${fuelAmount(summary.reserveShortfall)} gal.`
+    : `Estimated reserve margin: ${fuelAmount(summary.reserveMargin)} gal above entered reserve.`;
   const sufficiency = typeof summary.sufficientAboardFuel === "boolean"
-    ? `Aboard-fuel sufficiency: ${summary.sufficientAboardFuel ? "sufficient" : "insufficient"} for taxi, route, and reserve.`
+    ? `Forecast burn is estimated. Estimated fuel status: ${summary.sufficientAboardFuel ? "sufficient" : "insufficient"} for taxi, route, and entered reserve under the entered assumptions.`
     : "";
   details.textContent = `Fuel aboard (pilot input): ${fuelAmount(summary.fuelAboard)} gal. Taxi/run-up (pilot input): ${fuelAmount(summary.taxiRunupFuel)} gal; post-taxi balance (calculated): ${fuelBalance(summary.fuelAfterTaxi)}. ${endpointFuelBalance(summary.estimatedArrivalFuel, endpoint)}. Reserve (pilot input): ${fuelAmount(summary.reserveFuel)} gal. ${reserveAssessment} ${sufficiency}`;
   section.append(details);
@@ -151,7 +154,7 @@ const capacityComparisonNotice = (summary: RecordValue): HTMLElement | undefined
     || (summary.capacityComparisonAvailable === undefined && (summary.usableFuel === undefined || summary.usableFuel === null));
   if (!unavailable) return undefined;
   const capacity = document.createElement("p");
-  capacity.textContent = "Usable-fuel capacity comparison unavailable; aboard-fuel sufficiency is evaluated from the entered fuel amount.";
+  capacity.textContent = "Usable-fuel capacity comparison unavailable; estimated fuel status is evaluated from the entered fuel amount.";
   return capacity;
 };
 
@@ -159,10 +162,10 @@ const aboardFuelWarning = (summary: RecordValue): HTMLElement | undefined => {
   const shortfall = typeof summary.reserveShortfall === "number" ? summary.reserveShortfall : 0;
   const exhaustionDeficit = typeof summary.fuelExhaustionDeficit === "number" ? summary.fuelExhaustionDeficit : 0;
   const messages = [
-    shortfall > 0 ? `Reserve shortfall: ${fuelAmount(shortfall)} gal.` : undefined,
-    exhaustionDeficit > 0 ? `Fuel exhaustion deficit: ${fuelAmount(exhaustionDeficit)} gal.` : undefined,
-    summary.fuelExhausted === true && exhaustionDeficit <= 0 ? "Fuel exhausted at arrival (estimated balance is zero). The estimate does not include an available-fuel margin." : undefined,
-    summary.sufficientAboardFuel === false && shortfall === 0 && exhaustionDeficit <= 0 && summary.fuelExhausted !== true ? "Fuel aboard is insufficient for this plan." : undefined,
+    shortfall > 0 ? `Estimated reserve shortfall: ${fuelAmount(shortfall)} gal.` : undefined,
+    exhaustionDeficit > 0 ? `Estimated fuel exhaustion deficit: ${fuelAmount(exhaustionDeficit)} gal.` : undefined,
+    summary.fuelExhausted === true && exhaustionDeficit <= 0 ? "Estimated fuel exhausted at the calculated endpoint (estimated balance is zero). Actual burn may differ." : undefined,
+    summary.sufficientAboardFuel === false && shortfall === 0 && exhaustionDeficit <= 0 && summary.fuelExhausted !== true ? "Estimated fuel aboard is insufficient under the entered plan assumptions." : undefined,
   ].filter((message): message is string => message !== undefined);
   if (messages.length === 0) return undefined;
   const warning = document.createElement("p");
@@ -176,9 +179,9 @@ const usableFuelNotice = (summary: RecordValue | undefined): HTMLElement | undef
   const notice = document.createElement("p");
   if (summary.sufficientUsableFuel === false) {
     notice.className = "navlog-fuel-warning";
-    notice.textContent = `WARNING: Usable fuel is ${fuelAmount(summary.usableFuel)} gal; this plan is short ${fuelAmount(Math.abs(summary.usableFuelDifference))} gal of required fuel.`;
+    notice.textContent = `WARNING: Usable fuel is ${fuelAmount(summary.usableFuel)} gal; this estimated plan is short ${fuelAmount(Math.abs(summary.usableFuelDifference))} gal of required fuel under the entered assumptions.`;
   } else {
-    notice.textContent = `Usable fuel: ${fuelAmount(summary.usableFuel)} gal; margin above required fuel: ${fuelAmount(summary.usableFuelDifference)} gal.`;
+    notice.textContent = `Usable fuel: ${fuelAmount(summary.usableFuel)} gal; estimated margin above required fuel: ${fuelAmount(summary.usableFuelDifference)} gal under the entered assumptions.`;
   }
   return notice;
 };
@@ -220,10 +223,10 @@ const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: Pla
   const labels = navlogRowLabels(rows, revision, rowIndex, boundaries, endpoint);
   const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}`;
   tr.append(
-    cell(phaseLabel), inspectionCell("altitude", `${wholeNumber(subleg?.startingAltitude)} → ${wholeNumber(subleg?.endingAltitude)}`, subleg, labels, rowIndex, options), inspectionCell("trueCourse", number(subleg?.trueCourse), subleg, labels, rowIndex, options),
-    inspectionCell("wind", `${number(wind?.directionFrom)}° / ${number(wind?.speed)} kt`, subleg, labels, rowIndex, options), inspectionCell("windCorrectionAngle", number(row.windCorrectionAngle), subleg, labels, rowIndex, options), inspectionCell("trueHeading", number(row.trueHeading), subleg, labels, rowIndex, options),
-    inspectionCell("variation", number(nested(row, "variation")?.effectiveValue), subleg, labels, rowIndex, options), inspectionCell("magneticHeading", number(row.magneticHeading), subleg, labels, rowIndex, options), inspectionCell("compassDeviation", number(row.compassDeviation), subleg, labels, rowIndex, options),
-    inspectionCell("compassHeading", number(row.compassHeading), subleg, labels, rowIndex, options), inspectionCell("distance", number(subleg?.distance), subleg, labels, rowIndex, options), inspectionCell("groundspeed", number(row.groundspeed), subleg, labels, rowIndex, options), inspectionCell("estimatedTimeEnroute", wholeNumber(row.estimatedTimeEnroute), subleg, labels, rowIndex, options),
+    cell(phaseLabel), inspectionCell("altitude", `${wholeHundredsOfFeet(subleg?.startingAltitude)} → ${wholeHundredsOfFeet(subleg?.endingAltitude)}`, subleg, labels, rowIndex, options), inspectionCell("trueCourse", wholeDegrees(subleg?.trueCourse), subleg, labels, rowIndex, options),
+    inspectionCell("wind", `${wholeDegrees(wind?.directionFrom)}° / ${wholeKnots(wind?.speed)} kt`, subleg, labels, rowIndex, options), inspectionCell("windCorrectionAngle", wholeDegrees(row.windCorrectionAngle), subleg, labels, rowIndex, options), inspectionCell("trueHeading", wholeDegrees(row.trueHeading), subleg, labels, rowIndex, options),
+    inspectionCell("variation", wholeDegrees(nested(row, "variation")?.effectiveValue), subleg, labels, rowIndex, options), inspectionCell("magneticHeading", wholeDegrees(row.magneticHeading), subleg, labels, rowIndex, options), inspectionCell("compassDeviation", wholeDegrees(row.compassDeviation), subleg, labels, rowIndex, options),
+    inspectionCell("compassHeading", wholeDegrees(row.compassHeading), subleg, labels, rowIndex, options), inspectionCell("distance", number(subleg?.distance), subleg, labels, rowIndex, options), inspectionCell("groundspeed", wholeKnots(row.groundspeed), subleg, labels, rowIndex, options), inspectionCell("estimatedTimeEnroute", wholeNumber(row.estimatedTimeEnroute), subleg, labels, rowIndex, options),
     cell(number(cumulative?.routeDistance)), cell(wholeNumber(cumulative?.estimatedTimeEnroute)),
     inspectionCell("fuel", fuelAmount(row.fuel), subleg, labels, rowIndex, options), cell(fuelBalance(cumulative?.fuelRemaining)),
   );
