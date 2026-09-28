@@ -43,6 +43,16 @@ describe("calculation inspector", () => {
     const heading = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" });
     expect(heading.textContent).toContain("Stored unrounded value: 286.4");
   });
+  it("uses navlog rounding for negative whole-degree values", () => {
+    const revision = teachingRevision();
+    const row = revision.calculationSnapshot.navlog.rows[0]!;
+    for (const [value, displayed] of [[-0.4, "0°"], [-2.5, "-2°"]] as const) {
+      row.windCorrectionAngle = value;
+      const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "windCorrectionAngle" });
+      expect(rendered.textContent).toContain(`Result: ${displayed} as shown in the navlog.`);
+      expect(rendered.textContent).toContain(`Stored unrounded value: ${value}`);
+    }
+  });
   it("describes wind from the right as a leftward push requiring a right correction", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;

@@ -387,7 +387,7 @@ describe("route waypoint weather sampling", () => {
     expect(rows.some((row) => row.subleg.phase === "climb")).toBe(true);
     expect(rows.some((row) => row.subleg.phase === "descent")).toBe(true);
     expect(rows.some((row) => row.subleg.phase.startsWith("transition"))).toBe(true);
-    expect(result.status === "ready" && result.warnings.join(" ")).toMatch(/starting waypoint/i);
+    expect(result.status === "ready" && result.warnings).toEqual([]);
     expect(rows.some((row) => row.subleg.routeEndDistance > row.subleg.routeStartDistance && row.effectiveWind.wind.effectiveValue.speed > 0)).toBe(true);
   });
 
@@ -450,6 +450,11 @@ describe("route waypoint weather sampling", () => {
 
   it("retains bounded endpoint source provenance in the calculated snapshot", async () => {
     const { result } = await planWith({ ...routePlanDraft(), departureTimeUtc: departure }, () => 270);
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") throw new Error(result.message);
+    expect(result.weather.warnings).toEqual([]);
+    expect(result.weather.provenance).toMatchObject({ source: "progressive-route-point-winds", eventCount: expect.any(Number) });
+    expect(result.calculationSnapshot).toMatchObject({ phaseAllocation: { warnings: [] } });
     expect(result).toMatchObject({ calculationSnapshot: { weather: { endpointSources: {
       departureMetar: { stationIcao: "KORD", requestId: "metar-request", observedAt: departure, cache: { status: "upstream_refresh" } },
     } } } });

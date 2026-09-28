@@ -1,4 +1,5 @@
 import type { PlanRevision } from "../domain/route";
+import { wholeNumberDisplay } from "./whole-number";
 
 export type NavlogInspectionField = "altitude" | "trueCourse" | "wind" | "windCorrectionAngle" | "trueHeading" | "variation" | "magneticHeading" | "compassDeviation" | "compassHeading" | "distance" | "groundspeed" | "estimatedTimeEnroute" | "fuel";
 
@@ -243,7 +244,7 @@ function worksheetNumber(value: unknown): string {
 }
 
 function worksheetWholeNumber(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(0) : "—";
+  return wholeNumberDisplay(value);
 }
 
 function worksheetWholeHundredsOfFeet(value: unknown): string {

@@ -1,12 +1,13 @@
 import type { PlanRevision } from "../domain/route";
 import type { NavlogInspectionSelection, NavlogInspectionField } from "./calculation-inspector";
+import { wholeNumberDisplay } from "./whole-number";
 
 type RecordValue = Record<string, unknown>;
 type NavlogEndpoint = { readonly kind: "pattern-altitude-airport" | "pattern-altitude-3nm"; readonly routeDistanceNauticalMiles: number };
 const record = (value: unknown): value is RecordValue => typeof value === "object" && value !== null && !Array.isArray(value);
 const nested = (value: unknown, key: string): RecordValue | undefined => record(value) && record(value[key]) ? value[key] : undefined;
 const number = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
-const wholeNumber = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? String(Math.round(value)) : "—";
+const wholeNumber = wholeNumberDisplay;
 const wholeDegrees = (value: unknown): string => wholeNumber(value);
 const wholeKnots = (value: unknown): string => wholeNumber(value);
 const wholeHundredsOfFeet = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? String(Math.round(value / 100) * 100) : "—";

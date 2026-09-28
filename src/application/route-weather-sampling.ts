@@ -393,7 +393,7 @@ const calculateProgressiveRoute = async (
   const snapshot = jsonValue({
     schema: "complete-navlog/v1", status: "calculated",
     weather: { snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))], provenance: { source: "progressive-route-events", eventCount: samples.length }, endpointSources: { departureMetar: endpointMetarSource(endpoints.departureMetar) } },
-    phaseAllocation: { status: "allocated", transitionPolicy: "progressive-event-walk", navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: finalRouteDistance }, boundaries: progressiveBoundaries(generatedBoundaries), phases: phaseEvidence(state.rows), sublegs: state.rows.map((row) => row.subleg), warnings: ["Each interval was calculated once from the latest preceding weather event."] },
+    phaseAllocation: { status: "allocated", transitionPolicy: "progressive-event-walk", navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: finalRouteDistance }, boundaries: progressiveBoundaries(generatedBoundaries), phases: phaseEvidence(state.rows), sublegs: state.rows.map((row) => row.subleg), warnings: [] },
     navlog: navlog.value,
   });
   return { samples, snapshot };
@@ -679,7 +679,7 @@ const weatherFor = (
   routeWeatherSamples: samples,
   departureMetarPayload: metar,
   phaseWindResolver: createWaypointPhaseResolver(routeLegs, samples),
-  warnings: ["Each route interval uses weather fetched at its starting waypoint or generated top-of-climb/top-of-descent event."],
+  warnings: [],
   provenance: jsonValue({ source: "progressive-route-point-winds", eventCount: samples.length, waypointAltitudeRule: "carried aircraft altitude with a 3000-foot supported minimum" }),
 });
 

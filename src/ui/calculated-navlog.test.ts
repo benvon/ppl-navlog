@@ -135,6 +135,21 @@ describe("generated navlog event labels", () => {
 });
 
 describe("calculated visual flight log", () => {
+  it("uses consistent navlog rounding for negative whole-degree values", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 90, distance: 10 }, windCorrectionAngle: -0.4, cumulative: { routeDistance: 10 } },
+          { subleg: { sourceLegId: "leg-2", phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 90, distance: 10 }, windCorrectionAngle: -2.5, cumulative: { routeDistance: 20 } },
+        ], fuelSummary: { requiredFuel: 1, enrouteFuel: 1 } },
+      },
+    };
+    const rendered = renderCalculatedNavlog(revision);
+    expect([...rendered!.querySelectorAll<HTMLTableRowElement>("tbody tr")].map((row) => row.cells[4]?.textContent)).toEqual(["0", "-2"]);
+  });
+
   it("shows navlog values without exposing source weather evidence", () => {
     const revision = {
       ...planRevision(),
