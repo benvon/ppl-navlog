@@ -93,7 +93,7 @@ export const resolveRouteWeather = async (
   const prepared = prepareRouteWeatherInputs(draft, endpoints);
   const progressive = await calculateProgressiveRoute(draft, profile, pointClient, prepared, endpoints);
   const weather = {
-    ...weatherFor(prepared.routeLegs, progressive.samples, endpoints.departureMetar),
+    ...weatherFor(prepared.routeLegs, progressive.samples, endpoints.departureMetar, progressive.warnings),
     progressiveCalculationSnapshot: progressive.snapshot,
   };
   return { weather, sampledPoints: progressive.samples.map((sample) => sample.answer), iterations: 1 };
@@ -122,6 +122,7 @@ const prepareRouteWeatherInputs = (
 interface ProgressiveWeatherResult {
   readonly samples: readonly RouteWeatherSample[];
   readonly snapshot: JsonValue;
+  readonly warnings: readonly string[];
 }
 
 /** Each interval is calculated from the last fetched event and finalized once. */
@@ -144,6 +145,7 @@ const calculateProgressiveRoute = async (
   let descentRate = profile.descentRateFeetPerMinute;
   let todDistance = Number.POSITIVE_INFINITY;
   let shortCruiseCollapsed = false;
+  const warnings: string[] = [];
 
   const session = createNavlogCalculationSession({
     routeLegs: routeLegs.map((leg) => ({
@@ -180,12 +182,11 @@ const calculateProgressiveRoute = async (
   const generatedBoundaries: GeneratedRouteBoundary[] = [];
 
   const finalArrivalMs = (): number => Date.parse(draft.departureTimeUtc) + state.cumulativeMinutes * 60_000;
-  const fetchAt = async (target: WaypointTarget, label: string): Promise<void> => {
+  const fetchAt = async (target: WaypointTarget): Promise<void> => {
     const plannedUtc = new Date(finalArrivalMs()).toISOString();
     const query = queryAt(target, plannedUtc);
     currentAnswer = await fetchOnePointAnswer(client, query);
     samples.push(sampleFromAnswer(target, query, currentAnswer));
-    if (!answerCovers(currentAnswer, finalArrivalMs())) throw new RouteWeatherSamplingError(`Winds-aloft period does not cover the completed arrival at ${label}.`);
     placeTodFromPrecedingForecast();
   };
 
@@ -199,7 +200,6 @@ const calculateProgressiveRoute = async (
     const calculated = calculateNavlogRow(session.value, state, subleg, resolver);
     if (!calculated.ok) throw new RouteWeatherSamplingError(calculated.error.message);
     state = calculated.value.state;
-    if (!answerCovers(currentAnswer, finalArrivalMs())) throw new RouteWeatherSamplingError(`Winds-aloft period does not cover the completed interval ending at route distance ${endDistance.toFixed(2)} NM.`);
     return Number(calculated.value.row.estimatedTimeEnroute);
   };
   const intervalWind = (phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number): Wind => {
@@ -211,9 +211,17 @@ const calculateProgressiveRoute = async (
 
   const requestTopOfDescent = async (line: RouteLine): Promise<void> => {
     const todCoordinate = coordinateAtRouteDistance(lines, todDistance);
-    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", line, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, descentRate, descentTas, finalRouteDistance - todDistance)));
     todRequested = true;
     if (Math.abs(currentAltitude - finalCruiseAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError("Aircraft has not reached the selected cruise altitude at the fixed top-of-descent point.");
+    const placementDescentRate = descentRate;
+    await fetchAt({ routeDistance: todDistance, coordinate: todCoordinate, altitudeFeetMsl: Math.round(currentAltitude) });
+    const tas = checkedVerticalTas(descentTas);
+    const triangle = requiredVerticalTriangle(line, tas, pointWind(currentAnswer), finalRouteDistance);
+    const availableMinutes = (finalRouteDistance - todDistance) / triangle.groundspeed * 60;
+    if (!Number.isFinite(availableMinutes) || availableMinutes <= 0) throw new RouteWeatherSamplingError("Top-of-descent weather cannot produce a positive descent time.");
+    descentRate = (currentAltitude - finalTargetAltitude) / availableMinutes;
+    if (descentRate > profile.descentRateFeetPerMinute * 1.5) warnings.push(`Required descent rate ${descentRate.toFixed(1)} ft/min exceeds 150% of the aircraft profile rate (${(profile.descentRateFeetPerMinute * 1.5).toFixed(1)} ft/min).`);
+    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", line, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, placementDescentRate, descentRate, descentTas, finalRouteDistance - todDistance)));
     mode = "descent";
     phaseTarget = finalTargetAltitude;
     phaseId = "arrival-descent";
@@ -295,7 +303,7 @@ const calculateProgressiveRoute = async (
     const tocCoordinate = coordinateAtRouteDistance(lines, cursorDistance);
     generatedBoundaries.push(makeGeneratedBoundary("top-of-climb", line, cursorDistance, tocCoordinate, tocPlacementTrace(profile.climbRateFeetPerMinute, tas, state.rows.filter((row) => row.subleg.phaseId === completedPhaseId))));
     tocDistance = cursorDistance;
-    await fetchAt({ routeDistance: cursorDistance, coordinate: tocCoordinate, altitudeFeetMsl: firstTargetAltitude }, "generated top of climb");
+    await fetchAt({ routeDistance: cursorDistance, coordinate: tocCoordinate, altitudeFeetMsl: firstTargetAltitude });
     tocRequested = true;
   };
 
@@ -327,8 +335,8 @@ const calculateProgressiveRoute = async (
   function placeTodFromPrecedingForecast(): void {
     if (Number.isFinite(todDistance)) return;
     // TOD is on the final leg: the latest already sampled event before it is
-    // the final leg's origin (or TOC on a direct route). Reuse that wind for
-    // both backward placement and the descent calculation.
+    // the final leg's origin (or TOC on a direct route). Use that wind for
+    // backward placement; the TOD sample supplies the descent row's wind.
     const startDistance = finalLine.startDistance;
     if (cursorDistance < startDistance - 1e-8
       || (startDistance <= 1e-8 && isClimbOrTransition(mode))) return;
@@ -396,7 +404,7 @@ const calculateProgressiveRoute = async (
     if (Math.abs(currentAltitude - inboundAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError(`The selected inbound altitude cannot be reached within 50 ft at waypoint ${waypointIndex + 1}.`);
     finishVerticalAtWaypoint(waypointIndex);
     const target = { ...prepared.targets[waypointIndex]!, altitudeFeetMsl: Math.max(3_000, Math.min(53_000, Math.round(currentAltitude))) };
-    await fetchAt(target, `waypoint ${waypointIndex + 1}`);
+    await fetchAt(target);
     updateAltitudeModeAtWaypoint(waypointIndex);
   };
 
@@ -465,10 +473,10 @@ const calculateProgressiveRoute = async (
   const snapshot = jsonValue({
     schema: "complete-navlog/v1", status: "calculated",
     weather: { snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))], provenance: { source: "progressive-route-events", eventCount: samples.length }, endpointSources: { departureMetar: endpointMetarSource(endpoints.departureMetar) } },
-    phaseAllocation: { status: "allocated", transitionPolicy: "progressive-event-walk", navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: finalRouteDistance }, boundaries: progressiveBoundaries(generatedBoundaries), phases: phaseEvidence(state.rows), sublegs: state.rows.map((row) => row.subleg), warnings: [] },
+    phaseAllocation: { status: "allocated", transitionPolicy: "progressive-event-walk", navlogEndpoint: { kind: "pattern-altitude-airport", routeDistanceNauticalMiles: finalRouteDistance }, boundaries: progressiveBoundaries(generatedBoundaries), phases: phaseEvidence(state.rows), sublegs: state.rows.map((row) => row.subleg), warnings },
     navlog: navlog.value,
   });
-  return { samples, snapshot };
+  return { samples, snapshot, warnings };
 };
 
 const prepareProgressiveDescent = (finalCruiseAltitude: number, finalTargetAltitude: number, totalDistance: number, profile: AircraftProfile) => {
@@ -633,11 +641,12 @@ const tocPlacementTrace = (rate: number, tas: number, rows: readonly { readonly 
   { name: "TOC cumulative climb time", value: rows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0), unit: "minutes" },
   { name: "TOC cumulative climb distance", value: rows.reduce((sum, row) => sum + Number(row.subleg.distance), 0), unit: "nautical-miles" },
 ];
-const todPlacementTrace = (startAltitude: number, targetAltitude: number, rate: number, tas: number, placementDistance: number) => [
+const todPlacementTrace = (startAltitude: number, targetAltitude: number, placementRate: number, requiredRate: number, tas: number, placementDistance: number) => [
   { name: "TOD start altitude", value: startAltitude, unit: "feet-msl" },
   { name: "TOD target altitude", value: targetAltitude, unit: "feet-msl" },
   { name: "TOD altitude difference", value: startAltitude - targetAltitude, unit: "feet" },
-  { name: "TOD descent rate", value: rate, unit: "feet-per-minute" },
+  { name: "TOD placement descent rate", value: placementRate, unit: "feet-per-minute" },
+  { name: "TOD required descent rate", value: requiredRate, unit: "feet-per-minute" },
   { name: "TOD true airspeed", value: tas, unit: "knots" },
   { name: "TOD placement distance using preceding forecast", value: placementDistance, unit: "nautical-miles" },
 ];
@@ -661,7 +670,6 @@ const fetchOnePointAnswer = async (client: RouteWeatherPointClient, query: Aloft
   return answer;
 };
 const sampleFromAnswer = (target: WaypointTarget, query: AloftPointQuery, answer: AloftPointAnswer): RouteWeatherSample => ({ routeDistanceNauticalMiles: target.routeDistance, plannedUtc: query.plannedUtc, altitudeFeetMsl: query.altitudeFeetMsl, answer });
-const answerCovers = (answer: AloftPointAnswer, timeMs: number): boolean => timeMs >= Date.parse(answer.issuedAt) && timeMs >= Date.parse(answer.useFrom) && timeMs < Date.parse(answer.useUntil);
 
 
 export class RouteWeatherSamplingError extends Error {
@@ -745,13 +753,13 @@ const departureMetarFailure = (metar: MetarSuccessPayload, allowedIcaos: Readonl
 };
 
 const weatherFor = (
-  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar: MetarSuccessPayload,
+  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar: MetarSuccessPayload, warnings: readonly string[],
 ): CompletePlanWeather => ({
   snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))],
   routeWeatherSamples: samples,
   departureMetarPayload: metar,
   phaseWindResolver: createWaypointPhaseResolver(routeLegs, samples),
-  warnings: [],
+  warnings,
   provenance: jsonValue({ source: "progressive-route-point-winds", eventCount: samples.length, waypointAltitudeRule: "carried aircraft altitude with a 3000-foot supported minimum" }),
 });
 

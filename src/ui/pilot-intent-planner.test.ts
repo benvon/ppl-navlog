@@ -144,7 +144,7 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
 
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
   expect(callOrder).toEqual(["metar", ...queries.map(() => "point")]);
-  expect(queries).toHaveLength(2);
+  expect(queries).toHaveLength(3);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
   const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
@@ -156,7 +156,8 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
     expect(distance).toBeGreaterThan(0);
     expect(distance).toBeLessThan(routeGeometry.value.distance);
   });
-  expect(interiorDistances).toHaveLength(1);
+  expect(interiorDistances).toHaveLength(2);
+  expect(interiorDistances[1]).toBeGreaterThan(interiorDistances[0]!);
 }
 
 function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
@@ -630,6 +631,24 @@ describe("pilot intent planner", () => {
     expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
     expect(inspector.querySelector("details")?.open).toBe(false);
 
+  });
+
+  it("displays a descent-rate warning from TOD weather", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    let requestNumber = 0;
+    const client = winds({ fetchPoint: async (query) => {
+      requestNumber += 1;
+      const answer = await winds().fetchPoint(query);
+      return { ...answer, windFromDegTrue: requestNumber === 3 ? 135 : 315, windSpeedKt: 70 };
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Update navlog").click();
+    await settle();
+
+    expect(requestNumber).toBe(3);
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector(".navlog-warnings")?.textContent).toContain("150%");
   });
 
   it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
