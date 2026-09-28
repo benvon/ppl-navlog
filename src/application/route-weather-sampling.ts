@@ -313,7 +313,10 @@ const calculateProgressiveRoute = async (
       const cruiseTas = line.leg.sourceLeg.performanceOverrides?.cruiseTasKnots?.effectiveValue ?? profile.cruiseTasKnots;
       const cruiseTriangle = solveWindTriangle(courseForRouteInterval(lines, cursorDistance, Math.max(cursorDistance + 1e-6, candidate)), checkedVerticalTas(cruiseTas), pointWind(currentAnswer));
       if (!cruiseTriangle.ok) throw new RouteWeatherSamplingError("Cruise groundspeed cannot estimate the top-of-descent forecast time.");
-      const plannedUtc = new Date(finalArrivalMs() + Math.max(0, candidate - cursorDistance) / cruiseTriangle.value.groundspeed * 60_000).toISOString();
+      const cruiseDistanceNauticalMiles = Math.max(0, candidate - cursorDistance);
+      const cruiseTimeHours = cruiseDistanceNauticalMiles / cruiseTriangle.value.groundspeed;
+      const cruiseTimeMilliseconds = cruiseTimeHours * 3_600_000;
+      const plannedUtc = new Date(finalArrivalMs() + cruiseTimeMilliseconds).toISOString();
       const query = queryAt(target, plannedUtc);
       const response = await fetchOnePointAnswer(client, query);
       todForecastCandidateCount += 1;

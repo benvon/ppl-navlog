@@ -178,6 +178,24 @@ describe("route waypoint weather sampling", () => {
     expect(rows.at(-1)!.subleg.routeEndDistance).toBeCloseTo(rows.at(-1)!.cumulative.routeDistance, 6);
   });
 
+  it("plans the TOD forecast at the cruise arrival time using distance divided by groundspeed in hours", async () => {
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
+    const { queries, result } = await planWith(draft, () => 270, { speed: 0 });
+    const rows = navRows(result);
+    const todRowIndex = rows.findIndex((row) => row.subleg.phase === "descent");
+    expect(todRowIndex).toBeGreaterThan(0);
+    const todRow = rows[todRowIndex]!;
+    const elapsedMinutesAtTod = rows[todRowIndex - 1]!.cumulative.estimatedTimeEnroute;
+    const expectedPlannedUtc = new Date(Date.parse(departure) + elapsedMinutesAtTod * 60_000).toISOString();
+    const todQuery = queries.find((query) =>
+      Math.abs(query.latitudeDeg - todRow.subleg.start.latitude) < 0.001
+      && Math.abs(query.longitudeDeg - todRow.subleg.start.longitude) < 0.001
+      && query.altitudeFeetMsl === Math.round(todRow.subleg.startingAltitude));
+
+    expect(todQuery).toBeDefined();
+    expect(todQuery!.plannedUtc).toBe(expectedPlannedUtc);
+  });
+
   it("reconciles provisional TOD during climb when forecast headwind moves TOD after TOC", async () => {
     const base = routePlanDraft();
     const start = base.route.points[0]!;
