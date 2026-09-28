@@ -144,14 +144,13 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
 
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
   expect(callOrder).toEqual(["metar", ...queries.map(() => "point")]);
-  expect(queries).toHaveLength(3);
+  expect(queries).toHaveLength(2);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
   const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
   if (!routeGeometry.ok) throw new Error(routeGeometry.error.message);
-  const interiorDistances = queries.slice(1).map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
-  expect(queries[0]?.latitudeDeg).toBeCloseTo(departure.value.latitude, 4);
-  expect(queries[0]?.longitudeDeg).toBeCloseTo(departure.value.longitude, 4);
+  const interiorDistances = queries.map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
+
   interiorDistances.forEach((distance) => {
     expect(distance).toBeGreaterThan(0);
     expect(distance).toBeLessThan(routeGeometry.value.distance);
@@ -624,10 +623,9 @@ describe("pilot intent planner", () => {
     const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
     expect(Math.round(Number(storedMatch[1]))).toBe(Number.parseInt(displayedGroundspeed, 10));
-    expect(inspector.textContent).toContain("BRL");
-    expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
+    expect(inspector.textContent).toContain("departure METAR wind speed");
     expect(inspector.textContent).toContain("KORD");
-    expect(inspector.textContent).toContain("horizontal weight");
+    expect(inspector.textContent).not.toContain("horizontal weight");
     expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
     expect(inspector.querySelector("details")?.open).toBe(false);
 
@@ -639,14 +637,14 @@ describe("pilot intent planner", () => {
     const client = winds({ fetchPoint: async (query) => {
       requestNumber += 1;
       const answer = await winds().fetchPoint(query);
-      return { ...answer, windFromDegTrue: requestNumber === 3 ? 135 : 315, windSpeedKt: 70 };
+      return { ...answer, windFromDegTrue: requestNumber === 2 ? 135 : 315, windSpeedKt: 70 };
     } });
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
     button(root, "Update navlog").click();
     await settle();
 
-    expect(requestNumber).toBe(3);
+    expect(requestNumber).toBe(2);
     expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector(".navlog-warnings")?.textContent).toContain("150%");
   });

@@ -1,7 +1,7 @@
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle, MEAN_EARTH_RADIUS_NAUTICAL_MILES } from "../domain/distance-course";
 import { failure, success } from "../domain/errors";
-import { vectorToWind, wind, windToVector, type Wind } from "../domain/wind";
+import { wind, type Wind } from "../domain/wind";
 import { nauticalMiles, knots, degreesToRadians, feetMsl, type Knots } from "../domain/units";
 import { solveWindTriangle } from "../domain/wind-triangle";
 import type { EffectiveWindResolver } from "../domain/phase-planning";
@@ -38,6 +38,7 @@ export const validateNominalCruiseSeparation = (draft: PlanDraft, profile: Aircr
   const departure = routeLegs[0]!.start;
   if (departure.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires an airport departure endpoint.");
   const firstCruiseAltitude = routeLegs[0]!.sourceLeg.cruiseAltitudeFeetMsl;
+  if (firstCruiseAltitude <= departure.elevationFeetMsl) throw new RouteWeatherSamplingError("The first selected cruise altitude must be above the departure field elevation so the route has a climb and TOC.");
   const finalCruiseAltitude = routeLegs.at(-1)!.sourceLeg.cruiseAltitudeFeetMsl;
   const climbDistance = firstCruiseAltitude > departure.elevationFeetMsl
     ? nominalVerticalDistance(firstCruiseAltitude - departure.elevationFeetMsl, profile.climbRateFeetPerMinute, profile.climbTasKnots, "Climb")
@@ -164,10 +165,7 @@ const calculateProgressiveRoute = async (
   if (!session.ok) throw new RouteWeatherSamplingError(session.error.message);
   let state = createNavlogCalculationState();
   const samples: RouteWeatherSample[] = [];
-  const initialTarget = { ...prepared.targets[0]!, altitudeFeetMsl: Math.max(3_000, departureElevation + 1) };
-  const initialQuery = queryAt(initialTarget, draft.departureTimeUtc);
-  let currentAnswer = await fetchOnePointAnswer(client, initialQuery);
-  samples.push(sampleFromAnswer(initialTarget, initialQuery, currentAnswer));
+  let currentAnswer: AloftPointAnswer | undefined;
   const finalLine = lines.at(-1)!;
   let cursorDistance = 0;
   let currentAltitude = departureElevation;
@@ -193,30 +191,27 @@ const calculateProgressiveRoute = async (
   const calculateInterval = (line: RouteLine, endDistance: number, phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number, phaseId: string, windOverride?: Wind): number => {
     const distance = endDistance - cursorDistance;
     if (distance <= 1e-8) return 0;
-    const selectedWind = windOverride ?? intervalWind(phase, startAltitude, endAltitude);
+    const selectedWind = windOverride ?? intervalWind();
     const subleg = makeProgressiveSubleg(line, cursorDistance, endDistance, phase, startAltitude, endAltitude, `subleg-${++rowSequence}`, phaseId, distance);
-    const blendEvidence = departureBlendEvidence(phase, startAltitude, endAltitude, routeLegs, currentAnswer, endpoints.departureMetar);
-    const resolver: NavlogWindResolver = { resolveEffectiveWind: () => progressiveResolvedWind(currentAnswer, selectedWind, blendEvidence) };
+    const answer = currentAnswer;
+    const resolver: NavlogWindResolver = { resolveEffectiveWind: () => answer === undefined
+      ? progressiveResolvedMetarWind(endpoints.departureMetar, selectedWind)
+      : progressiveResolvedWind(answer, selectedWind) };
     const calculated = calculateNavlogRow(session.value, state, subleg, resolver);
     if (!calculated.ok) throw new RouteWeatherSamplingError(calculated.error.message);
     state = calculated.value.state;
     return Number(calculated.value.row.estimatedTimeEnroute);
   };
-  const intervalWind = (phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number): Wind => {
-    if (phase === "climb" && startAltitude < currentAnswer.query.altitudeFeetMsl) {
-      return blendDepartureSurface(routeLegs, currentAnswer, endpoints.departureMetar, (startAltitude + endAltitude) / 2);
-    }
-    return pointWind(currentAnswer);
-  };
+  const intervalWind = (): Wind => currentAnswer === undefined ? requiredMetarWind(endpoints.departureMetar) : pointWind(currentAnswer);
 
   const requestTopOfDescent = async (): Promise<void> => {
     const todCoordinate = coordinateAtRouteDistance(lines, todDistance);
     todRequested = true;
     if (Math.abs(currentAltitude - finalCruiseAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError("Aircraft has not reached the selected cruise altitude at the fixed top-of-descent point.");
     const placementDescentRate = descentRate;
-    await fetchAt({ routeDistance: todDistance, coordinate: todCoordinate, altitudeFeetMsl: Math.round(currentAltitude) });
+    await fetchAt({ routeDistance: todDistance, coordinate: todCoordinate, altitudeFeetMsl: finalCruiseAltitude });
     const tas = checkedVerticalTas(descentTas);
-    const triangle = requiredVerticalTriangle(finalLine, tas, pointWind(currentAnswer), finalRouteDistance);
+    const triangle = requiredVerticalTriangle(finalLine, tas, intervalWind(), finalRouteDistance);
     const availableMinutes = (finalRouteDistance - todDistance) / triangle.groundspeed * 60;
     if (!Number.isFinite(availableMinutes) || availableMinutes <= 0) throw new RouteWeatherSamplingError("Top-of-descent weather cannot produce a positive descent time.");
     descentRate = (currentAltitude - finalTargetAltitude) / availableMinutes;
@@ -233,23 +228,25 @@ const calculateProgressiveRoute = async (
     const rate = checkedRate(climbing ? profile.climbRateFeetPerMinute : descentRate, climbing ? "climb" : "descent");
     const tas = checkedVerticalTas(climbing ? profile.climbTasKnots : profile.descentTasKnots);
     const phaseEventDistance = verticalEventDistance(nextWaypointDistance, todRequested, todDistance, cursorDistance);
-    let selectedWind = intervalWind(mode, currentAltitude, phaseTarget);
+    const selectedWind = intervalWind();
     const remainingToEvent = phaseEventDistance - cursorDistance;
     const neededMinutes = Math.abs(phaseTarget - currentAltitude) / rate;
     const estimate = verticalDistanceEstimate(line, tas, selectedWind, neededMinutes, remainingToEvent);
-    let triangle = estimate.triangle;
+    const triangle = estimate.triangle;
     const neededDistance = estimate.distance;
     const reachesTarget = neededDistance <= remainingToEvent + 1e-8;
     const segmentDistance = reachesTarget ? neededDistance : remainingToEvent;
-    if (!reachesTarget) ({ selectedWind, triangle } = refineVerticalWind(line, selectedWind, triangle, tas, climbing, rate, segmentDistance));
     const nextDistance = cursorDistance + segmentDistance;
     const predictedElapsed = segmentDistance / triangle.groundspeed * 60;
-    const nextAltitude = reachesTarget ? phaseTarget : currentAltitude + (climbing ? 1 : -1) * rate * predictedElapsed;
+    const estimatedAltitude = currentAltitude + (climbing ? 1 : -1) * rate * predictedElapsed;
+    const atPilotWaypoint = Math.abs(nextDistance - nextWaypointDistance) <= 1e-8;
+    const nextAltitude = reachesTarget || (atPilotWaypoint && Math.abs(estimatedAltitude - phaseTarget) <= ALTITUDE_TARGET_TOLERANCE_FEET)
+      ? phaseTarget : estimatedAltitude;
     const elapsed = calculateInterval(line, nextDistance, mode, currentAltitude, nextAltitude, phaseId, selectedWind);
     cursorDistance = nextDistance;
     const calculatedAltitude = currentAltitude + (climbing ? 1 : -1) * rate * elapsed;
     assertVerticalTargetReached(reachesTarget, calculatedAltitude, phaseTarget);
-    currentAltitude = reachesTarget ? phaseTarget : calculatedAltitude;
+    currentAltitude = nextAltitude;
     if (reachesTarget) await finishVerticalTarget(line, legIndex, tas);
     if (elapsed <= 0) throw new RouteWeatherSamplingError("A progressive route interval produced no positive time.");
   };
@@ -277,18 +274,6 @@ const calculateProgressiveRoute = async (
       distance = triangle.groundspeed * durationMinutes / 60;
     }
     return { triangle, distance };
-  };
-  const refineVerticalWind = (
-    line: RouteLine, initialWind: Wind, initialTriangle: ReturnType<typeof requiredVerticalTriangle>, tas: Knots,
-    climbing: boolean, rate: number, distance: number,
-  ): { readonly selectedWind: Wind; readonly triangle: ReturnType<typeof requiredVerticalTriangle> } => {
-    let selectedWind = initialWind, triangle = initialTriangle;
-    for (let iteration = 0; iteration < 3; iteration += 1) {
-      const predicted = currentAltitude + (climbing ? 1 : -1) * rate * (distance / triangle.groundspeed * 60);
-      selectedWind = intervalWind(mode, currentAltitude, predicted);
-      triangle = requiredVerticalTriangle(line, tas, selectedWind, cursorDistance + distance);
-    }
-    return { selectedWind, triangle };
   };
 
   const finishVerticalTarget = async (line: RouteLine, legIndex: number, tas: number): Promise<void> => {
@@ -340,7 +325,7 @@ const calculateProgressiveRoute = async (
     const startDistance = finalLine.startDistance;
     if (cursorDistance < startDistance - 1e-8
       || (startDistance <= 1e-8 && isClimbOrTransition(mode))) return;
-    const wind = pointWind(currentAnswer);
+    const wind = intervalWind();
     const duration = descentMinutes;
     const tas = checkedVerticalTas(descentTas);
     todDistance = backwardTodDistance(startDistance, duration, tas, wind);
@@ -401,10 +386,10 @@ const calculateProgressiveRoute = async (
 
   const fetchPilotWaypoint = async (waypointIndex: number): Promise<void> => {
     const inboundAltitude = draft.route.legs[waypointIndex - 1]!.cruiseAltitudeFeetMsl;
-    if (Math.abs(currentAltitude - inboundAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError(`The selected inbound altitude cannot be reached within 50 ft at waypoint ${waypointIndex + 1}.`);
+    if (Math.abs(currentAltitude - inboundAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError(`The selected inbound altitude cannot be reached within 50 ft at waypoint ${waypointIndex + 1} (estimated ${currentAltitude.toFixed(1)} ft; target ${inboundAltitude.toFixed(1)} ft).`);
+    currentAltitude = inboundAltitude;
     finishVerticalAtWaypoint(waypointIndex);
-    const target = { ...prepared.targets[waypointIndex]!, altitudeFeetMsl: Math.max(3_000, Math.min(53_000, Math.round(currentAltitude))) };
-    await fetchAt(target);
+    await fetchAt(prepared.targets[waypointIndex]!);
     updateAltitudeModeAtWaypoint(waypointIndex);
   };
 
@@ -534,22 +519,25 @@ const segmentMagneticVariation = (leg: CompletePlanRouteLeg, subleg: AllocatedNa
   return base.override === undefined ? calculated : { ...calculated, variation: { ...calculated.variation, effectiveValue: base.effectiveValue, override: base.override } };
 };
 
-interface DepartureBlendEvidence { readonly stationIcao: string; readonly aloftRequestId: string; readonly aloftLatitudeDeg: number; readonly aloftLongitudeDeg: number; readonly fieldElevationFeetMsl: number; readonly aloftAltitudeFeetMsl: number; readonly midpointAltitudeFeetMsl: number; readonly fraction: number; readonly directionFromDegTrue: number; readonly speedKt: number; }
-const departureBlendEvidence = (
-  phase: AllocatedNavlogSubleg["phase"], startAltitude: number, endAltitude: number,
-  routeLegs: readonly CompletePlanRouteLeg[], aloftAnswer: AloftPointAnswer, metar: MetarSuccessPayload,
-): DepartureBlendEvidence | undefined => {
-  if (phase !== "climb" || startAltitude >= aloftAnswer.query.altitudeFeetMsl) return undefined;
-  const surface = metarWind(metar), fieldElevation = routeLegs[0]!.start.kind === "airport" ? routeLegs[0]!.start.elevationFeetMsl : 0;
-  const aloftAltitude = aloftAnswer.query.altitudeFeetMsl, midpoint = (startAltitude + endAltitude) / 2;
-  if (surface === null || aloftAltitude <= fieldElevation) return undefined;
-  return { stationIcao: metar.metar.icao, aloftRequestId: aloftAnswer.requestId, aloftLatitudeDeg: aloftAnswer.query.latitudeDeg, aloftLongitudeDeg: aloftAnswer.query.longitudeDeg, fieldElevationFeetMsl: fieldElevation, aloftAltitudeFeetMsl: aloftAltitude, midpointAltitudeFeetMsl: midpoint, fraction: Math.max(0, Math.min(1, (midpoint - fieldElevation) / (aloftAltitude - fieldElevation))), directionFromDegTrue: surface.directionFrom, speedKt: surface.speed };
-};
+const progressiveResolvedMetarWind = (metar: MetarSuccessPayload, value: Wind) => success({
+  wind: {
+    computedValue: value, effectiveValue: value, origin: "external-data" as const,
+    provenance: { sourceId: `departure-metar:${metar.requestId}`, sourceLabel: `Departure METAR ${metar.metar.icao}`, sourceVersion: "observed surface wind", recordedAt: metar.metar.observedAt ?? metar.provenance.cache.fetchedAt },
+    explanation: { formulaId: "departure-metar-wind", formulaVersion: "v1" },
+  },
+  trace: trace("departure-metar-wind", [
+    { name: "departure METAR station", value: metar.metar.icao, unit: "unitless" },
+    { name: "departure METAR request id", value: metar.requestId, unit: "unitless" },
+    { name: "departure METAR observed at", value: metar.metar.observedAt ?? "", unit: "unitless" },
+    { name: "departure METAR wind from", value: value.directionFrom, unit: "degrees-true" },
+    { name: "departure METAR wind speed", value: value.speed, unit: "knots" },
+  ], [], { name: "effective wind from", value: value.directionFrom, unit: "degrees-true" }, "The departure row uses the selected departure METAR wind."),
+});
 
-const progressiveResolvedWind = (answer: AloftPointAnswer, value: Wind, blend?: DepartureBlendEvidence) => {
-  const metadata = progressiveWindMetadata(answer, blend);
+const progressiveResolvedWind = (answer: AloftPointAnswer, value: Wind) => {
+  const metadata = progressiveWindMetadata(answer);
   const windValue = { computedValue: value, effectiveValue: value, ...metadata };
-  const windTrace = trace(progressiveWindFormula(blend), [
+  const windTrace = trace("progressive-route-point-wind", [
     { name: "point request id", value: answer.requestId, unit: "unitless" },
     { name: "point latitude", value: answer.query.latitudeDeg, unit: "degrees" },
     { name: "point longitude", value: answer.query.longitudeDeg, unit: "degrees" },
@@ -569,21 +557,19 @@ const progressiveResolvedWind = (answer: AloftPointAnswer, value: Wind, blend?: 
     { name: "winds product cache freshness remaining seconds", value: answer.product.cache.freshnessRemainingSeconds, unit: "unitless" },
     { name: "winds product cache served at", value: answer.product.cache.servedAt, unit: "unitless" },
     ...answer.sources.flatMap(progressiveSourceTraceInputs),
-    ...departureBlendTraceInputs(blend),
   ], [], { name: "effective wind from", value: value.directionFrom, unit: "degrees-true" }, "The current interval uses weather fetched at its starting waypoint or generated route event.");
   return success({ wind: windValue, trace: windTrace });
 };
 
-const progressiveWindFormula = (blend?: DepartureBlendEvidence): string => blend !== undefined ? "departure-surface-to-aloft-wind" : "progressive-route-point-wind";
-const progressiveWindMetadata = (answer: AloftPointAnswer, blend?: DepartureBlendEvidence) => ({
-  origin: blend !== undefined ? "interpolated" as const : "external-data" as const,
+const progressiveWindMetadata = (answer: AloftPointAnswer) => ({
+  origin: "external-data" as const,
   provenance: {
     sourceId: `route-point:${answer.requestId}`,
-    sourceLabel: blend !== undefined ? "Departure METAR and aloft point blend" : "Most recent progressive winds-aloft point",
+    sourceLabel: "Most recent progressive winds-aloft point",
     sourceVersion: `${answer.method}; cycle ${answer.forecastCycle}`,
     recordedAt: answer.issuedAt,
   },
-  explanation: { formulaId: progressiveWindFormula(blend), formulaVersion: "v1" },
+  explanation: { formulaId: "progressive-route-point-wind", formulaVersion: "v1" },
 });
 const progressiveSourceTraceInputs = (source: AloftPointAnswer["sources"][number]) => [
   { name: `${source.stationId} station id`, value: source.stationId, unit: "unitless" as const },
@@ -601,18 +587,6 @@ const progressiveSourceTraceInputs = (source: AloftPointAnswer["sources"][number
   ...(source.temperatureVerticalWeight === null ? [] : [{ name: `${source.stationId} temperature vertical weight`, value: source.temperatureVerticalWeight, unit: "unitless" as const }]),
   ...(source.temperatureLowerC === null ? [] : [{ name: `${source.stationId} lower temperature`, value: source.temperatureLowerC, unit: "celsius" as const }]),
   ...(source.temperatureUpperC === null ? [] : [{ name: `${source.stationId} upper temperature`, value: source.temperatureUpperC, unit: "celsius" as const }]),
-];
-const departureBlendTraceInputs = (blend?: DepartureBlendEvidence) => blend === undefined ? [] : [
-  { name: "departure METAR station", value: blend.stationIcao, unit: "unitless" as const },
-  { name: "departure blend aloft request id", value: blend.aloftRequestId, unit: "unitless" as const },
-  { name: "departure blend aloft latitude", value: blend.aloftLatitudeDeg, unit: "degrees" as const },
-  { name: "departure blend aloft longitude", value: blend.aloftLongitudeDeg, unit: "degrees" as const },
-  { name: "departure METAR wind from", value: blend.directionFromDegTrue, unit: "degrees-true" as const },
-  { name: "departure METAR wind speed", value: blend.speedKt, unit: "knots" as const },
-  { name: "departure field elevation", value: blend.fieldElevationFeetMsl, unit: "feet-msl" as const },
-  { name: "departure aloft answer altitude", value: blend.aloftAltitudeFeetMsl, unit: "feet-msl" as const },
-  { name: "departure climb midpoint altitude", value: blend.midpointAltitudeFeetMsl, unit: "feet-msl" as const },
-  { name: "departure surface-to-aloft blend fraction", value: blend.fraction, unit: "unitless" as const },
 ];
 const coordinateAtLineDistance = (line: RouteLine, routeDistance: number): Coordinate => {
   const offset = nauticalMiles(Math.max(0, Math.min(line.leg.distance, routeDistance - line.startDistance)));
@@ -758,36 +732,27 @@ const weatherFor = (
   snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))],
   routeWeatherSamples: samples,
   departureMetarPayload: metar,
-  phaseWindResolver: createWaypointPhaseResolver(routeLegs, samples),
+  phaseWindResolver: createWaypointPhaseResolver(routeLegs, samples, metar),
   warnings,
-  provenance: jsonValue({ source: "progressive-route-point-winds", eventCount: samples.length, waypointAltitudeRule: "carried aircraft altitude with a 3000-foot supported minimum" }),
+  provenance: jsonValue({ source: "progressive-route-point-winds", eventCount: samples.length, waypointAltitudeRule: "pilot-entered inbound altitude; TOC and TOD use selected cruise altitude" }),
 });
 
 export const createWaypointPhaseResolver = (
-  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[],
+  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar?: MetarSuccessPayload,
 ): EffectiveWindResolver => ({
   resolveEffectiveWind: (request) => {
     const distance = projectRouteDistance(routeLegs, request.start);
-    const sample = [...samples].reverse().find((candidate) => candidate.routeDistanceNauticalMiles <= distance + 1e-8) ?? samples[0];
+    const sample = [...samples].reverse().find((candidate) => candidate.routeDistanceNauticalMiles <= distance + 1e-8);
+    if (sample === undefined && metar !== undefined) return success(requiredMetarWind(metar));
     if (sample === undefined) return failure("INVALID_WIND_SAMPLING", "No preceding progressive weather event is available.");
     return success(pointWind(sample.answer));
   },
 });
 
-const blendDepartureSurface = (routeLegs: readonly CompletePlanRouteLeg[], aloftAnswer: AloftPointAnswer, metar: MetarSuccessPayload, altitude: number): Wind => {
-  const surface = metarWind(metar);
-  const fieldElevation = routeLegs[0]!.start.kind === "airport" ? routeLegs[0]!.start.elevationFeetMsl : 0;
-  const selectedAloftAltitude = aloftAnswer.query.altitudeFeetMsl;
-  if (surface === null || selectedAloftAltitude <= fieldElevation) throw new RouteWeatherSamplingError("Departure surface-to-aloft wind cannot be interpolated.");
-  const fraction = Math.max(0, Math.min(1, (altitude - fieldElevation) / (selectedAloftAltitude - fieldElevation)));
-  return interpolateWind(surface, pointWind(aloftAnswer), fraction);
-};
-
-const interpolateWind = (lower: Wind, upper: Wind, fraction: number): Wind => {
-  const a = windToVector(lower), b = windToVector(upper);
-  const result = vectorToWind({ north: a.north + (b.north - a.north) * fraction, east: a.east + (b.east - a.east) * fraction });
-  if (!result.ok) throw new RouteWeatherSamplingError(result.error.message);
-  return result.value;
+const requiredMetarWind = (metar: MetarSuccessPayload): Wind => {
+  const value = metarWind(metar);
+  if (value === null) throw new RouteWeatherSamplingError("The selected departure METAR has no usable wind.");
+  return value;
 };
 const pointWind = (answer: AloftPointAnswer): Wind => requiredWind(answer.windFromDegTrue ?? 0, answer.windSpeedKt);
 const requiredWind = (direction: number, speed: number): Wind => {
