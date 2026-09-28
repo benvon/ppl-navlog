@@ -2,7 +2,7 @@ import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
 import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
-import { resolveRouteWeather } from "../application/route-weather-sampling";
+import { resolveRouteWeather, validateNominalCruiseSeparation } from "../application/route-weather-sampling";
 import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
@@ -238,7 +238,7 @@ class PilotIntentPlanner {
     const checkpoints = this.current?.checkpoints ?? [];
     const route = document.createElement("section");
     route.className = "waypoint-list";
-    route.append(this.el("h3", "Route waypoints and outbound cruise altitudes"));
+    route.append(this.el("h3", "Waypoint altitudes and final cruise target"));
     const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
     route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
     checkpoints.forEach((point, index) => {
@@ -253,10 +253,12 @@ class PilotIntentPlanner {
       if ((this.current?.checkpoints.length ?? 0) >= MAX_CHECKPOINTS_PER_PLAN) return;
       const hadOverrides = this.clearRouteOverrides();
       const current = this.current ?? this.blankPlan();
+      const altitudes = [...current.cruiseAltitudeTexts];
+      altitudes.splice(Math.max(0, altitudes.length - 1), 0, "4500");
       this.current = this.withIdentity({
         ...current,
         checkpoints: [...current.checkpoints, { name: "", coordinateText: "" }],
-        cruiseAltitudeTexts: [...current.cruiseAltitudeTexts, "4500"],
+        cruiseAltitudeTexts: altitudes,
         overrideReasons: {},
       });
       this.invalidate();
@@ -285,7 +287,10 @@ class PilotIntentPlanner {
     group.append(legend);
     if (checkpoint !== undefined && checkpointIndex !== undefined) this.appendCheckpointEditor(group, checkpoint, checkpointIndex);
     const altitude = this.current?.cruiseAltitudeTexts[legIndex] ?? "4500";
-    group.append(this.input(`altitude-${legIndex}`, `Cruise altitude outbound to ${destinationLabel} (feet MSL)`, altitude));
+    const altitudeLabel = destinationLabel === "Destination"
+      ? "Final cruise target before top of descent (feet MSL)"
+      : `Altitude required at ${destinationLabel} (feet MSL)`;
+    group.append(this.input(`altitude-${legIndex}`, altitudeLabel, altitude));
     this.appendTasControls(group, legIndex);
     return group;
   }
@@ -307,7 +312,7 @@ class PilotIntentPlanner {
     const nextCheckpoints = [...current.checkpoints];
     nextCheckpoints.splice(index, 1);
     const altitudes = [...current.cruiseAltitudeTexts];
-    if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
+    if (index < altitudes.length - 1) altitudes.splice(index, 1);
     this.current = this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} });
     this.invalidate();
     this.render();
@@ -628,6 +633,7 @@ class PilotIntentPlanner {
     return { departureMetar };
   }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
+    validateNominalCruiseSeparation(draft, profile);
     const { departureMetar } = await this.fetchEndpointWeather(draft);
     const solution = await resolveRouteWeather(draft, profile, {
       fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
@@ -857,8 +863,8 @@ function fuelAboardError(fields: Readonly<Record<string, string>>, plan: PilotIn
 function descentTargetError(value: string): string | undefined { return value.trim() && !Number.isFinite(Number(value)) ? "Descent target must be a finite altitude." : undefined; }
 function altitudeError(plan: PilotInputPlan | undefined): string | undefined {
   if (!plan) return "Open a plan first.";
-  if (plan.cruiseAltitudeTexts.length !== plan.checkpoints.length + 1) return "Enter exactly one cruise altitude for every route leg.";
-  return plan.cruiseAltitudeTexts.some((value) => value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) <= 0) ? "Enter a positive cruise altitude for every leg." : undefined;
+  if (plan.cruiseAltitudeTexts.length !== plan.checkpoints.length + 1) return "Enter exactly one altitude for every route checkpoint plus a final cruise target.";
+  return plan.cruiseAltitudeTexts.some((value) => value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) <= 0) ? "Enter a positive altitude in feet MSL for every checkpoint and the final cruise target." : undefined;
 }
 function checkpointError(plan: PilotInputPlan | undefined): string | undefined {
   if ((plan?.checkpoints.length ?? 0) > MAX_CHECKPOINTS_PER_PLAN) return `A plan can have no more than ${MAX_CHECKPOINTS_PER_PLAN} checkpoints.`;
@@ -923,7 +929,7 @@ function legFieldError(name: string, fields: Readonly<Record<string, string>>): 
 }
 function altitudeFieldError(name: string, value: string): string | undefined {
   const altitude = /^altitude-(\d+)$/.exec(name);
-  return altitude && !(value.trim() && Number.isFinite(Number(value)) && Number(value) > 0) ? "Enter a positive feet-MSL altitude." : undefined;
+  return altitude && !(value.trim() && Number.isFinite(Number(value)) && Number(value) > 0) ? "Enter a positive required altitude in feet MSL." : undefined;
 }
 function overrideValueFieldError(name: string, value: string): string | undefined {
   const override = /^override-tas-(\d+)$/.exec(name);

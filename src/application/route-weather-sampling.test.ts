@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { coordinate } from "../domain/coordinates";
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { pointAlongGreatCircle } from "../domain/distance-course";
-import { nauticalMiles } from "../domain/units";
+import { nauticalMiles, trueCourse } from "../domain/units";
 import { planDraft, aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { createFullNavlogCalculationEngine } from "./full-navlog-engine";
 import { calculateCompletePlan } from "./complete-plan";
@@ -47,20 +47,8 @@ async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query
 
 const navRows = (result: Awaited<ReturnType<typeof planWith>>["result"]) => {
   if (result.status !== "ready") throw new Error(result.message);
-  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly trueHeading: number; readonly variation: { readonly effectiveValue: number; readonly provenance: { readonly recordedAt: string } }; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly traces: { readonly magneticVariation: { readonly inputs: readonly { readonly name: string; readonly value: number }[] } }; readonly subleg: { readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number; readonly trueCourse: number; readonly start: { readonly latitude: number; readonly longitude: number }; readonly end: { readonly latitude: number; readonly longitude: number } } }[] } };
+  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly fuelFlow: { readonly effectiveValue: number }; readonly trueHeading: number; readonly variation: { readonly effectiveValue: number; readonly provenance: { readonly recordedAt: string } }; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly traces: { readonly magneticVariation: { readonly inputs: readonly { readonly name: string; readonly value: number }[] } }; readonly subleg: { readonly sourceLegId: string; readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number; readonly trueCourse: number; readonly start: { readonly latitude: number; readonly longitude: number }; readonly end: { readonly latitude: number; readonly longitude: number } } }[] } };
   return snapshot.navlog.rows;
-};
-const assertTodCallUsesFixedAirspeedGeometry = (draft: ReturnType<typeof planDraft>, queries: readonly AloftPointQuery[]) => {
-  const finalLeg = calculateGreatCircleDistanceAndInitialCourse(draft.route.points.at(-2)!.coordinate, draft.route.points.at(-1)!.coordinate);
-  if (!finalLeg.ok) throw new Error(finalLeg.error.message);
-  const descentMinutes = (draft.route.legs.at(-1)!.cruiseAltitudeFeetMsl - draft.descentTargetAltitudeFeetMsl.effectiveValue) / aircraftProfile().descentRateFeetPerMinute;
-  const fixedTodDistanceFromDestination = aircraftProfile().descentTasKnots * descentMinutes / 60;
-  const todOffset = nauticalMiles(finalLeg.value.distance - fixedTodDistanceFromDestination);
-  if (!todOffset.ok) throw new Error(todOffset.error.message);
-  const expectedTod = pointAlongGreatCircle(draft.route.points.at(-2)!.coordinate, finalLeg.value.initialTrueCourse, todOffset.value);
-  if (!expectedTod.ok) throw new Error(expectedTod.error.message);
-  expect(queries[3]?.latitudeDeg).toBeCloseTo(expectedTod.value.latitude, 4);
-  expect(queries[3]?.longitudeDeg).toBeCloseTo(expectedTod.value.longitude, 4);
 };
 const assertPilotWaypointQueryLocations = (draft: ReturnType<typeof planDraft>, queries: readonly AloftPointQuery[]) => {
   expect([queries[0]!.latitudeDeg, queries[0]!.longitudeDeg]).toEqual([draft.route.points[0]!.coordinate.latitude, draft.route.points[0]!.coordinate.longitude]);
@@ -69,7 +57,7 @@ const assertPilotWaypointQueryLocations = (draft: ReturnType<typeof planDraft>, 
 const assertProgressiveSnapshotEvidence = (result: Awaited<ReturnType<typeof planWith>>["result"]) => {
   const snapshotText = JSON.stringify(result);
   expect(snapshotText).toContain("TOC cumulative climb distance");
-  expect(snapshotText).toContain("TOD no-wind placement distance");
+  expect(snapshotText).toContain("TOD placement distance using preceding forecast");
   const climbRow = navRows(result).find((row) => row.subleg.phase === "climb");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("departure surface-to-aloft blend fraction");
   expect(JSON.stringify(climbRow?.effectiveWind.trace.inputs)).toContain("BRL lower wind speed");
@@ -81,14 +69,13 @@ const assertProgressiveSnapshotEvidence = (result: Awaited<ReturnType<typeof pla
 const assertProgressiveCallContract = (draft: ReturnType<typeof planDraft>, outcome: Awaited<ReturnType<typeof planWith>>) => {
   const { queries, solution, result } = outcome;
   expect(result, JSON.stringify(result)).toMatchObject({ status: "ready" });
-  expect(queries).toHaveLength(draft.route.points.length + 1);
-  expect(solution.sampledPoints).toHaveLength(draft.route.points.length + 1);
+  expect(queries.length).toBe(draft.route.points.length);
+  expect(solution.sampledPoints).toHaveLength(queries.length);
   expect(solution.iterations).toBe(1);
   assertPilotWaypointQueryLocations(draft, queries);
   expect(queries[0]?.altitudeFeetMsl).toBeGreaterThanOrEqual(3_000);
   expect(queries.at(-1)?.altitudeFeetMsl).toBeGreaterThanOrEqual(3_000);
   expect(queries[0]?.plannedUtc).toBe(departure);
-  assertTodCallUsesFixedAirspeedGeometry(draft, queries);
   assertProgressiveSnapshotEvidence(result);
 };
 
@@ -142,25 +129,205 @@ describe("route waypoint weather sampling", () => {
     expect(rows.at(-1)?.cumulative.enrouteFuel).toBeCloseTo(rows.reduce((sum, row) => sum + row.fuel, 0));
   });
 
-  it("uses generated TOD weather for the final descent through arrival", async () => {
+  it("uses the latest sampled forecast before TOD for both backward placement and descent", async () => {
     const draft = { ...routePlanDraft(), departureTimeUtc: departure };
-    const reference = await planWith(draft, () => 270);
-    const todQuery = reference.queries[3]!;
-    const destination = draft.route.points.at(-1)!.coordinate;
     const run = async (todDirection: number) => planWith(draft, (query) => {
-      const atTod = Math.abs(query.latitudeDeg - todQuery.latitudeDeg) < 0.001 && Math.abs(query.longitudeDeg - todQuery.longitudeDeg) < 0.001;
-      const atDestination = Math.abs(query.latitudeDeg - destination.latitude) < 0.001 && Math.abs(query.longitudeDeg - destination.longitude) < 0.001;
-      return atTod ? todDirection : atDestination ? 90 : 270;
+      const atDeparture = Math.abs(query.latitudeDeg - draft.route.points[0]!.coordinate.latitude) < 0.001 && Math.abs(query.longitudeDeg - draft.route.points[0]!.coordinate.longitude) < 0.001;
+      return atDeparture ? 270 : todDirection;
     });
     const west = await run(270), east = await run(280);
     const finalDescent = (outcome: typeof west) => navRows(outcome.result).filter((row) => row.subleg.phase === "descent");
     const westRows = finalDescent(west), eastRows = finalDescent(east);
     expect(westRows.length).toBeGreaterThan(0);
-    westRows.forEach((row) => expect(row.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: west.solution.sampledPoints[3]!.requestId })));
+    const precedingForecastId = west.solution.sampledPoints.at(-1)!.requestId;
+    westRows.forEach((row) => expect(row.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: precedingForecastId })));
     expect(westRows.at(-1)!.effectiveWind.wind.effectiveValue.directionFrom).toBeCloseTo(270, 0);
     expect(eastRows.at(-1)!.effectiveWind.wind.effectiveValue.directionFrom).toBeCloseTo(280, 0);
-    expect([eastRows.at(-1)!.groundspeed, eastRows.at(-1)!.estimatedTimeEnroute, eastRows.at(-1)!.fuel])
-      .not.toEqual([westRows.at(-1)!.groundspeed, westRows.at(-1)!.estimatedTimeEnroute, westRows.at(-1)!.fuel]);
+    expect(eastRows.at(-1)!.subleg.routeStartDistance).not.toBeCloseTo(westRows.at(-1)!.subleg.routeStartDistance, 6);
+  });
+
+  it("ends the final descent at pattern altitude at the airport", async () => {
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
+    const { result } = await planWith(draft, () => 270, { speed: 0 });
+    const rows = navRows(result);
+    const endDistance = rows.at(-1)!.subleg.routeEndDistance;
+    const destinationDistance = draft.route.legs.reduce((sum, _leg, index) => {
+      const segment = calculateGreatCircleDistanceAndInitialCourse(draft.route.points[index]!.coordinate, draft.route.points[index + 1]!.coordinate);
+      if (!segment.ok) throw new Error(segment.error.message);
+      return sum + segment.value.distance;
+    }, 0);
+
+    expect(destinationDistance - endDistance).toBeCloseTo(0, 1);
+    expect(rows.at(-1)!.subleg.phase).toBe("descent");
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - draft.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+    if (result.status !== "ready") throw new Error(result.message);
+    const snapshot = result.calculationSnapshot as { readonly phaseAllocation: { readonly navlogEndpoint: { readonly kind: string; readonly routeDistanceNauticalMiles: number } } };
+    expect(snapshot.phaseAllocation.navlogEndpoint.kind).toBe("pattern-altitude-airport");
+    expect(snapshot.phaseAllocation.navlogEndpoint.routeDistanceNauticalMiles).toBeCloseTo(endDistance, 6);
+  });
+
+  it.each([270, 90])("uses descent groundspeed to place TOD with wind direction %i without requesting TOD weather", async (direction) => {
+    const draft = { ...routePlanDraft(), departureTimeUtc: departure };
+    const { queries, result } = await planWith(draft, () => direction, { speed: 30 });
+    const rows = navRows(result);
+    const todRow = rows.find((row) => row.subleg.phase === "descent");
+    expect(todRow).toBeDefined();
+    expect(queries.some((query) => Math.abs(query.latitudeDeg - todRow!.subleg.start.latitude) < 0.001 && Math.abs(query.longitudeDeg - todRow!.subleg.start.longitude) < 0.001)).toBe(false);
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - draft.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+    expect(rows.at(-1)!.subleg.routeEndDistance).toBeCloseTo(rows.at(-1)!.cumulative.routeDistance, 6);
+  });
+
+  it("uses candidate TOD-to-airport course for a long final leg with crosswind", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(500);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the long route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, () => 0, { speed: 45 });
+    const rows = navRows(outcome.result);
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - base.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+    expect(outcome.queries).toHaveLength(2);
+    const descentStart = rows.find((row) => row.subleg.phase === "descent")!.subleg.start;
+    expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - descentStart.latitude) < 0.001 && Math.abs(query.longitudeDeg - descentStart.longitude) < 0.001)).toBe(false);
+  });
+
+  it("uses the already sampled forecast for descent and makes no TOD weather request", async () => {
+    const base = routePlanDraft();
+    const points = [base.route.points[0]!, base.route.points.at(-1)!];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270, { speed: 0 });
+    const descentRows = navRows(outcome.result).filter((row) => row.subleg.phase === "descent");
+    expect(descentRows.length).toBeGreaterThan(0);
+    const preceding = outcome.solution.sampledPoints.at(-1)!;
+    expect(descentRows[0]!.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: preceding.requestId }));
+    expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - descentRows[0]!.subleg.start.latitude) < 0.001 && Math.abs(query.longitudeDeg - descentRows[0]!.subleg.start.longitude) < 0.001)).toBe(false);
+  });
+
+  it.each([0.9, 1, 1.1])("collapses only a direct-route cruise interval of %i calculated minutes", async (cruiseMinutes) => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const directRoute = (distance: number) => {
+      const checkedDistance = nauticalMiles(distance), course = trueCourse(90);
+      if (!checkedDistance.ok || !course.ok) throw new Error("Could not build the direct-route fixture.");
+      const endpoint = pointAlongGreatCircle(start.coordinate, course.value, checkedDistance.value);
+      if (!endpoint.ok) throw new Error(endpoint.error.message);
+      const points = [start, { ...destination, coordinate: endpoint.value }];
+      return { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    };
+
+    // Use a normal direct plan to measure the calculated TOC, descent distance,
+    // and cruise groundspeed, then place TOD at the requested time boundary.
+    const longRoute = directRoute(35);
+    const calibration = await planWith({ ...base, departureTimeUtc: departure, route: longRoute }, () => 270, { speed: 15 });
+    const calibrationRows = navRows(calibration.result);
+    const tocDistance = calibrationRows.filter((row) => row.subleg.phase === "climb").at(-1)!.subleg.routeEndDistance;
+    const descentRows = calibrationRows.filter((row) => row.subleg.phase === "descent");
+    const descentDistance = descentRows.reduce((sum, row) => sum + row.subleg.distance, 0);
+    const cruiseGroundspeed = calibrationRows.find((row) => row.subleg.phase === "cruise")!.groundspeed;
+    const normalDescentTime = descentRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0);
+    const normalDescentFuel = descentRows.reduce((sum, row) => sum + row.fuel, 0);
+    let targetDistance = tocDistance + descentDistance + cruiseGroundspeed * cruiseMinutes / 60;
+    let outcome = await planWith({ ...base, departureTimeUtc: departure, route: directRoute(targetDistance) }, () => 270, { speed: 15 });
+    // Great-circle endpoint encoding introduces tiny distance differences.
+    // Tune the fixture against the planner's unrounded result for an exact 1m case.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const measuredRows = navRows(outcome.result).filter((row) => row.subleg.phase === "cruise");
+      if (measuredRows.length === 0) break;
+      const measuredMinutes = measuredRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0);
+      const measuredSpeed = measuredRows.at(-1)!.groundspeed;
+      if (Math.abs(measuredMinutes - cruiseMinutes) < 1e-9) break;
+      targetDistance -= (measuredMinutes - cruiseMinutes) * measuredSpeed / 60;
+      outcome = await planWith({ ...base, departureTimeUtc: departure, route: directRoute(targetDistance) }, () => 270, { speed: 15 });
+    }
+    const rows = navRows(outcome.result);
+    const cruiseRows = rows.filter((row) => row.subleg.phase === "cruise");
+    const descent = rows.filter((row) => row.subleg.phase === "descent");
+
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    expect(outcome.queries).toHaveLength(2);
+    expect(descent.length).toBeGreaterThan(0);
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - base.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+    expect(rows.at(-1)!.cumulative.estimatedTimeEnroute).toBeGreaterThan(0);
+    expect(rows.at(-1)!.cumulative.enrouteFuel).toBeGreaterThan(0);
+    if (cruiseMinutes <= 1) {
+      expect(cruiseRows).toHaveLength(0);
+      expect(descent[0]!.subleg.routeStartDistance).toBeCloseTo(rows.filter((row) => row.subleg.phase === "climb").at(-1)!.subleg.routeEndDistance, 6);
+      expect(descent.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeGreaterThan(normalDescentTime);
+      expect(descent.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeCloseTo(descent.reduce((sum, row) => sum + row.subleg.distance / row.groundspeed * 60, 0), 6);
+      expect(descent.reduce((sum, row) => sum + row.fuel, 0)).toBeCloseTo(descent.reduce((sum, row) => sum + row.fuelFlow.effectiveValue * row.estimatedTimeEnroute / 60, 0), 6);
+      expect(descent.reduce((sum, row) => sum + row.fuel, 0)).toBeGreaterThan(normalDescentFuel);
+    } else {
+      expect(cruiseRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeGreaterThan(1);
+    }
+  });
+
+  it("fails clearly when backward TOD overlaps the active climb", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(11);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the short route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const fetchPoint = vi.fn(async (query: AloftPointQuery) => answer(query, 90, 20));
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), { fetchPoint }, endpoints)).rejects.toThrow(/route is too short.*TOC.*TOD/i);
+    expect(fetchPoint).not.toHaveBeenCalled();
+  });
+
+  it("rejects a wind-induced TOC/TOD overlap after weather changes nominal separation", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(20);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the direct-route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const fetchPoint = vi.fn(async (query: AloftPointQuery) => answer(query, 270, 70));
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), { fetchPoint }, endpoints)).rejects.toThrow(/top of descent meets or precedes top of climb/i);
+    expect(fetchPoint).toHaveBeenCalledTimes(2);
+  });
+
+  it("ends a one-leg route at the airport with the pattern-altitude target", async () => {
+    const base = routePlanDraft();
+    const points = [base.route.points[0]!, base.route.points.at(-1)!];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270, { speed: 15 });
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    const rows = navRows(outcome.result);
+    expect(rows.some((row) => row.subleg.phase === "climb")).toBe(true);
+    expect(rows.some((row) => row.subleg.phase === "descent")).toBe(true);
+    expect(rows.at(-1)!.subleg.routeEndDistance).toBeCloseTo(rows.at(-1)!.cumulative.routeDistance, 6);
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - base.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+  });
+
+  it("rejects a short route that cannot fit its climb and descent", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const shortDistance = nauticalMiles(5);
+    if (!shortDistance.ok) throw new Error(shortDistance.error.message);
+    const eastCourse = trueCourse(90);
+    if (!eastCourse.ok) throw new Error(eastCourse.error.message);
+    const shortEndpoint = pointAlongGreatCircle(start.coordinate, eastCourse.value, shortDistance.value);
+    if (!shortEndpoint.ok) throw new Error(shortEndpoint.error.message);
+    const points = [start, { ...destination, coordinate: shortEndpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), {
+      async fetchPoint(query) { return answer(query, 270, 15); },
+    }, endpoints)).rejects.toThrow(/too short|cannot reach|cannot fit|available route/i);
   });
 
   it("does not request destination winds and uses the preceding TOD sample through arrival", async () => {
@@ -170,7 +337,8 @@ describe("route waypoint weather sampling", () => {
     expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - draft.route.points.at(-1)!.coordinate.latitude) < 0.001 && Math.abs(query.longitudeDeg - draft.route.points.at(-1)!.coordinate.longitude) < 0.001)).toBe(false);
     const descentRows = navRows(outcome.result).filter((row) => row.subleg.phase === "descent");
     expect(descentRows.length).toBeGreaterThan(0);
-    descentRows.forEach((row) => expect(row.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: outcome.solution.sampledPoints[3]!.requestId })));
+    const precedingForecastId = outcome.solution.sampledPoints.at(-1)!.requestId;
+    descentRows.forEach((row) => expect(row.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: precedingForecastId })));
   });
 
   it("does not require an aloft period at the destination", async () => {
@@ -212,7 +380,7 @@ describe("route waypoint weather sampling", () => {
     const distance = nauticalMiles(5);
     if (!distance.ok) throw new Error(distance.error.message);
     const projected = solution.weather.phaseWindResolver.resolveEffectiveWind({ phase: "descent", start: midpoint.value, courseDegreesTrue: geometry.value.initialTrueCourse, startingAltitudeFeetMsl: 4_500, targetAltitudeFeetMsl: 3_000, estimatedDistanceNauticalMiles: distance.value, iteration: 1 });
-    expect(queries).toHaveLength(3);
+    expect(queries).toHaveLength(2);
     expect(projected.ok && projected.value.directionFrom).toBeCloseTo(270, 0);
   });
 
@@ -290,41 +458,58 @@ describe("route waypoint weather sampling", () => {
     const { queries, result } = await planWith(draft, (query) => query.longitudeDeg < -88.2 ? 350 : 10);
     const rows = navRows(result);
 
-    expect(queries).toHaveLength(draft.route.points.length + 1);
+    expect(queries).toHaveLength(draft.route.points.length);
     expect(rows.some((row) => row.subleg.phase === "climb")).toBe(true);
     expect(rows.some((row) => row.subleg.phase === "descent")).toBe(true);
     expect(rows.some((row) => row.subleg.phase.startsWith("transition"))).toBe(true);
-    expect(result.status === "ready" && result.warnings.join(" ")).toMatch(/starting waypoint/i);
+    expect(result.status === "ready" && result.warnings).toEqual([]);
     expect(rows.some((row) => row.subleg.routeEndDistance > row.subleg.routeStartDistance && row.effectiveWind.wind.effectiveValue.speed > 0)).toBe(true);
   });
 
-  it("continues blending departure METAR wind after an early waypoint while still below the aloft sample altitude", async () => {
+  it("ends a climb at a waypoint within 50 feet and carries the actual altitude into the next leg", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const checkpoint = base.route.points[1]!;
+    const destination = base.route.points.at(-1)!;
+    const course = trueCourse(90);
+    const checkpointDistance = nauticalMiles(9.75);
+    const destinationDistance = nauticalMiles(35);
+    if (!course.ok || !checkpointDistance.ok || !destinationDistance.ok) throw new Error("Could not build the waypoint-altitude fixture.");
+    const checkpointCoordinate = pointAlongGreatCircle(start.coordinate, course.value, checkpointDistance.value);
+    const destinationCoordinate = pointAlongGreatCircle(start.coordinate, course.value, destinationDistance.value);
+    if (!checkpointCoordinate.ok || !destinationCoordinate.ok) throw new Error("Could not project waypoint coordinates.");
+    const points = [start, { ...checkpoint, coordinate: checkpointCoordinate.value }, { ...destination, coordinate: destinationCoordinate.value }];
+    const route = {
+      ...base.route,
+      points,
+      legs: [
+        { ...base.route.legs[0]!, toPointId: points[1]!.id, cruiseAltitudeFeetMsl: 4_500 },
+        { ...base.route.legs[1]!, fromPointId: points[1]!.id, toPointId: points[2]!.id, cruiseAltitudeFeetMsl: 4_500 },
+      ],
+    };
+    const { queries, result } = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270, { speed: 0 });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "ready" });
+    const rows = navRows(result);
+    const climbRows = rows.filter((row) => row.subleg.phase === "climb");
+    expect(climbRows.length).toBeGreaterThan(0);
+    expect(climbRows.every((row) => row.subleg.routeEndDistance <= checkpointDistance.value + 1e-6)).toBe(true);
+    const finalClimb = climbRows.at(-1)!;
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeGreaterThan(0);
+    expect(4_500 - finalClimb.subleg.endingAltitude).toBeLessThanOrEqual(50);
+    const nextLegRows = rows.filter((row) => row.subleg.sourceLegId === route.legs[1]!.id);
+    expect(nextLegRows[0]!.subleg.startingAltitude).toBe(finalClimb.subleg.endingAltitude);
+    expect(queries.filter((query) => Math.abs(query.latitudeDeg - checkpointCoordinate.value.latitude) < 0.001 && Math.abs(query.longitudeDeg - checkpointCoordinate.value.longitude) < 0.001)).toHaveLength(1);
+    if (result.status !== "ready") throw new Error(result.message);
+    const snapshot = result.calculationSnapshot as { readonly phaseAllocation: { readonly boundaries: readonly { readonly kind: string; readonly routeDistanceNauticalMiles: number }[] } };
+    const toc = snapshot.phaseAllocation.boundaries.find((boundary) => boundary.kind === "top-of-climb");
+    expect(toc?.routeDistanceNauticalMiles).toBeCloseTo(checkpointDistance.value, 6);
+  });
+
+  it("rejects an early waypoint where the selected inbound altitude cannot be reached", async () => {
     const base = routePlanDraft();
     const earlyCheckpoint = { ...base.route.points[1]!, coordinate: asCoordinate(41.95, -87.98) };
     const draft = { ...base, departureTimeUtc: departure, route: { ...base.route, points: [base.route.points[0]!, earlyCheckpoint, base.route.points[2]!] } };
-    const run = (checkpointDirection: number) => planWith(draft, (query) =>
-      Math.abs(query.latitudeDeg - draft.route.points[0]!.coordinate.latitude) < 0.001
-        && Math.abs(query.longitudeDeg - draft.route.points[0]!.coordinate.longitude) < 0.001 ? 10 : checkpointDirection,
-    );
-    const first = await run(350), changedCheckpoint = await run(340);
-    const waypointDistance = calculateGreatCircleDistanceAndInitialCourse(draft.route.points[0]!.coordinate, draft.route.points[1]!.coordinate);
-    if (!waypointDistance.ok) throw new Error(waypointDistance.error.message);
-    const beforeWaypoint = (result: typeof first.result) => navRows(result)
-      .filter((row) => row.subleg.routeEndDistance <= waypointDistance.value.distance + 1e-6)
-      .map((row) => [row.estimatedTimeEnroute, row.effectiveWind.wind.effectiveValue.directionFrom]);
-    expect(beforeWaypoint(changedCheckpoint.result)).toEqual(beforeWaypoint(first.result));
-    const continuedClimb = navRows(first.result).find((row) =>
-      row.subleg.phase === "climb"
-      && row.subleg.routeStartDistance > 0
-      && row.subleg.startingAltitude < 3_000,
-    );
-
-    expect(continuedClimb).toBeDefined();
-    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("departure surface-to-aloft blend fraction");
-    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("KORD");
-    expect(continuedClimb?.effectiveWind.wind.effectiveValue.directionFrom).toBeCloseTo(350, 0);
-    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("departure blend aloft longitude");
-    expect(JSON.stringify(continuedClimb?.effectiveWind.trace.inputs)).toContain("-87.98");
+    await expect(planWith(draft, () => 350)).rejects.toThrow(/selected inbound altitude cannot be reached within 50 ft at waypoint 2/i);
   });
 
   it("uses the projected climb-start position without adding its already-traveled phase distance", async () => {
@@ -340,6 +525,11 @@ describe("route waypoint weather sampling", () => {
 
   it("retains bounded endpoint source provenance in the calculated snapshot", async () => {
     const { result } = await planWith({ ...routePlanDraft(), departureTimeUtc: departure }, () => 270);
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") throw new Error(result.message);
+    expect(result.weather.warnings).toEqual([]);
+    expect(result.weather.provenance).toMatchObject({ source: "progressive-route-point-winds", eventCount: expect.any(Number) });
+    expect(result.calculationSnapshot).toMatchObject({ phaseAllocation: { warnings: [] } });
     expect(result).toMatchObject({ calculationSnapshot: { weather: { endpointSources: {
       departureMetar: { stationIcao: "KORD", requestId: "metar-request", observedAt: departure, cache: { status: "upstream_refresh" } },
     } } } });
@@ -385,16 +575,19 @@ describe("route waypoint weather sampling", () => {
     const pending: { query: AloftPointQuery; resolve: (answer: AloftPointAnswer) => void }[] = [];
     const operation = resolveRouteWeather(draft, aircraftProfile(), { fetchPoint(query) { return new Promise((resolve) => pending.push({ query, resolve })); } }, endpoints);
     expect(pending).toHaveLength(1);
-    for (let index = 0; index < draft.route.points.length + 1; index += 1) {
+    let finished = false;
+    void operation.then(() => { finished = true; });
+    for (let index = 0; index < draft.route.points.length + 4 && !finished; index += 1) {
+      if (pending[index] === undefined) break;
       pending[index]!.resolve(answer(pending[index]!.query, 270, 15));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(pending).toHaveLength(index + 1 < draft.route.points.length + 1 ? index + 2 : index + 1);
+      expect(pending.length).toBeLessThanOrEqual(index + 2);
     }
     const result = await operation;
-    expect(result.sampledPoints).toHaveLength(draft.route.points.length + 1);
+    expect(result.sampledPoints).toHaveLength(draft.route.points.length);
   });
 
-  it("uses returned preceding waypoint wind to choose the following query UTC", async () => {
+  it("does not make a candidate forecast query to reconcile TOD", async () => {
     const draft = { ...routePlanDraft(), departureTimeUtc: departure };
     const run = async (secondWaypointDirection: number) => {
       const queries: AloftPointQuery[] = [];
@@ -409,7 +602,8 @@ describe("route waypoint weather sampling", () => {
     };
     const tailwindRun = await run(90);
     const headwindRun = await run(270);
-    expect(tailwindRun.at(-1)?.plannedUtc).not.toBe(headwindRun.at(-1)?.plannedUtc);
+    expect(tailwindRun).toHaveLength(draft.route.points.length);
+    expect(headwindRun).toHaveLength(draft.route.points.length);
   });
 
   it("fails the whole update when any waypoint has no supported point forecast", async () => {

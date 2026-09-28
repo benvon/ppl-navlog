@@ -1261,7 +1261,7 @@ describe("planner shell", () => {
     await settle();
     await settle();
     expect(root.textContent).toContain("Calculated and saved complete navlog revision calculated-1.");
-    expect(root.textContent).toContain("Fuel required including taxi/run-up and reserve: 10.0 gal.");
+    expect(root.textContent).toContain("Estimated fuel required including taxi/run-up and reserve: 10.0 gal.");
     expect(root.textContent).toContain("RAW FB PRODUCT");
     const navlogTable = root.querySelector(".calculated-navlog table");
     const inspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');

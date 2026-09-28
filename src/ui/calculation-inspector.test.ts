@@ -3,6 +3,56 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("matches whole-minute navlog ETE while retaining its unrounded value", () => {
+    const rendered = renderCalculationInspector(teachingRevision(), { rowIndex: 0, field: "estimatedTimeEnroute" });
+    expect(rendered.textContent).toContain("Result: 6 min as shown in the navlog.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 5.922");
+  });
+  it("matches nearest-hundred-foot navlog altitude while retaining its unrounded values", () => {
+    const revision = teachingRevision();
+    const subleg = revision.calculationSnapshot.navlog.rows[0]!.subleg as Record<string, unknown>;
+    subleg.startingAltitude = 1798.3;
+    subleg.endingAltitude = 1800.2;
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
+    expect(rendered.textContent).toContain("Result: 1800 → 1800 ft MSL as shown in the navlog.");
+    expect(rendered.textContent).toContain("1798.3");
+  });
+  it("matches whole-degree headings and whole-knot wind and groundspeed in the navlog", () => {
+    const revision = teachingRevision();
+    const row = revision.calculationSnapshot.navlog.rows[0]!;
+    row.subleg.trueCourse = 280.4;
+    row.effectiveWind.wind.effectiveValue.directionFrom = 270.4;
+    row.effectiveWind.wind.effectiveValue.speed = 12.4;
+    row.windCorrectionAngle = 2.4;
+    row.trueHeading = 282.4;
+    row.variation.effectiveValue = -3.4;
+    row.magneticHeading = 285.4;
+    row.compassDeviation = 1.4;
+    row.compassHeading = 286.4;
+    row.groundspeed = 95.4;
+
+    const expected = [
+      ["trueCourse", "280°"], ["wind", "270° / 12 kt"], ["windCorrectionAngle", "2°"],
+      ["trueHeading", "282°"], ["variation", "-3°"], ["magneticHeading", "285°"],
+      ["compassDeviation", "1°"], ["compassHeading", "286°"], ["groundspeed", "95 kt"],
+    ] as const;
+    for (const [field, value] of expected) {
+      const rendered = renderCalculationInspector(revision, { rowIndex: 0, field });
+      expect(rendered.textContent).toContain(`Result: ${value} as shown in the navlog.`);
+    }
+    const heading = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" });
+    expect(heading.textContent).toContain("Stored unrounded value: 286.4");
+  });
+  it("uses navlog rounding for negative whole-degree values", () => {
+    const revision = teachingRevision();
+    const row = revision.calculationSnapshot.navlog.rows[0]!;
+    for (const [value, displayed] of [[-0.4, "0°"], [-2.5, "-3°"], [2.5, "3°"]] as const) {
+      row.windCorrectionAngle = value;
+      const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "windCorrectionAngle" });
+      expect(rendered.textContent).toContain(`Result: ${displayed} as shown in the navlog.`);
+      expect(rendered.textContent).toContain(`Stored unrounded value: ${value}`);
+    }
+  });
   it("describes wind from the right as a leftward push requiring a right correction", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;
@@ -37,7 +87,7 @@ describe("calculation inspector", () => {
     expect(headingDetails).toContain("Effective wind source");
     expect(headingDetails).toContain("Formula: point-wind");
     expect(compass).not.toContain("- -2°");
-    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).textContent).toContain("Result: 23.3° as shown in the navlog. Stored unrounded value: 23.32.");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).textContent).toContain("Result: 23° as shown in the navlog. Stored unrounded value: 23.32.");
     expect(renderCalculationInspector(revision, { rowIndex: 0, field: "variation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("east-positive variation input");
     expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassDeviation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("aircraft deviation table");
   });
