@@ -209,19 +209,19 @@ const calculateProgressiveRoute = async (
     return pointWind(currentAnswer);
   };
 
-  const requestTopOfDescent = async (line: RouteLine): Promise<void> => {
+  const requestTopOfDescent = async (): Promise<void> => {
     const todCoordinate = coordinateAtRouteDistance(lines, todDistance);
     todRequested = true;
     if (Math.abs(currentAltitude - finalCruiseAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError("Aircraft has not reached the selected cruise altitude at the fixed top-of-descent point.");
     const placementDescentRate = descentRate;
     await fetchAt({ routeDistance: todDistance, coordinate: todCoordinate, altitudeFeetMsl: Math.round(currentAltitude) });
     const tas = checkedVerticalTas(descentTas);
-    const triangle = requiredVerticalTriangle(line, tas, pointWind(currentAnswer), finalRouteDistance);
+    const triangle = requiredVerticalTriangle(finalLine, tas, pointWind(currentAnswer), finalRouteDistance);
     const availableMinutes = (finalRouteDistance - todDistance) / triangle.groundspeed * 60;
     if (!Number.isFinite(availableMinutes) || availableMinutes <= 0) throw new RouteWeatherSamplingError("Top-of-descent weather cannot produce a positive descent time.");
     descentRate = (currentAltitude - finalTargetAltitude) / availableMinutes;
     if (descentRate > profile.descentRateFeetPerMinute * 1.5) warnings.push(`Required descent rate ${descentRate.toFixed(1)} ft/min exceeds 150% of the aircraft profile rate (${(profile.descentRateFeetPerMinute * 1.5).toFixed(1)} ft/min).`);
-    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", line, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, placementDescentRate, descentRate, descentTas, finalRouteDistance - todDistance)));
+    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", finalLine, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, placementDescentRate, descentRate, descentTas, finalRouteDistance - todDistance)));
     mode = "descent";
     phaseTarget = finalTargetAltitude;
     phaseId = "arrival-descent";
@@ -328,7 +328,7 @@ const calculateProgressiveRoute = async (
     if (interveningWaypoint !== undefined) throw new RouteWeatherSamplingError("Arrival descent would cross a pilot waypoint before the airport; the checkpoint altitude and progressive weather cannot both be satisfied by this route profile.");
     if (todDistance > cursorDistance + 1e-8) calculateInterval(line, todDistance, "cruise", currentAltitude, currentAltitude, `${phaseId}:to-tod`);
     cursorDistance = todDistance;
-    await requestTopOfDescent(line);
+    await requestTopOfDescent();
     return true;
   };
 

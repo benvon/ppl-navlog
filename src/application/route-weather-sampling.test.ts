@@ -197,6 +197,24 @@ describe("route waypoint weather sampling", () => {
     expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - descentStart.latitude) < 0.001 && Math.abs(query.longitudeDeg - descentStart.longitude) < 0.001)).toBe(true);
   });
 
+  it("calculates TOD at the final leg origin using final-leg descent geometry", async () => {
+    const base = routePlanDraft();
+    const checkpoint = base.route.points[1]!;
+    const descentDistance = (base.route.legs.at(-1)!.cruiseAltitudeFeetMsl - base.descentTargetAltitudeFeetMsl.effectiveValue)
+      / aircraftProfile().descentRateFeetPerMinute * aircraftProfile().descentTasKnots / 60;
+    const course = trueCourse(90);
+    const distance = nauticalMiles(descentDistance);
+    if (!course.ok || !distance.ok) throw new Error("Could not build final-leg boundary fixture.");
+    const end = pointAlongGreatCircle(checkpoint.coordinate, course.value, distance.value);
+    if (!end.ok) throw new Error(end.error.message);
+    const destination = { ...base.route.points.at(-1)!, coordinate: end.value };
+    const route = { ...base.route, points: [base.route.points[0]!, checkpoint, destination], legs: [base.route.legs[0]!, { ...base.route.legs[1]!, toPointId: destination.id }] };
+    const outcome = await planWith({ ...base, departureTimeUtc: departure, route }, () => 270, { speed: 0 });
+    expect(outcome.result).toMatchObject({ status: "ready" });
+    const descent = navRows(outcome.result).find((row) => row.subleg.phase === "descent")!;
+    expect(descent.subleg.routeStartDistance).toBeCloseTo(navRows(outcome.result).filter((row) => row.subleg.sourceLegId === route.legs[0]!.id).at(-1)!.subleg.routeEndDistance, 4);
+  });
+
   it("uses the TOD point forecast for descent", async () => {
     const base = routePlanDraft();
     const points = [base.route.points[0]!, base.route.points.at(-1)!];
