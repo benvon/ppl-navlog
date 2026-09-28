@@ -46,7 +46,7 @@ describe("calculation inspector", () => {
   it("uses navlog rounding for negative whole-degree values", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;
-    for (const [value, displayed] of [[-0.4, "0°"], [-2.5, "-2°"]] as const) {
+    for (const [value, displayed] of [[-0.4, "0°"], [-2.5, "-3°"], [2.5, "3°"]] as const) {
       row.windCorrectionAngle = value;
       const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "windCorrectionAngle" });
       expect(rendered.textContent).toContain(`Result: ${displayed} as shown in the navlog.`);

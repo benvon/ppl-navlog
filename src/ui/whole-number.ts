@@ -1,4 +1,6 @@
-/** Matches the calculated navlog's whole-unit display while preserving inputs elsewhere. */
+/** Rounds half values away from zero for symmetric whole-unit display. */
 export function wholeNumberDisplay(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value) ? String(Math.round(value)) : "—";
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(Math.sign(value) * Math.round(Math.abs(value)))
+    : "—";
 }
