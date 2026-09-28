@@ -47,7 +47,7 @@ async function planWith(draft: ReturnType<typeof planDraft>, directionAt: (query
 
 const navRows = (result: Awaited<ReturnType<typeof planWith>>["result"]) => {
   if (result.status !== "ready") throw new Error(result.message);
-  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly trueHeading: number; readonly variation: { readonly effectiveValue: number; readonly provenance: { readonly recordedAt: string } }; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly traces: { readonly magneticVariation: { readonly inputs: readonly { readonly name: string; readonly value: number }[] } }; readonly subleg: { readonly sourceLegId: string; readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number; readonly trueCourse: number; readonly start: { readonly latitude: number; readonly longitude: number }; readonly end: { readonly latitude: number; readonly longitude: number } } }[] } };
+  const snapshot = result.calculationSnapshot as { readonly navlog: { readonly rows: readonly { readonly groundspeed: number; readonly estimatedTimeEnroute: number; readonly fuel: number; readonly fuelFlow: { readonly effectiveValue: number }; readonly trueHeading: number; readonly variation: { readonly effectiveValue: number; readonly provenance: { readonly recordedAt: string } }; readonly cumulative: { readonly routeDistance: number; readonly estimatedTimeEnroute: number; readonly enrouteFuel: number }; readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number }; readonly provenance: { readonly sourceLabel: string } }; readonly trace: { readonly inputs: readonly unknown[] } }; readonly traces: { readonly magneticVariation: { readonly inputs: readonly { readonly name: string; readonly value: number }[] } }; readonly subleg: { readonly sourceLegId: string; readonly phase: string; readonly routeStartDistance: number; readonly routeEndDistance: number; readonly startingAltitude: number; readonly endingAltitude: number; readonly distance: number; readonly trueCourse: number; readonly start: { readonly latitude: number; readonly longitude: number }; readonly end: { readonly latitude: number; readonly longitude: number } } }[] } };
   return snapshot.navlog.rows;
 };
 const assertPilotWaypointQueryLocations = (draft: ReturnType<typeof planDraft>, queries: readonly AloftPointQuery[]) => {
@@ -207,6 +207,65 @@ describe("route waypoint weather sampling", () => {
     const preceding = outcome.solution.sampledPoints.at(-1)!;
     expect(descentRows[0]!.effectiveWind.trace.inputs).toContainEqual(expect.objectContaining({ name: "point request id", value: preceding.requestId }));
     expect(outcome.queries.some((query) => Math.abs(query.latitudeDeg - descentRows[0]!.subleg.start.latitude) < 0.001 && Math.abs(query.longitudeDeg - descentRows[0]!.subleg.start.longitude) < 0.001)).toBe(false);
+  });
+
+  it.each([0.9, 1, 1.1])("collapses only a direct-route cruise interval of %i calculated minutes", async (cruiseMinutes) => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const directRoute = (distance: number) => {
+      const checkedDistance = nauticalMiles(distance), course = trueCourse(90);
+      if (!checkedDistance.ok || !course.ok) throw new Error("Could not build the direct-route fixture.");
+      const endpoint = pointAlongGreatCircle(start.coordinate, course.value, checkedDistance.value);
+      if (!endpoint.ok) throw new Error(endpoint.error.message);
+      const points = [start, { ...destination, coordinate: endpoint.value }];
+      return { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    };
+
+    // Use a normal direct plan to measure the calculated TOC, descent distance,
+    // and cruise groundspeed, then place TOD at the requested time boundary.
+    const longRoute = directRoute(35);
+    const calibration = await planWith({ ...base, departureTimeUtc: departure, route: longRoute }, () => 270, { speed: 15 });
+    const calibrationRows = navRows(calibration.result);
+    const tocDistance = calibrationRows.filter((row) => row.subleg.phase === "climb").at(-1)!.subleg.routeEndDistance;
+    const descentRows = calibrationRows.filter((row) => row.subleg.phase === "descent");
+    const descentDistance = descentRows.reduce((sum, row) => sum + row.subleg.distance, 0);
+    const cruiseGroundspeed = calibrationRows.find((row) => row.subleg.phase === "cruise")!.groundspeed;
+    const normalDescentTime = descentRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0);
+    const normalDescentFuel = descentRows.reduce((sum, row) => sum + row.fuel, 0);
+    let targetDistance = tocDistance + descentDistance + cruiseGroundspeed * cruiseMinutes / 60;
+    let outcome = await planWith({ ...base, departureTimeUtc: departure, route: directRoute(targetDistance) }, () => 270, { speed: 15 });
+    // Great-circle endpoint encoding introduces tiny distance differences.
+    // Tune the fixture against the planner's unrounded result for an exact 1m case.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const measuredRows = navRows(outcome.result).filter((row) => row.subleg.phase === "cruise");
+      if (measuredRows.length === 0) break;
+      const measuredMinutes = measuredRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0);
+      const measuredSpeed = measuredRows.at(-1)!.groundspeed;
+      if (Math.abs(measuredMinutes - cruiseMinutes) < 1e-9) break;
+      targetDistance -= (measuredMinutes - cruiseMinutes) * measuredSpeed / 60;
+      outcome = await planWith({ ...base, departureTimeUtc: departure, route: directRoute(targetDistance) }, () => 270, { speed: 15 });
+    }
+    const rows = navRows(outcome.result);
+    const cruiseRows = rows.filter((row) => row.subleg.phase === "cruise");
+    const descent = rows.filter((row) => row.subleg.phase === "descent");
+
+    expect(outcome.result, JSON.stringify(outcome.result)).toMatchObject({ status: "ready" });
+    expect(outcome.queries).toHaveLength(2);
+    expect(descent.length).toBeGreaterThan(0);
+    expect(Math.abs(rows.at(-1)!.subleg.endingAltitude - base.descentTargetAltitudeFeetMsl.effectiveValue)).toBeLessThanOrEqual(50);
+    expect(rows.at(-1)!.cumulative.estimatedTimeEnroute).toBeGreaterThan(0);
+    expect(rows.at(-1)!.cumulative.enrouteFuel).toBeGreaterThan(0);
+    if (cruiseMinutes <= 1) {
+      expect(cruiseRows).toHaveLength(0);
+      expect(descent[0]!.subleg.routeStartDistance).toBeCloseTo(rows.filter((row) => row.subleg.phase === "climb").at(-1)!.subleg.routeEndDistance, 6);
+      expect(descent.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeGreaterThan(normalDescentTime);
+      expect(descent.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeCloseTo(descent.reduce((sum, row) => sum + row.subleg.distance / row.groundspeed * 60, 0), 6);
+      expect(descent.reduce((sum, row) => sum + row.fuel, 0)).toBeCloseTo(descent.reduce((sum, row) => sum + row.fuelFlow.effectiveValue * row.estimatedTimeEnroute / 60, 0), 6);
+      expect(descent.reduce((sum, row) => sum + row.fuel, 0)).toBeGreaterThan(normalDescentFuel);
+    } else {
+      expect(cruiseRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0)).toBeGreaterThan(1);
+    }
   });
 
   it("fails clearly when backward TOD overlaps the active climb", async () => {

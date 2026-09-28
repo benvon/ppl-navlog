@@ -139,8 +139,11 @@ const calculateProgressiveRoute = async (
   const finalTargetAltitude = draft.descentTargetAltitudeFeetMsl.effectiveValue;
   const finalCruiseAltitude = routeLegs.at(-1)!.sourceLeg.cruiseAltitudeFeetMsl;
   const descentSetup = prepareProgressiveDescent(finalCruiseAltitude, finalTargetAltitude, totalDistance, profile);
-  const { finalRouteDistance, descentTas, descentMinutes } = descentSetup;
+  const { finalRouteDistance, descentTas } = descentSetup;
+  let descentMinutes = descentSetup.descentMinutes;
+  let descentRate = profile.descentRateFeetPerMinute;
   let todDistance = Number.POSITIVE_INFINITY;
+  let shortCruiseCollapsed = false;
 
   const session = createNavlogCalculationSession({
     routeLegs: routeLegs.map((leg) => ({
@@ -208,7 +211,7 @@ const calculateProgressiveRoute = async (
 
   const requestTopOfDescent = async (line: RouteLine): Promise<void> => {
     const todCoordinate = coordinateAtRouteDistance(lines, todDistance);
-    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", line, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, profile.descentRateFeetPerMinute, descentTas, finalRouteDistance - todDistance)));
+    generatedBoundaries.push(makeGeneratedBoundary("top-of-descent", line, todDistance, todCoordinate, todPlacementTrace(finalCruiseAltitude, finalTargetAltitude, descentRate, descentTas, finalRouteDistance - todDistance)));
     todRequested = true;
     if (Math.abs(currentAltitude - finalCruiseAltitude) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError("Aircraft has not reached the selected cruise altitude at the fixed top-of-descent point.");
     mode = "descent";
@@ -219,7 +222,7 @@ const calculateProgressiveRoute = async (
   const processVerticalInterval = async (line: RouteLine, legIndex: number, nextWaypointDistance: number): Promise<void> => {
     assertNotAtUnfetchedTod(todRequested, cursorDistance, todDistance);
     const climbing = isClimbingMode(mode);
-    const rate = checkedRate(climbing ? profile.climbRateFeetPerMinute : profile.descentRateFeetPerMinute, climbing ? "climb" : "descent");
+    const rate = checkedRate(climbing ? profile.climbRateFeetPerMinute : descentRate, climbing ? "climb" : "descent");
     const tas = checkedVerticalTas(climbing ? profile.climbTasKnots : profile.descentTasKnots);
     const phaseEventDistance = verticalEventDistance(nextWaypointDistance, todRequested, todDistance, cursorDistance);
     let selectedWind = intervalWind(mode, currentAltitude, phaseTarget);
@@ -332,6 +335,15 @@ const calculateProgressiveRoute = async (
     const wind = pointWind(currentAnswer);
     const duration = descentMinutes;
     const tas = checkedVerticalTas(descentTas);
+    todDistance = backwardTodDistance(startDistance, duration, tas, wind);
+    if (collapseShortCruiseAtTod(todDistance, wind, tas)) todDistance = tocDistance!;
+    if (tocDistance !== undefined && todDistance <= tocDistance + 1e-8 && !shortCruiseCollapsed) {
+      throw new RouteWeatherSamplingError("Wind-adjusted top of descent meets or precedes top of climb; the route needs positive cruise distance between TOC and TOD.");
+    }
+    if (todDistance < cursorDistance - 1e-8) throw new RouteWeatherSamplingError("Backward-calculated top of descent overlaps an active climb or altitude transition; the selected cruise altitude cannot be reached before TOD.");
+  }
+
+  function backwardTodDistance(startDistance: number, duration: number, tas: Knots, wind: Wind): number {
     const remainingAt = (candidateTod: number): number => {
       const course = courseForLineInterval(finalLine, candidateTod, finalRouteDistance);
       const triangle = solveWindTriangle(course, tas, wind);
@@ -346,11 +358,37 @@ const calculateProgressiveRoute = async (
       if (remainingAt(candidate) > 0) low = candidate;
       else high = candidate;
     }
-    todDistance = (low + high) / 2;
-    if (tocDistance !== undefined && todDistance <= tocDistance + 1e-8) {
-      throw new RouteWeatherSamplingError("Wind-adjusted top of descent meets or precedes top of climb; the route needs positive cruise distance between TOC and TOD.");
-    }
-    if (todDistance < cursorDistance - 1e-8) throw new RouteWeatherSamplingError("Backward-calculated top of descent overlaps an active climb or altitude transition; the selected cruise altitude cannot be reached before TOD.");
+    return (low + high) / 2;
+  }
+
+  function collapseShortCruiseAtTod(candidateTod: number, wind: Wind, tas: Knots): boolean {
+    const toc = tocDistance;
+    if (toc === undefined || candidateTod <= toc + 1e-8 || mode !== "cruise" || Math.abs(cursorDistance - toc) > 1e-8) return false;
+    if (state.rows.some((row) => row.subleg.routeEndDistance > toc + 1e-8)) return false;
+    if (lines.slice(0, -1).some((line) => line.endDistance > toc + 1e-8 && line.endDistance < candidateTod - 1e-8)) return false;
+    const cruiseTime = cruiseMinutesBetweenTocAndTod(candidateTod, wind);
+    // Allow only floating-point noise (0.00000006 seconds), not a displayed-time rounding margin.
+    if (cruiseTime <= 0 || cruiseTime > 1 + 1e-9) return false;
+    const course = courseForLineInterval(finalLine, toc, finalRouteDistance);
+    const descentTriangle = solveWindTriangle(course, tas, wind);
+    if (!descentTriangle.ok) throw new RouteWeatherSamplingError("Arrival descent wind cannot produce a valid groundspeed.");
+    const descentDistance = finalRouteDistance - toc;
+    descentMinutes = descentDistance / descentTriangle.value.groundspeed * 60;
+    descentRate = (finalCruiseAltitude - finalTargetAltitude) / descentMinutes;
+    shortCruiseCollapsed = true;
+    return true;
+  }
+
+  function cruiseMinutesBetweenTocAndTod(candidateTod: number, wind: Wind): number {
+    const pendingDistance = candidateTod - cursorDistance;
+    if (pendingDistance <= 1e-8) return 0;
+    const course = courseForLineInterval(finalLine, cursorDistance, candidateTod);
+    const cruiseTasValue = finalLine.leg.sourceLeg.performanceOverrides?.cruiseTasKnots?.effectiveValue ?? profile.cruiseTasKnots;
+    const checkedTas = knots(cruiseTasValue);
+    if (!checkedTas.ok) throw new RouteWeatherSamplingError("Cruise true airspeed is invalid near top of descent.");
+    const triangle = solveWindTriangle(course, checkedTas.value, wind);
+    if (!triangle.ok) throw new RouteWeatherSamplingError("Cruise wind cannot produce a valid groundspeed near top of descent.");
+    return pendingDistance / triangle.value.groundspeed * 60;
   }
 
   const fetchPilotWaypoint = async (waypointIndex: number): Promise<void> => {

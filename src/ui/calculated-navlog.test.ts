@@ -77,6 +77,30 @@ describe("direct route generated event labels", () => {
 });
 
 describe("generated navlog event labels", () => {
+  it("keeps a nearby checkpoint distinct from TOC and TOD", () => {
+    const parent = planRevision();
+    const revision = {
+      ...parent,
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [
+          { kind: "top-of-climb", routeDistanceNauticalMiles: 19.991 },
+          { kind: "top-of-descent", routeDistanceNauticalMiles: 20.009 },
+        ] },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", distance: 19.991 }, cumulative: { routeDistance: 19.991 } },
+          { subleg: { sourceLegId: "leg-1", phaseId: "route-cruise-1", phase: "cruise", distance: 0.009 }, cumulative: { routeDistance: 20 } },
+          { subleg: { sourceLegId: "leg-2", phaseId: "route-cruise-2:to-tod", phase: "cruise", distance: 0.009 }, cumulative: { routeDistance: 20.009 } },
+        ], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } },
+      },
+    };
+
+    const labels = rowLabels(renderCalculatedNavlog(revision));
+    expect(labels[0]).toContain("Chicago O'Hare → TOC");
+    expect(labels[1]).toContain("TOC → Study checkpoint");
+    expect(labels[2]).toContain("Study checkpoint → TOD");
+  });
+
   it("shows coincident generated events and preserves a pilot checkpoint name", () => {
     const parent = planRevision();
     const checkpoint = parent.draftSnapshot.route.points.find((point) => point.id === "checkpoint-1")!;

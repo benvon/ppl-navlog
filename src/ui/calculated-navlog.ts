@@ -324,7 +324,9 @@ const boundaryMatchesDistance = (candidate: unknown, routeDistance: number): boo
   if (!record(candidate)) return false;
   if (candidate.kind !== "top-of-climb" && candidate.kind !== "top-of-descent") return false;
   const boundaryDistance = candidate.routeDistanceNauticalMiles;
-  return typeof boundaryDistance === "number" && Number.isFinite(boundaryDistance) && Math.abs(boundaryDistance - routeDistance) <= 0.01;
+  // Calculation distances may differ by floating-point addition, but display
+  // rounding must never merge a generated event with a nearby waypoint.
+  return typeof boundaryDistance === "number" && Number.isFinite(boundaryDistance) && Math.abs(boundaryDistance - routeDistance) <= 1e-8;
 };
 
 const boundaryName = (candidate: unknown): string | undefined => {
