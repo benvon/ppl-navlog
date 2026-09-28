@@ -253,10 +253,12 @@ class PilotIntentPlanner {
       if ((this.current?.checkpoints.length ?? 0) >= MAX_CHECKPOINTS_PER_PLAN) return;
       const hadOverrides = this.clearRouteOverrides();
       const current = this.current ?? this.blankPlan();
+      const altitudes = [...current.cruiseAltitudeTexts];
+      altitudes.splice(Math.max(0, altitudes.length - 1), 0, "4500");
       this.current = this.withIdentity({
         ...current,
         checkpoints: [...current.checkpoints, { name: "", coordinateText: "" }],
-        cruiseAltitudeTexts: [...current.cruiseAltitudeTexts, "4500"],
+        cruiseAltitudeTexts: altitudes,
         overrideReasons: {},
       });
       this.invalidate();
@@ -310,7 +312,7 @@ class PilotIntentPlanner {
     const nextCheckpoints = [...current.checkpoints];
     nextCheckpoints.splice(index, 1);
     const altitudes = [...current.cruiseAltitudeTexts];
-    if (altitudes.length > nextCheckpoints.length + 1) altitudes.splice(index + 1, 1);
+    if (index < altitudes.length - 1) altitudes.splice(index, 1);
     this.current = this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} });
     this.invalidate();
     this.render();

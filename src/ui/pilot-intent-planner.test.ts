@@ -144,8 +144,7 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
 
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
   expect(callOrder).toEqual(["metar", ...queries.map(() => "point")]);
-  expect(queries.length).toBeGreaterThanOrEqual(3);
-  expect(queries.length).toBeLessThanOrEqual(14);
+  expect(queries).toHaveLength(2);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
   const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
@@ -157,7 +156,7 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
     expect(distance).toBeGreaterThan(0);
     expect(distance).toBeLessThan(routeGeometry.value.distance);
   });
-  expect(interiorDistances.at(-1)).toBeGreaterThan(interiorDistances[0]!);
+  expect(interiorDistances).toHaveLength(1);
 }
 
 function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
@@ -725,6 +724,43 @@ describe("pilot intent planner", () => {
     expect(checkpoint.textContent).toContain("Override TAS for leg 2");
   });
 
+  it("inserts a new checkpoint altitude before the final target on a direct plan", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "altitude-0", "6200");
+
+    button(root, "Add checkpoint").click();
+    await settle();
+
+    expect(input(root, "altitude-0").value).toBe("4500");
+    expect(input(root, "altitude-1").value).toBe("6200");
+    expect(repository.plans.at(-1)?.cruiseAltitudeTexts).toEqual(["4500", "6200"]);
+  });
+
+  it.each([
+    { index: 0, expected: ["6200", "7300", "8400"] },
+    { index: 1, expected: ["5100", "7300", "8400"] },
+    { index: 2, expected: ["5100", "6200", "8400"] },
+  ])("removing checkpoint $index preserves the other altitude targets and final target", async ({ index, expected }) => {
+    const repository = new MemoryInputs();
+    repository.plans.push({
+      id: `remove-checkpoint-${index}`, title: "Altitude preservation", rawFields: { "plan-title": "Altitude preservation" },
+      checkpoints: [
+        { name: "First", coordinateText: "414500N0873000W" },
+        { name: "Middle", coordinateText: "414600N0873100W" },
+        { name: "Last", coordinateText: "414700N0873200W" },
+      ], cruiseAltitudeTexts: ["5100", "6200", "7300", "8400"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+
+    button(root, `Remove checkpoint ${index + 1}`).click();
+    await settle();
+
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(expected);
+    expected.forEach((altitude, altitudeIndex) => expect(input(root, `altitude-${altitudeIndex}`).value).toBe(altitude));
+  });
+
   it("labels checkpoint altitude requirements and the final cruise target when route details change", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
@@ -789,7 +825,7 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     button(root, "Add checkpoint").click();
     await settle();
-    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100", "4500"]);
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4500", "4100"]);
     expect(repository.plans[0]?.overrideReasons).toEqual({});
     expect(repository.plans[0]?.rawFields).not.toHaveProperty("override-tas-0");
 
@@ -797,9 +833,9 @@ describe("pilot intent planner", () => {
     await settle();
     button(root, "Remove checkpoint 1").click();
     await settle();
-    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100"]);
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["6200"]);
     expect(repository.plans[0]?.overrideReasons).toEqual({});
-    expect(input(root, "altitude-0").value).toBe("4100");
+    expect(input(root, "altitude-0").value).toBe("6200");
   });
 
   it("waits for queued autosaves and keeps the editor text after a failed explicit save and retry", async () => {

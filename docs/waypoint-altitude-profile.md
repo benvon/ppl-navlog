@@ -16,9 +16,9 @@ Before this change, the progressive engine in `src/application/route-weather-sam
 
 ## Planning rules and limits
 
-- Preserve the progressive weather rule: each completed interval uses weather available at its starting event; later point answers do not revise it. Fetch at generated TOC/TOD as needed. Use bounded calculations and fail when weather or performance cannot support a result.
+- Preserve the progressive weather rule: each completed interval uses weather available at its starting event; later point answers do not revise it. Fetch at generated TOC; TOD uses the latest preceding forecast. Use bounded calculations and fail when weather or performance cannot support a result.
 - Forecast wind, aircraft performance, and fuel consumption are estimates. The navlog supports heading and fuel-sufficiency decisions; it does not establish exact future conditions.
-- For TOD placement, use a bounded estimate consistent with descent groundspeed and the airport endpoint. Reconcile candidate TOD wind and location before evaluating overlap. Do not revise already finalized rows or silently invent a descent. Under the progressive weather rule, block if the reconciled descent would cross any pilot checkpoint before reaching the airport, even if the target altitude would be within 50 ft there.
+- Compute TOD once by working backward from the airport pattern-altitude endpoint using descent rate, TAS, and the latest aloft forecast already sampled before TOD. Use that same forecast for descent groundspeed and fuel; do not request weather at TOD or move completed rows. Under the progressive weather rule, block if the descent would cross any pilot checkpoint before reaching the airport, even if the target altitude would be within 50 ft there.
 - Display headings to the nearest whole degree, altitude to 100 ft, wind and groundspeed speeds to whole knots, distance to 0.1 NM, fuel to 0.1 gal, and ETE in whole minutes. Keep unrounded values for subsequent calculations, cumulative totals, and sufficiency decisions.
 - Treat pilot-entered reserve as the fuel threshold. Show estimated arrival margin above that threshold or shortfall below it; do not add an arbitrary extra reserve buffer.
 - No runway-specific pattern maneuver or terrain-clearance model is added here.
@@ -39,5 +39,5 @@ On a direct 15 NM route with the same vertical demands, climb plus descent need 
 5. Navlog labels identify generated TOC/TOD, and the final row clearly identifies the airport pattern-altitude endpoint.
 6. Existing pilot-entered values survive recalculation. Relevant tests, typecheck, lint, build, and security checks pass or limitations are reported.
 7. Displayed headings are rounded to whole degrees, altitude to 100 ft, wind and groundspeed speeds to whole knots, distance to 0.1 NM, fuel to 0.1 gal, and ETE to whole minutes, while calculations continue with unrounded values.
-8. Reconciled TOD wind is used before testing phase overlap; accepted checkpoint transitions end at the checkpoint and preserve their estimated altitude within 50 ft.
+8. Backward TOD placement uses the preceding forecast before testing phase overlap; accepted checkpoint transitions end at the checkpoint and preserve their estimated altitude within 50 ft.
 9. Fuel sufficiency compares estimated arrival fuel directly with the pilot-entered reserve threshold and reports the resulting margin or shortfall without an added buffer.
