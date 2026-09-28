@@ -149,14 +149,14 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
   const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
   if (!routeGeometry.ok) throw new Error(routeGeometry.error.message);
-  const interiorDistances = queries.slice(1).map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
-  expect(queries[0]?.latitudeDeg).toBeCloseTo(departure.value.latitude, 4);
-  expect(queries[0]?.longitudeDeg).toBeCloseTo(departure.value.longitude, 4);
+  const interiorDistances = queries.map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
+
   interiorDistances.forEach((distance) => {
     expect(distance).toBeGreaterThan(0);
     expect(distance).toBeLessThan(routeGeometry.value.distance);
   });
-  expect(interiorDistances).toHaveLength(1);
+  expect(interiorDistances).toHaveLength(2);
+  expect(interiorDistances[1]).toBeGreaterThan(interiorDistances[0]!);
 }
 
 function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
@@ -623,13 +623,30 @@ describe("pilot intent planner", () => {
     const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
     expect(Math.round(Number(storedMatch[1]))).toBe(Number.parseInt(displayedGroundspeed, 10));
-    expect(inspector.textContent).toContain("BRL");
-    expect(inspector.textContent).toContain("departure surface-to-aloft blend fraction");
+    expect(inspector.textContent).toContain("departure METAR wind speed");
     expect(inspector.textContent).toContain("KORD");
-    expect(inspector.textContent).toContain("horizontal weight");
+    expect(inspector.textContent).not.toContain("horizontal weight");
     expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
     expect(inspector.querySelector("details")?.open).toBe(false);
 
+  });
+
+  it("displays a descent-rate warning from TOD weather", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    let requestNumber = 0;
+    const client = winds({ fetchPoint: async (query) => {
+      requestNumber += 1;
+      const answer = await winds().fetchPoint(query);
+      return { ...answer, windFromDegTrue: requestNumber === 2 ? 135 : 315, windSpeedKt: 70 };
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Update navlog").click();
+    await settle();
+
+    expect(requestNumber).toBe(2);
+    expect(repository.submissions).toHaveLength(1);
+    expect(root.querySelector(".navlog-warnings")?.textContent).toContain("150%");
   });
 
   it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
