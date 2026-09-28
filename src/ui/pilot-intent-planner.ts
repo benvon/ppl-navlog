@@ -2,7 +2,7 @@ import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
 import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
-import { resolveRouteWeather } from "../application/route-weather-sampling";
+import { resolveRouteWeather, validateNominalCruiseSeparation } from "../application/route-weather-sampling";
 import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
@@ -633,6 +633,7 @@ class PilotIntentPlanner {
     return { departureMetar };
   }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
+    validateNominalCruiseSeparation(draft, profile);
     const { departureMetar } = await this.fetchEndpointWeather(draft);
     const solution = await resolveRouteWeather(draft, profile, {
       fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),

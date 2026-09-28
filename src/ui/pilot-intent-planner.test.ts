@@ -170,6 +170,27 @@ function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordin
 }
 
 describe("pilot intent planner", () => {
+  it("blocks nominal TOC/TOD overlap before fetching any weather", async () => {
+    const repository = new MemoryInputs();
+    repository.profiles.push(profile);
+    repository.plans.push({ id: "short-profile", title: "Short profile", rawFields: {
+      "plan-title": "Short profile", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
+      "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "departure-metar-icao": "KORD",
+    }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["16000"], overrideReasons: {}, updatedAt: "2026-09-21T20:00:00.000Z", submissions: [] });
+    const client = winds();
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const root = await mount(repository, client);
+
+    expect(button(root, "Update navlog").disabled).toBe(false);
+    button(root, "Update navlog").click();
+    await settle();
+
+    expect(root.querySelector("[role='status']")?.textContent).toMatch(/route is too short.*TOC.*TOD/i);
+    expect(fetchMetar).not.toHaveBeenCalled();
+    expect(fetchPoint).not.toHaveBeenCalled();
+  });
+
   it("recovers a saved past departure from a fetched newer METAR and reuses the same report", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({

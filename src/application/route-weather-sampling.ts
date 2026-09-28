@@ -28,6 +28,32 @@ export interface RouteWeatherSolution {
   readonly iterations: 1;
 }
 
+/** Rejects routes with no nominal level-cruise interval before weather is fetched. */
+export const validateNominalCruiseSeparation = (draft: PlanDraft, profile: AircraftProfile): void => {
+  const routeLegs = buildRouteLegs(draft);
+  const lines = routeLines(routeLegs);
+  buildWaypointTargets(draft, lines);
+  const totalDistance = lines.at(-1)?.endDistance;
+  if (totalDistance === undefined || totalDistance <= 0) throw new RouteWeatherSamplingError("A complete route is required for route weather sampling.");
+  const departure = routeLegs[0]!.start;
+  if (departure.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires an airport departure endpoint.");
+  const firstCruiseAltitude = routeLegs[0]!.sourceLeg.cruiseAltitudeFeetMsl;
+  const finalCruiseAltitude = routeLegs.at(-1)!.sourceLeg.cruiseAltitudeFeetMsl;
+  const climbDistance = firstCruiseAltitude > departure.elevationFeetMsl
+    ? nominalVerticalDistance(firstCruiseAltitude - departure.elevationFeetMsl, profile.climbRateFeetPerMinute, profile.climbTasKnots, "Climb")
+    : 0;
+  const descentDistance = nominalVerticalDistance(finalCruiseAltitude - draft.descentTargetAltitudeFeetMsl.effectiveValue, profile.descentRateFeetPerMinute, profile.descentTasKnots, "Descent");
+  if (climbDistance >= totalDistance - descentDistance - 1e-8) {
+    throw new RouteWeatherSamplingError("The route is too short for the selected climb and descent; TOC must occur before TOD with positive cruise distance between them.");
+  }
+};
+
+const nominalVerticalDistance = (altitudeDifference: number, rate: number, tas: number, phase: string): number => {
+  if (!Number.isFinite(rate) || rate <= 0) throw new RouteWeatherSamplingError(`${phase} rate must be finite and positive.`);
+  if (!Number.isFinite(tas) || tas <= 0) throw new RouteWeatherSamplingError(`${phase} true airspeed must be finite and positive.`);
+  return Math.max(0, altitudeDifference) / rate * tas / 60;
+};
+
 interface RouteLine {
   readonly leg: CompletePlanRouteLeg;
   readonly startDistance: number;
@@ -63,6 +89,7 @@ export const resolveRouteWeather = async (
   pointClient: RouteWeatherPointClient,
   endpoints: { readonly departureMetar: MetarSuccessPayload },
 ): Promise<RouteWeatherSolution> => {
+  validateNominalCruiseSeparation(draft, profile);
   const prepared = prepareRouteWeatherInputs(draft, endpoints);
   const progressive = await calculateProgressiveRoute(draft, profile, pointClient, prepared, endpoints);
   const weather = {
@@ -144,6 +171,7 @@ const calculateProgressiveRoute = async (
   let phaseTarget = firstTargetAltitude;
   let phaseId = mode === "climb" ? "departure-climb" : "route-cruise-1";
   let tocRequested = mode === "cruise";
+  let tocDistance: number | undefined = tocRequested ? 0 : undefined;
   let todRequested = descentMinutes === 0;
   let rowSequence = 0;
   const generatedBoundaries: GeneratedRouteBoundary[] = [];
@@ -263,6 +291,7 @@ const calculateProgressiveRoute = async (
     }
     const tocCoordinate = coordinateAtRouteDistance(lines, cursorDistance);
     generatedBoundaries.push(makeGeneratedBoundary("top-of-climb", line, cursorDistance, tocCoordinate, tocPlacementTrace(profile.climbRateFeetPerMinute, tas, state.rows.filter((row) => row.subleg.phaseId === completedPhaseId))));
+    tocDistance = cursorDistance;
     await fetchAt({ routeDistance: cursorDistance, coordinate: tocCoordinate, altitudeFeetMsl: firstTargetAltitude }, "generated top of climb");
     tocRequested = true;
   };
@@ -318,6 +347,9 @@ const calculateProgressiveRoute = async (
       else high = candidate;
     }
     todDistance = (low + high) / 2;
+    if (tocDistance !== undefined && todDistance <= tocDistance + 1e-8) {
+      throw new RouteWeatherSamplingError("Wind-adjusted top of descent meets or precedes top of climb; the route needs positive cruise distance between TOC and TOD.");
+    }
     if (todDistance < cursorDistance - 1e-8) throw new RouteWeatherSamplingError("Backward-calculated top of descent overlaps an active climb or altitude transition; the selected cruise altitude cannot be reached before TOD.");
   }
 
@@ -340,6 +372,7 @@ const calculateProgressiveRoute = async (
     const line = lines[waypointIndex - 1]!;
     const coordinate = coordinateAtRouteDistance(lines, cursorDistance);
     generatedBoundaries.push(makeGeneratedBoundary("top-of-climb", line, cursorDistance, coordinate, tocPlacementTrace(profile.climbRateFeetPerMinute, profile.climbTasKnots, state.rows.filter((row) => row.subleg.phaseId === completedPhaseId))));
+    tocDistance = cursorDistance;
     tocRequested = true;
   };
 
@@ -357,6 +390,7 @@ const calculateProgressiveRoute = async (
   const acceptTodAtActiveVerticalEvent = (line: RouteLine): boolean => {
     if (!isClimbOrTransition(mode)) return true;
     if (todDistance > cursorDistance + 1e-8) return false;
+    if (mode === "climb" && !tocRequested) throw new RouteWeatherSamplingError("Wind-adjusted top of descent meets top of climb; the route needs positive cruise distance between TOC and TOD.");
     if (Math.abs(currentAltitude - phaseTarget) > ALTITUDE_TARGET_TOLERANCE_FEET) throw new RouteWeatherSamplingError("Backward-calculated top of descent overlaps an active climb or altitude transition; cruise altitude cannot be reached before TOD.");
     finishVerticalAtTod(line);
     return true;

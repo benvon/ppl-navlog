@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { coordinate } from "../domain/coordinates";
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
@@ -220,9 +220,25 @@ describe("route waypoint weather sampling", () => {
     if (!endpoint.ok) throw new Error(endpoint.error.message);
     const points = [start, { ...destination, coordinate: endpoint.value }];
     const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
-    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), {
-      async fetchPoint(query) { return answer(query, 90, 20); },
-    }, endpoints)).rejects.toThrow(/overlaps an active climb|cannot fit/i);
+    const fetchPoint = vi.fn(async (query: AloftPointQuery) => answer(query, 90, 20));
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), { fetchPoint }, endpoints)).rejects.toThrow(/route is too short.*TOC.*TOD/i);
+    expect(fetchPoint).not.toHaveBeenCalled();
+  });
+
+  it("rejects a wind-induced TOC/TOD overlap after weather changes nominal separation", async () => {
+    const base = routePlanDraft();
+    const start = base.route.points[0]!;
+    const destination = base.route.points.at(-1)!;
+    const distance = nauticalMiles(20);
+    const course = trueCourse(90);
+    if (!distance.ok || !course.ok) throw new Error("Could not build the direct-route fixture.");
+    const endpoint = pointAlongGreatCircle(start.coordinate, course.value, distance.value);
+    if (!endpoint.ok) throw new Error(endpoint.error.message);
+    const points = [start, { ...destination, coordinate: endpoint.value }];
+    const route = { ...base.route, points, legs: [{ ...base.route.legs[0]!, toPointId: points[1]!.id }] };
+    const fetchPoint = vi.fn(async (query: AloftPointQuery) => answer(query, 270, 70));
+    await expect(resolveRouteWeather({ ...base, departureTimeUtc: departure, route }, aircraftProfile(), { fetchPoint }, endpoints)).rejects.toThrow(/top of descent meets or precedes top of climb/i);
+    expect(fetchPoint).toHaveBeenCalledTimes(2);
   });
 
   it("ends a one-leg route at the airport with the pattern-altitude target", async () => {
