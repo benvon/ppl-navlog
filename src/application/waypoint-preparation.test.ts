@@ -169,6 +169,13 @@ describe("estimateForwardVerticalWaypoint", () => {
     });
   });
 
+  it("places a valid climb when fuel flow is zero because fuel does not affect position", () => {
+    const result = estimateForwardVerticalWaypoint(verticalInput({ fuelFlowGallonsPerHour: 0 }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.routeDistanceNauticalMiles).toBeCloseTo(6, 8);
+  });
+
   it("places a transition by walking forward and re-solving groundspeed after a turn", () => {
     const bent = value(preparePilotRoute(route(
       [point("A", 0), point("B", 1), point("C", 1, 1)],
@@ -196,7 +203,9 @@ describe("estimateForwardVerticalWaypoint", () => {
 
   it("rejects invalid rates, speeds, altitudes, and route overflow", () => {
     expect(estimateForwardVerticalWaypoint(verticalInput({ verticalRateFeetPerMinute: 0 }))).toMatchObject({ ok: false });
+    expect(estimateForwardVerticalWaypoint(verticalInput({ verticalRateFeetPerMinute: Number.NaN }))).toMatchObject({ ok: false });
     expect(estimateForwardVerticalWaypoint(verticalInput({ trueAirspeedKnots: Number.POSITIVE_INFINITY }))).toMatchObject({ ok: false });
+    expect(estimateForwardVerticalWaypoint(verticalInput({ trueAirspeedKnots: 0 }))).toMatchObject({ ok: false });
     expect(estimateForwardVerticalWaypoint(verticalInput({
       kind: "estimated-toc",
       startingAltitudeFeetMsl: 5_000,
@@ -219,6 +228,14 @@ describe("estimateTopOfDescent", () => {
     expect(result.placement?.estimatedDistanceNauticalMiles).toBeCloseTo(12, 8);
     expect(result.routeDistanceNauticalMiles).toBeCloseTo(route.totalRouteDistanceNauticalMiles - 12, 8);
     expect(result.placement?.formulaId).toBe("route-total-minus-final-course-descent-distance");
+  });
+
+  it("places valid TOD when descent fuel flow is zero because fuel does not affect position", () => {
+    const route = straightPreparedRoute(1);
+    const result = estimateTopOfDescent(todInput({ route, descentFuelFlowGallonsPerHour: 0 }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.routeDistanceNauticalMiles).toBeCloseTo(route.totalRouteDistanceNauticalMiles - 12, 8);
   });
 
   it("uses the final charted course once and does not integrate descent backward over a bend", () => {
@@ -281,7 +298,9 @@ describe("estimateTopOfDescent", () => {
 
   it("rejects invalid inputs, an overlong descent, and unusable groundspeed", () => {
     expect(estimateTopOfDescent(todInput({ descentRateFeetPerMinute: 0 }))).toMatchObject({ ok: false });
+    expect(estimateTopOfDescent(todInput({ descentRateFeetPerMinute: Number.POSITIVE_INFINITY }))).toMatchObject({ ok: false });
     expect(estimateTopOfDescent(todInput({ descentTrueAirspeedKnots: Number.NaN }))).toMatchObject({ ok: false });
+    expect(estimateTopOfDescent(todInput({ descentTrueAirspeedKnots: 0 }))).toMatchObject({ ok: false });
     expect(estimateTopOfDescent(todInput({ patternAltitudeFeetMsl: 5_000 }))).toMatchObject({
       ok: false,
       error: { code: "INVALID_PHASE_ALTITUDES" },

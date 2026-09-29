@@ -2,7 +2,7 @@ import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } f
 import { coordinate, type Coordinate } from "../domain/coordinates";
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
-import { feetMsl, gallonsPerHour, nauticalMiles, positiveKnots, trueCourse } from "../domain/units";
+import { feetMsl, nauticalMiles, positiveKnots, trueCourse } from "../domain/units";
 import type { Wind } from "../domain/wind";
 import { solveWindTriangle } from "../domain/wind-triangle";
 
@@ -207,8 +207,6 @@ export const estimateForwardVerticalWaypoint = (
   if (!rate.ok) return propagateFailure(rate);
   const tas = positiveKnots(input.trueAirspeedKnots);
   if (!tas.ok) return propagateFailure(tas);
-  const fuel = gallonsPerHour(input.fuelFlowGallonsPerHour);
-  if (!fuel.ok) return propagateFailure(fuel);
   const duration = altitudeDifference / rate.value;
   if (!Number.isFinite(duration) || duration <= 0) return failure("NON_FINITE_RESULT", "Vertical waypoint duration is not usable.");
 
@@ -290,8 +288,6 @@ export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<Pre
   if (!rate.ok) return propagateFailure(rate);
   const tas = positiveKnots(input.descentTrueAirspeedKnots);
   if (!tas.ok) return propagateFailure(tas);
-  const fuel = gallonsPerHour(input.descentFuelFlowGallonsPerHour);
-  if (!fuel.ok) return propagateFailure(fuel);
   if (!Number.isFinite(currentWaypoint.routeDistanceNauticalMiles) || currentWaypoint.routeDistanceNauticalMiles < 0 ||
       currentWaypoint.routeDistanceNauticalMiles > route.totalRouteDistanceNauticalMiles) {
     return invalidRoute("Current waypoint distance must lie on the prepared route.", {
