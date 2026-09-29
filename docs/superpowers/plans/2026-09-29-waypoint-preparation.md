@@ -4,7 +4,7 @@
 
 **Goal:** Provide pure route and estimated generated-waypoint preparation for issue #27, ready for the single sequential calculator in #28.
 
-**Architecture:** Add a focused application module that validates the pilot's ordered route, accumulates charted leg distances, estimates TOC/TOD/altitude-transition end points from one supplied planning wind and aircraft performance, and returns ordered waypoint anchors plus only positive-distance spans. It reuses existing great-circle, wind-triangle, units, and generated-boundary functions. The module does not fetch weather, calculate row UTC/fuel, enforce checkpoint altitude, or change the active planner.
+**Architecture:** Add a focused application module that validates the pilot's ordered route, accumulates charted leg distances, estimates TOC/altitude-transition end points from supplied planning wind and aircraft performance, and returns ordered waypoint anchors plus only positive-distance spans. TOD uses one estimated descent distance on the final charted course: subtract that distance from the route total, reject a point behind the current waypoint, then locate it in forward route order. The module reuses existing great-circle, wind-triangle, units, and generated-boundary functions. It does not fetch weather, calculate row UTC/fuel, walk the route backward, enforce checkpoint altitude, or change the active planner.
 
 **Tech Stack:** TypeScript, Vitest, existing domain math; `mise exec -- npm` for validation.
 
@@ -23,7 +23,9 @@
 
 - Repeated/missing point or leg IDs and discontinuous leg references: reject before generating any point (Task 1 test).
 - A bent route where an estimated phase crosses a turn: consume the supplied phase time along each charted leg's local course, with the same wind but a newly solved groundspeed (Task 2 test).
+- TOD on a bent route uses the final charted course for a single descent-distance estimate and locates its cumulative route distance forward; it does not integrate backward over turns (Task 2 test).
 - Wind that cannot yield positive groundspeed: return the wind-triangle error without a bogus position (Task 2 test).
+- TOD candidate after TOC but before the current worksheet waypoint: block with the current/candidate distances and guidance, because completed rows cannot be rewritten (Task 2 test).
 - A generated point exactly at a pilot checkpoint versus just beside it: retain both labels at exact coincidence, omit only the zero span, and retain the nearby span (Task 3 test).
 - TOD at/before TOC or transition beyond the next checkpoint/TOD: return affected distances and useful guidance (Task 3 test).
 
@@ -52,13 +54,15 @@
 - Test: `src/application/waypoint-preparation.test.ts`
 
 **Interfaces:**
-- `estimateVerticalWaypoint(input: { route: PreparedPilotRoute; kind: "estimated-toc" | "estimated-tod" | "estimated-transition-end"; id: string; label: string; startRouteDistanceNauticalMiles: number; startingAltitudeFeetMsl: number; targetAltitudeFeetMsl: number; verticalRateFeetPerMinute: number; trueAirspeedKnots: number; fuelFlowGallonsPerHour: number; planningWind: Wind }): DomainResult<PreparedWaypoint>`.
-- TOC and transition-end consume `abs(altitude difference) / rate` minutes forward from their start distance. TOD consumes that duration backward from the destination's cumulative distance. The caller supplies the wind known at the appropriate worksheet boundary; no weather fetch or elapsed-time calculation occurs here.
+- `estimateForwardVerticalWaypoint(input: { route: PreparedPilotRoute; kind: "estimated-toc" | "estimated-transition-end"; id: string; label: string; startRouteDistanceNauticalMiles: number; startingAltitudeFeetMsl: number; targetAltitudeFeetMsl: number; verticalRateFeetPerMinute: number; trueAirspeedKnots: number; fuelFlowGallonsPerHour: number; planningWind: Wind }): DomainResult<PreparedWaypoint>`.
+- `estimateTopOfDescent(input: { route: PreparedPilotRoute; currentRouteDistanceNauticalMiles: number; cruiseAltitudeFeetMsl: number; patternAltitudeFeetMsl: number; descentRateFeetPerMinute: number; descentTrueAirspeedKnots: number; descentFuelFlowGallonsPerHour: number; planningWind: Wind }): DomainResult<PreparedWaypoint>`.
+- TOC and transition-end consume `abs(altitude difference) / rate` minutes forward from their start distance, solving local leg courses when a turn is crossed. TOD uses the final charted course to estimate one groundspeed and descent distance. Its cumulative distance is `route total − descent distance`; reject if this is before `currentRouteDistanceNauticalMiles`, then locate the point in forward route order. The caller supplies the wind known at the worksheet boundary; no weather fetch, backward route walk, or row calculation occurs here.
 
-- [ ] Test the approved no-wind examples: 3,000 ft climb at 500 ft/min and 60 kt places TOC at NM 6; 4,000 ft descent at 500 ft/min and 90 kt places TOD 12 NM before destination. Test one 1,000 ft transition and a bent course.
+- [ ] Test the approved no-wind examples: 3,000 ft climb at 500 ft/min and 60 kt places TOC at NM 6; 4,000 ft descent at 500 ft/min and 90 kt gives a 12 NM descent distance and TOD at route total minus 12 NM. Test one 1,000 ft transition and a bent course, asserting TOD uses the final charted course without backward segment integration.
+- [ ] Test a current worksheet waypoint at NM 50 on the 60 NM route with a 12 NM descent estimate: TOD at NM 48 is behind the current waypoint but after TOC, so the result must block with both distances and basic route/altitude/performance guidance.
 - [ ] Test nonpositive/nonfinite rate or TAS, invalid altitude direction, route overflow, and wind with no usable groundspeed.
 - [ ] Run the targeted test and observe failures.
-- [ ] Implement a single bounded walk of the prepared route geometry in the phase direction. At each crossed source leg, solve its wind triangle once and consume available time/distance; place the endpoint with existing great-circle geometry. Return the generated waypoint with placement evidence. Do not iterate or adjust the rate to hit a waypoint.
+- [ ] Implement a bounded forward walk for TOC/transition placement. For TOD, solve one wind triangle on the final charted course, subtract the estimated descent distance from the route total, enforce the current-waypoint lower bound, and locate that cumulative distance through the existing ordered route geometry. Return generated waypoints with placement evidence. Do not iterate, walk backward, or adjust the rate to hit a waypoint.
 - [ ] Rerun targeted tests and typecheck; commit the focused result with a signed Conventional Commit.
 
 ### Task 3: Ordering, positive spans, and actionable geometry checks
