@@ -16,6 +16,7 @@
 - TOC, TOD, and transition-end positions are estimates placed once from supplied inputs; no convergence or checkpoint-altitude tolerance.
 - TOD must be available before the containing final cruise span is calculated in #28. This module accepts the then-known starting distance and wind and returns TOD synchronously.
 - Keep distinct labels for coincident generated/pilot points. Suppress only exactly zero-distance spans; retain nearby positive spans.
+- Canonicalize a calculated boundary to a known route waypoint only when the difference is floating-point roundoff; do not use a forecast/display tolerance to merge distinct points.
 - An impossible ordered geometry returns a structured, actionable failure naming points and estimated distances. Do not invent a phase or silently move a pilot checkpoint.
 - #27 has no active `Update navlog` behavior change and must not add a second calculation path.
 

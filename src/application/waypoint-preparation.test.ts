@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { coordinate, type Coordinate } from "../domain/coordinates";
+import { MEAN_EARTH_RADIUS_NAUTICAL_MILES } from "../domain/distance-course";
 import type { DomainResult } from "../domain/errors";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
 import {
@@ -330,6 +331,57 @@ describe("estimateTopOfDescent", () => {
       expect(result.error.message).toContain("NM 50");
       expect(result.error.message).toMatch(/waypoint position.*cruise altitude.*descent performance.*route/i);
     }
+  });
+
+  it("treats arithmetic roundoff at the current checkpoint as coincident TOD", () => {
+    const twelveNauticalMilesInDegrees = (12 / MEAN_EARTH_RADIUS_NAUTICAL_MILES) * (180 / Math.PI);
+    const prepared = value(preparePilotRoute(route(
+      [point("departure", 0), point("Lake", 0.05), point("destination", 0.05 + twelveNauticalMilesInDegrees)],
+      [leg("departure-lake", "departure", "Lake"), leg("lake-destination", "Lake", "destination")],
+    )));
+    const lake = prepared.pilotPoints[1];
+    if (lake === undefined) throw new Error("Missing Lake checkpoint");
+    const result = estimateTopOfDescent(todInput({
+      route: prepared,
+      currentWaypoint: {
+        id: lake.point.id,
+        kind: "pilot-checkpoint",
+        label: lake.point.name,
+        coordinate: lake.point.coordinate,
+        routeDistanceNauticalMiles: lake.routeDistanceNauticalMiles,
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.routeDistanceNauticalMiles).toBe(lake.routeDistanceNauticalMiles);
+      expect(result.value.coordinate).toEqual(lake.point.coordinate);
+      const ordered = value(orderPreparedWaypoints(prepared, [result.value]));
+      expect(ordered.waypoints.map(({ label }) => label)).toEqual(["departure", "Lake", "TOD", "destination"]);
+      expect(ordered.spans.every(({ distanceNauticalMiles }) => distanceNauticalMiles > 0)).toBe(true);
+    }
+  });
+
+  it("still rejects TOD a meaningful distance before the current checkpoint", () => {
+    const elevenPointNineNineNauticalMilesInDegrees = (11.99 / MEAN_EARTH_RADIUS_NAUTICAL_MILES) * (180 / Math.PI);
+    const prepared = value(preparePilotRoute(route(
+      [point("departure", 0), point("Lake", 0.05), point("destination", 0.05 + elevenPointNineNineNauticalMilesInDegrees)],
+      [leg("departure-lake", "departure", "Lake"), leg("lake-destination", "Lake", "destination")],
+    )));
+    const lake = prepared.pilotPoints[1];
+    if (lake === undefined) throw new Error("Missing Lake checkpoint");
+    const result = estimateTopOfDescent(todInput({
+      route: prepared,
+      currentWaypoint: {
+        id: lake.point.id,
+        kind: "pilot-checkpoint",
+        label: lake.point.name,
+        coordinate: lake.point.coordinate,
+        routeDistanceNauticalMiles: lake.routeDistanceNauticalMiles,
+      },
+    }));
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
   });
 
   it("uses overlap wording when TOD would precede the current TOC", () => {

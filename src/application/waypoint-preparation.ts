@@ -1,4 +1,5 @@
 import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } from "../domain/distance-course";
+import { equalWithinArithmeticRoundoff } from "../domain/arithmetic-roundoff";
 import { coordinate, type Coordinate } from "../domain/coordinates";
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
@@ -277,11 +278,18 @@ const estimateTodDescentDistance = (
   if (!Number.isFinite(descentDistanceNauticalMiles) || descentDistanceNauticalMiles <= 0) {
     return failure("NON_FINITE_RESULT", "TOD descent distance is not usable.");
   }
+  const calculatedDistance = input.route.totalRouteDistanceNauticalMiles - descentDistanceNauticalMiles;
+  const anchors = [
+    input.currentWaypoint.routeDistanceNauticalMiles,
+    ...input.route.pilotPoints.map(({ routeDistanceNauticalMiles }) => routeDistanceNauticalMiles),
+  ];
+  const candidateDistanceNauticalMiles = anchors.find((distance) =>
+    equalWithinArithmeticRoundoff(calculatedDistance, distance)) ?? calculatedDistance;
   return success({
     finalLeg,
     durationMinutes,
     descentDistanceNauticalMiles,
-    candidateDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles - descentDistanceNauticalMiles,
+    candidateDistanceNauticalMiles,
   });
 };
 
@@ -330,6 +338,12 @@ const locateTodOnRoute = (route: PreparedPilotRoute, candidateDistance: number):
     }
   }
   if (locatedLeg === undefined) return invalidRoute("Estimated TOD could not be located on the prepared route.", { todDistanceNauticalMiles: candidateDistance });
+  if (candidateDistance === locatedLeg.routeStartDistanceNauticalMiles) {
+    return success({ leg: locatedLeg, coordinate: locatedLeg.start, routeDistanceNauticalMiles: candidateDistance });
+  }
+  if (candidateDistance === locatedLeg.routeEndDistanceNauticalMiles) {
+    return success({ leg: locatedLeg, coordinate: locatedLeg.end, routeDistanceNauticalMiles: candidateDistance });
+  }
   const legOffset = nauticalMiles(candidateDistance - locatedLeg.routeStartDistanceNauticalMiles);
   if (!legOffset.ok) return propagateFailure(legOffset);
   const locatedCourse = trueCourse(locatedLeg.trueCourseDegrees);
@@ -415,9 +429,6 @@ type ForwardVerticalLegEstimate =
   | { readonly kind: "traverse"; readonly traveled: number; readonly segmentMinutes: number }
   | { readonly kind: "placed"; readonly traveled: number; readonly coordinate: Coordinate; readonly routeDistanceNauticalMiles: number };
 
-// Numerical roundoff guard only; waypoint placement has no planning precision threshold.
-const PHASE_TIME_ROUNDOFF_MINUTES = 1e-10;
-
 const estimateForwardVerticalLeg = (
   leg: PreparedPilotLeg,
   cursorDistance: number,
@@ -434,8 +445,17 @@ const estimateForwardVerticalLeg = (
   if (!triangle.ok) return propagateFailure(triangle);
   const segmentMinutes = (availableDistance / triangle.value.groundspeed) * 60;
   const traveled = Math.min(availableDistance, triangle.value.groundspeed * remainingMinutes / 60);
-  if (remainingMinutes - segmentMinutes > PHASE_TIME_ROUNDOFF_MINUTES) {
+  const reachesEndpoint = equalWithinArithmeticRoundoff(remainingMinutes, segmentMinutes);
+  if (remainingMinutes > segmentMinutes && !reachesEndpoint) {
     return success({ kind: "traverse", traveled, segmentMinutes });
+  }
+  if (reachesEndpoint) {
+    return success({
+      kind: "placed",
+      traveled: availableDistance,
+      coordinate: leg.end,
+      routeDistanceNauticalMiles: leg.routeEndDistanceNauticalMiles,
+    });
   }
   const positionDistance = nauticalMiles(segmentStart - leg.routeStartDistanceNauticalMiles + traveled);
   if (!positionDistance.ok) return propagateFailure(positionDistance);
@@ -495,7 +515,8 @@ const locateForwardVerticalWaypoint = (
     remainingMinutes -= segment.value.segmentMinutes;
     cursorDistance = leg.routeEndDistanceNauticalMiles;
   }
-  if (remainingMinutes > PHASE_TIME_ROUNDOFF_MINUTES || placedLeg === undefined || placedCoordinate === undefined) {
+  if ((remainingMinutes > 0 && !equalWithinArithmeticRoundoff(remainingMinutes, 0)) ||
+      placedLeg === undefined || placedCoordinate === undefined) {
     return forwardVerticalOverflowFailure(input, estimatedDistance, remainingMinutes);
   }
   return success({

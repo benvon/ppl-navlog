@@ -76,6 +76,7 @@ An additional transition acceptance case uses an 80 NM route with TOC near NM 6.
 - Missing or stale required weather, invalid forecast response, or a wind triangle without positive usable groundspeed: block the affected calculation and explain the source/leg. Do not invent a fallback forecast.
 - Invalid aircraft or fuel inputs: block before weather retrieval where possible. Fuel shortage after valid arithmetic is a calculated warning, not an input error.
 - Approximate TOC/TOD overlap, impossible ordering, or a transition that cannot fit before the next checkpoint/TOD: block the complete worksheet. Name the affected points and estimated distances and suggest which pilot inputs or route geometry to review. A checkpoint merely near either estimated point receives advice, not a precision-based block.
+- When arithmetic for an estimated boundary differs from a known route waypoint by floating-point roundoff alone, use that waypoint's exact route distance and coordinate. This is a numerical consistency rule, not a planning tolerance: retain genuinely positive spacing between distinct waypoints.
 - When a point forecast at TOD is requested after the inbound row, it supplies only the outbound descent row. The inbound row keeps the preceding waypoint's wind, UTC, and fuel calculation.
 - Forecasts, rates, TAS, route coordinates, pilot-selected altitudes, and actual aircraft control introduce uncertainty that arithmetic cannot remove. The pilot must compare actual checkpoints and fuel with the plan and revise as conditions change.
 
