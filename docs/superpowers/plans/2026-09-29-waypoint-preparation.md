@@ -28,6 +28,7 @@
 - TOD candidate after TOC but before the current final pilot waypoint: return “TOD is calculated to be before final waypoint” with its name, the candidate/current distances, and guidance; the caller stops before the next row or TOD weather request (Task 2 test).
 - A generated point exactly at a pilot checkpoint versus just beside it: retain both labels at exact coincidence, omit only the zero span, and retain the nearby span (Task 3 test).
 - TOD at/before TOC or transition beyond the next checkpoint/TOD: return affected distances and useful guidance (Task 3 test).
+- A pilot checkpoint before TOC remains in the ordered route; a supplied altitude transition starting there is rejected as contradictory geometry. The #28 calculator must skip that transition, ignore the checkpoint's outbound altitude selection, warn the pilot, and continue with climb inputs.
 
 ---
 
@@ -78,6 +79,7 @@
 - [ ] Test normal order and split spans for the 60 NM and 24 NM examples; assert the calculated route distances and that authored points are unchanged.
 - [ ] Test exact coincidence with a pilot point and a nearby positive-distance generated point; assert distinct labels at the same route distance, no zero-distance span, and retention of the nearby positive span.
 - [ ] Test 14 NM overlap (TOC NM 6, TOD NM 2), a transition that reaches beyond the next pilot checkpoint, and a transition crossing TOD; assert error details identify both points/distances and offer a basic corrective action.
+- [ ] Test that a checkpoint before TOC remains valid with no transition, while a supplied transition starting there is rejected with checkpoint and TOC distances.
 - [ ] Run the targeted test and observe failures.
 - [ ] Implement deterministic ordering and span construction; check geometry from estimated cumulative distances only. Keep weather and UTC/fuel state out of this module.
 - [ ] Run targeted tests, `mise exec -- npm run ci`, and `git diff --check`; review the combined API against the approved contract; commit with a signed Conventional Commit.
@@ -87,3 +89,5 @@
 The sequential calculator calls `preparePilotRoute` once, requests TOC and transition-end placement at the proper starting waypoints, then requests TOD before calculating the cruise span that reaches it. It consumes the ordered positive spans and computes weather, headings, UTC, and fuel one row at a time. No row result may change a generated position already returned by this module.
 
 For coincident pilot and generated points, #28 must treat all labels at the shared route distance as one worksheet boundary: carry one UTC/fuel state, select weather once, and apply all phase and checkpoint choices before the next positive-distance row. Test the next row's actual phase and altitude, not only the ordered labels. When TOD coincides with a pilot checkpoint, use TOD descent inputs even if the checkpoint's outbound altitude selection conflicts; retain that authored selection for provenance.
+
+For a pilot checkpoint before estimated TOC, #28 retains the checkpoint, ignores any outbound altitude selection there, adds a nonblocking warning, and keeps climb inputs through the next row. It must omit an altitude transition for that checkpoint before calling `validateWaypointGeometry`; a transition supplied to the pure validator is an invalid preparation request.

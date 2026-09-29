@@ -438,6 +438,35 @@ describe("orderPreparedWaypoints", () => {
 });
 
 describe("validateWaypointGeometry", () => {
+  it("keeps an early pilot checkpoint but rejects a transition started before TOC", () => {
+    const preparedRoute = routeAtDistances([0, 3, 30, 60]).prepared;
+    const toc = waypointAt("toc", "estimated-toc", "TOC", 6);
+    const tod = waypointAt("tod", "estimated-tod", "TOD", 48);
+
+    expect(validateWaypointGeometry({ route: preparedRoute, toc, tod, transitions: [] })).toEqual({ ok: true, value: true });
+
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc,
+      tod,
+      transitions: [{
+        startPointId: "P1",
+        end: waypointAt("transition", "estimated-transition-end", "Transition end", 8),
+        nextPilotPointId: "P2",
+      }],
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/P1.*NM 3.*before.*TOC.*NM 6/i);
+      expect(result.error.details).toMatchObject({
+        startPointId: "P1",
+        tocWaypointId: "toc",
+        tocDistanceNauticalMiles: 6,
+      });
+      expect(result.error.details?.startPointDistanceNauticalMiles).toBeCloseTo(3, 8);
+    }
+  });
+
   it("accepts ordered phase boundaries and a transition ending at its next checkpoint", () => {
     const preparedRoute = routeAtDistances([0, 30, 50, 80]).prepared;
 

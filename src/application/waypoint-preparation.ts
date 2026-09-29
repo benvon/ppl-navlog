@@ -788,6 +788,17 @@ export const validateWaypointGeometry = (input: {
     const pilotPoints = findTransitionPilotPoints(input.route, transition);
     if (!pilotPoints.ok) return propagateFailure(pilotPoints);
     const { start, next } = pilotPoints.value;
+    if (start.routeDistanceNauticalMiles < input.toc.routeDistanceNauticalMiles) {
+      return invalidRoute(
+        `Transition from ${start.point.name} at ${distanceLabel(start.routeDistanceNauticalMiles)} starts before estimated TOC ${input.toc.label} at ${distanceLabel(input.toc.routeDistanceNauticalMiles)}. Keep the pilot checkpoint, ignore its outbound altitude selection, and continue using climb inputs until TOC.`,
+        {
+          startPointId: transition.startPointId,
+          startPointDistanceNauticalMiles: start.routeDistanceNauticalMiles,
+          tocWaypointId: input.toc.id,
+          tocDistanceNauticalMiles: input.toc.routeDistanceNauticalMiles,
+        },
+      );
+    }
     if (start.routeDistanceNauticalMiles >= next.routeDistanceNauticalMiles) {
       return invalidRoute(`Transition ${transition.end.label} must start before its next pilot checkpoint. Review the authored route order.`, {
         startPointId: transition.startPointId,
