@@ -3,8 +3,8 @@ import { validateProductionCandidate } from './verify-production-candidate.mjs';
 
 const sha = 'a'.repeat(40);
 const input = {
+  stableTag: 'v0.1.0',
   rcTag: 'v0.1.0-rc.42',
-  ciRunId: '12345',
   repository: 'benvon/ppl-navlog',
   run: {
     id: 12345,
@@ -37,26 +37,24 @@ const input = {
 };
 
 describe('production promotion candidate', () => {
-  it('accepts a published RC built by the matching successful main CI attempt', () => {
+  it('accepts a stable tag on a published RC commit built by successful main CI', () => {
     expect(validateProductionCandidate(input)).toEqual({
-      rcTag: 'v0.1.0-rc.42', stableTag: 'v0.1.0', commitSha: sha, artifactName: 'static-assets-12345-2',
+      stableTag: 'v0.1.0', rcTag: 'v0.1.0-rc.42', commitSha: sha, ciRunId: 12345, artifactName: 'static-assets-12345-2',
     });
   });
 
   it.each([
-    [{ rcTag: 'v0.1.0-rc.0' }, /RC tag/],
-    [{ ciRunId: '0' }, /run ID/],
-    [{ ciRunId: '9007199254740993' }, /run ID/],
-    [{ rcTag: 'v0.1.0-rc.9007199254740993' }, /run number/],
+    [{ stableTag: 'v0.1.0-rc.42' }, /stable/],
+    [{ rcTag: 'v0.1.0-rc.43' }, /run number/],
     [{ run: { ...input.run, event: 'pull_request' } }, /successful main/],
     [{ run: { ...input.run, conclusion: 'failure' } }, /successful main/],
     [{ run: { ...input.run, head_sha: 'b'.repeat(40) } }, /same commit/],
     [{ release: { ...input.release, prerelease: false } }, /prerelease/],
     [{ artifact: { ...input.artifact, name: 'static-assets-12345-1' } }, /artifact/],
     [{ artifact: { ...input.artifact, expired: true } }, /artifact/],
-    [{ stableTagSha: 'b'.repeat(40) }, /another commit/],
+    [{ packageVersion: '0.2.0' }, /package version/],
     [{ productionConfig: { name: 'ppl-navlog', env: { production: { routes: [] } } } }, /two-domain/],
-  ])('rejects an invalid promotion source', (change, error) => {
+  ])('rejects an invalid stable-tag promotion source', (change, error) => {
     expect(() => validateProductionCandidate({ ...input, ...change })).toThrow(error);
   });
 });
