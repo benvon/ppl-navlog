@@ -365,3 +365,236 @@ export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<Pre
     },
   });
 };
+
+const generatedWaypointKindOrder: Readonly<Record<PreparedWaypoint["kind"], number>> = {
+  departure: 0,
+  "pilot-checkpoint": 0,
+  "estimated-toc": 1,
+  "estimated-transition-end": 2,
+  "estimated-tod": 3,
+  destination: 4,
+};
+
+interface WaypointOrderEntry {
+  readonly waypoint: PreparedWaypoint;
+  readonly authoredIndex?: number;
+}
+
+type PreparedWaypointSpan = {
+  readonly from: PreparedWaypoint;
+  readonly to: PreparedWaypoint;
+  readonly sourceLegId: string;
+  readonly distanceNauticalMiles: number;
+};
+
+const pilotWaypointEntries = (route: PreparedPilotRoute): WaypointOrderEntry[] => route.pilotPoints.map(
+  ({ point: source, routeDistanceNauticalMiles }, index) => ({
+    waypoint: {
+      id: source.id,
+      kind: index === 0 ? "departure" : index === route.pilotPoints.length - 1 ? "destination" : "pilot-checkpoint",
+      label: source.name,
+      coordinate: source.coordinate,
+      routeDistanceNauticalMiles,
+      sourcePointId: source.id,
+    },
+    authoredIndex: index,
+  }),
+);
+
+const compareWaypointEntries = (left: WaypointOrderEntry, right: WaypointOrderEntry): number => {
+  const distanceDifference = left.waypoint.routeDistanceNauticalMiles - right.waypoint.routeDistanceNauticalMiles;
+  if (distanceDifference !== 0) return distanceDifference;
+  if (left.authoredIndex !== undefined && right.authoredIndex !== undefined) return left.authoredIndex - right.authoredIndex;
+  if (left.authoredIndex !== undefined) return -1;
+  if (right.authoredIndex !== undefined) return 1;
+  const kindDifference = generatedWaypointKindOrder[left.waypoint.kind] - generatedWaypointKindOrder[right.waypoint.kind];
+  if (kindDifference !== 0) return kindDifference;
+  return left.waypoint.id < right.waypoint.id ? -1 : left.waypoint.id > right.waypoint.id ? 1 : 0;
+};
+
+const validateGeneratedWaypoint = (
+  route: PreparedPilotRoute,
+  waypoint: PreparedWaypoint,
+  authoredIds: ReadonlySet<string>,
+  seenGeneratedIds: ReadonlySet<string>,
+): DomainResult<true> => {
+  if (!waypoint.id || authoredIds.has(waypoint.id) || seenGeneratedIds.has(waypoint.id)) {
+    return invalidRoute("Generated waypoint IDs must be present and distinct from route point IDs.", {
+      waypointId: waypoint.id,
+    });
+  }
+  if (!Number.isFinite(waypoint.routeDistanceNauticalMiles) || waypoint.routeDistanceNauticalMiles < 0 ||
+      waypoint.routeDistanceNauticalMiles > route.totalRouteDistanceNauticalMiles) {
+    return invalidRoute(`Generated waypoint ${waypoint.label} must lie on the prepared route.`, {
+      waypointId: waypoint.id,
+      waypointLabel: waypoint.label,
+      waypointDistanceNauticalMiles: waypoint.routeDistanceNauticalMiles,
+      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+    });
+  }
+  return success(true);
+};
+
+const findSpanLeg = (route: PreparedPilotRoute, from: PreparedWaypoint, to: PreparedWaypoint): PreparedPilotLeg | undefined =>
+  route.legs.find((leg) =>
+    from.routeDistanceNauticalMiles >= leg.routeStartDistanceNauticalMiles &&
+    to.routeDistanceNauticalMiles <= leg.routeEndDistanceNauticalMiles,
+  );
+
+const buildPositiveWaypointSpans = (
+  route: PreparedPilotRoute,
+  waypoints: readonly PreparedWaypoint[],
+): DomainResult<readonly PreparedWaypointSpan[]> => {
+  const spans: PreparedWaypointSpan[] = [];
+  for (let index = 0; index < waypoints.length - 1; index += 1) {
+    const from = waypoints[index];
+    const to = waypoints[index + 1];
+    if (from === undefined || to === undefined) continue;
+    const distanceNauticalMiles = to.routeDistanceNauticalMiles - from.routeDistanceNauticalMiles;
+    if (distanceNauticalMiles === 0) continue;
+    const containingLeg = findSpanLeg(route, from, to);
+    if (containingLeg === undefined) {
+      return invalidRoute(
+        `Unable to place the span from ${from.label} (${distanceLabel(from.routeDistanceNauticalMiles)}) to ${to.label} (${distanceLabel(to.routeDistanceNauticalMiles)}) on one charted leg. Review the waypoint positions or route.`,
+        {
+          fromWaypointId: from.id,
+          fromWaypointDistanceNauticalMiles: from.routeDistanceNauticalMiles,
+          toWaypointId: to.id,
+          toWaypointDistanceNauticalMiles: to.routeDistanceNauticalMiles,
+        },
+      );
+    }
+    spans.push({ from, to, sourceLegId: containingLeg.sourceLeg.id, distanceNauticalMiles });
+  }
+  return success(spans);
+};
+
+/** Orders authored and estimated points, preserving coincident labels and omitting only zero-length spans. */
+export const orderPreparedWaypoints = (
+  route: PreparedPilotRoute,
+  generated: readonly PreparedWaypoint[],
+): DomainResult<{
+  readonly waypoints: readonly PreparedWaypoint[];
+  readonly spans: readonly PreparedWaypointSpan[];
+}> => {
+  const authoredIds = new Set(route.pilotPoints.map(({ point: source }) => source.id));
+  const seenGeneratedIds = new Set<string>();
+  const entries = pilotWaypointEntries(route);
+
+  for (const waypoint of generated) {
+    const validWaypoint = validateGeneratedWaypoint(route, waypoint, authoredIds, seenGeneratedIds);
+    if (!validWaypoint.ok) return propagateFailure(validWaypoint);
+    seenGeneratedIds.add(waypoint.id);
+    entries.push({ waypoint });
+  }
+
+  entries.sort(compareWaypointEntries);
+
+  const waypoints = entries.map(({ waypoint }) => waypoint);
+  const spans = buildPositiveWaypointSpans(route, waypoints);
+  if (!spans.ok) return propagateFailure(spans);
+  return success({ waypoints, spans: spans.value });
+};
+
+/** Rejects estimated climb/descent geometry that cannot be ordered on the prepared route. */
+export const validateWaypointGeometry = (input: {
+  readonly route: PreparedPilotRoute;
+  readonly toc: PreparedWaypoint;
+  readonly tod: PreparedWaypoint;
+  readonly transitions: readonly {
+    readonly startPointId: string;
+    readonly end: PreparedWaypoint;
+    readonly nextPilotPointId: string;
+  }[];
+}): DomainResult<true> => {
+  const validateDistance = (waypoint: PreparedWaypoint): DomainResult<true> => {
+    if (!Number.isFinite(waypoint.routeDistanceNauticalMiles) || waypoint.routeDistanceNauticalMiles < 0 ||
+        waypoint.routeDistanceNauticalMiles > input.route.totalRouteDistanceNauticalMiles) {
+      return invalidRoute(`Waypoint ${waypoint.label} must lie on the prepared route.`, {
+        waypointId: waypoint.id,
+        waypointDistanceNauticalMiles: waypoint.routeDistanceNauticalMiles,
+        totalRouteDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles,
+      });
+    }
+    return success(true);
+  };
+
+  for (const waypoint of [input.toc, input.tod]) {
+    const distanceResult = validateDistance(waypoint);
+    if (!distanceResult.ok) return distanceResult;
+  }
+  if (input.toc.routeDistanceNauticalMiles >= input.tod.routeDistanceNauticalMiles) {
+    return invalidRoute(
+      `Estimated TOC ${input.toc.label} at ${distanceLabel(input.toc.routeDistanceNauticalMiles)} is at or after estimated TOD ${input.tod.label} at ${distanceLabel(input.tod.routeDistanceNauticalMiles)}, leaving no positive cruise span. Review the selected cruise altitude, climb/descent performance, or route.`,
+      {
+        tocWaypointId: input.toc.id,
+        tocWaypointLabel: input.toc.label,
+        tocDistanceNauticalMiles: input.toc.routeDistanceNauticalMiles,
+        todWaypointId: input.tod.id,
+        todWaypointLabel: input.tod.label,
+        todDistanceNauticalMiles: input.tod.routeDistanceNauticalMiles,
+      },
+    );
+  }
+
+  for (const transition of input.transitions) {
+    const start = input.route.pilotPoints.find(({ point }) => point.id === transition.startPointId);
+    const next = input.route.pilotPoints.find(({ point }) => point.id === transition.nextPilotPointId);
+    const endDistance = validateDistance(transition.end);
+    if (!endDistance.ok) return endDistance;
+    if (start === undefined || next === undefined) {
+      return invalidRoute(`Transition ${transition.end.label} references a pilot point that is not on the prepared route.`, {
+        transitionEndId: transition.end.id,
+        startPointId: transition.startPointId,
+        nextPilotPointId: transition.nextPilotPointId,
+      });
+    }
+    if (start.routeDistanceNauticalMiles >= next.routeDistanceNauticalMiles) {
+      return invalidRoute(`Transition ${transition.end.label} must start before its next pilot checkpoint. Review the authored route order.`, {
+        startPointId: transition.startPointId,
+        startPointDistanceNauticalMiles: start.routeDistanceNauticalMiles,
+        nextPilotPointId: transition.nextPilotPointId,
+        nextPilotPointDistanceNauticalMiles: next.routeDistanceNauticalMiles,
+      });
+    }
+    if (transition.end.routeDistanceNauticalMiles <= start.routeDistanceNauticalMiles) {
+      return invalidRoute(
+        `Transition ${transition.end.label} at ${distanceLabel(transition.end.routeDistanceNauticalMiles)} must follow ${start.point.name} at ${distanceLabel(start.routeDistanceNauticalMiles)}. Revise the transition performance or route inputs.`,
+        {
+          transitionEndId: transition.end.id,
+          transitionEndDistanceNauticalMiles: transition.end.routeDistanceNauticalMiles,
+          startPointId: transition.startPointId,
+          startPointDistanceNauticalMiles: start.routeDistanceNauticalMiles,
+        },
+      );
+    }
+    if (transition.end.routeDistanceNauticalMiles > next.routeDistanceNauticalMiles) {
+      return invalidRoute(
+        `Transition end ${transition.end.label} at ${distanceLabel(transition.end.routeDistanceNauticalMiles)} extends beyond next pilot checkpoint ${next.point.name} at ${distanceLabel(next.routeDistanceNauticalMiles)}. Choose a lower or more reachable altitude, revise performance assumptions, move the checkpoint, or revise the route.`,
+        {
+          transitionEndId: transition.end.id,
+          transitionEndLabel: transition.end.label,
+          transitionEndDistanceNauticalMiles: transition.end.routeDistanceNauticalMiles,
+          nextPilotPointId: transition.nextPilotPointId,
+          nextPilotPointLabel: next.point.name,
+          nextPilotPointDistanceNauticalMiles: next.routeDistanceNauticalMiles,
+        },
+      );
+    }
+    if (transition.end.routeDistanceNauticalMiles > input.tod.routeDistanceNauticalMiles) {
+      return invalidRoute(
+        `Transition end ${transition.end.label} at ${distanceLabel(transition.end.routeDistanceNauticalMiles)} crosses estimated TOD ${input.tod.label} at ${distanceLabel(input.tod.routeDistanceNauticalMiles)}. Choose a lower or more reachable altitude, revise performance assumptions, or revise the route.`,
+        {
+          transitionEndId: transition.end.id,
+          transitionEndLabel: transition.end.label,
+          transitionEndDistanceNauticalMiles: transition.end.routeDistanceNauticalMiles,
+          todWaypointId: input.tod.id,
+          todWaypointLabel: input.tod.label,
+          todDistanceNauticalMiles: input.tod.routeDistanceNauticalMiles,
+        },
+      );
+    }
+  }
+
+  return success(true);
+};

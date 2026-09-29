@@ -6,8 +6,10 @@ import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route"
 import {
   estimateForwardVerticalWaypoint,
   estimateTopOfDescent,
+  orderPreparedWaypoints,
   preparePilotRoute,
   type PreparedWaypoint,
+  validateWaypointGeometry,
 } from "./waypoint-preparation";
 import { wind } from "../domain/wind";
 
@@ -74,6 +76,25 @@ const todInput = (overrides: Partial<Parameters<typeof estimateTopOfDescent>[0]>
   descentFuelFlowGallonsPerHour: 6,
   planningWind: calmWind,
   ...overrides,
+});
+
+const routeAtDistances = (distances: readonly number[]) => {
+  const points = distances.map((distance, index) => point(`P${index}`, distance / 60.0404607326));
+  const legs = points.slice(1).map((destination, index) => leg(`L${index}`, points[index]?.id ?? "", destination.id));
+  return { points, legs, prepared: value(preparePilotRoute(route(points, legs))) };
+};
+
+const waypointAt = (
+  id: string,
+  kind: PreparedWaypoint["kind"],
+  label: string,
+  routeDistanceNauticalMiles: number,
+): PreparedWaypoint => ({
+  id,
+  kind,
+  label,
+  coordinate: point(id, routeDistanceNauticalMiles / 60.0404607326).coordinate,
+  routeDistanceNauticalMiles,
 });
 
 describe("preparePilotRoute", () => {
@@ -313,5 +334,175 @@ describe("estimateTopOfDescent", () => {
       ok: false,
       error: { code: "ROUTE_GEOMETRY_ERROR" },
     });
+  });
+});
+
+describe("orderPreparedWaypoints", () => {
+  it("orders the 60 NM and 24 NM examples into positive split spans without changing authored points", () => {
+    const sixtyNm = routeAtDistances([0, 20, 40, 60]);
+    const authoredSnapshot = structuredClone({ points: sixtyNm.points, legs: sixtyNm.legs });
+    const orderedSixty = value(orderPreparedWaypoints(sixtyNm.prepared, [
+      waypointAt("tod", "estimated-tod", "TOD", 48),
+      waypointAt("toc", "estimated-toc", "TOC", 6),
+    ]));
+
+    expect(orderedSixty.waypoints.map(({ label }) => label)).toEqual([
+      "P0", "TOC", "P1", "P2", "TOD", "P3",
+    ]);
+    [6, 14, 20, 8, 12].forEach((distance, index) => {
+      expect(orderedSixty.spans[index]?.distanceNauticalMiles).toBeCloseTo(distance, 2);
+    });
+    expect(orderedSixty.spans.map(({ sourceLegId }) => sourceLegId)).toEqual(["L0", "L0", "L1", "L2", "L2"]);
+    expect(orderedSixty.spans).toHaveLength(5);
+    expect(orderedSixty.spans.reduce((total, span) => total + span.distanceNauticalMiles, 0)).toBeCloseTo(60, 2);
+    expect({ points: sixtyNm.points, legs: sixtyNm.legs }).toEqual(authoredSnapshot);
+
+    const twentyFourNm = routeAtDistances([0, 9, 24]);
+    const orderedTwentyFour = value(orderPreparedWaypoints(twentyFourNm.prepared, [
+      waypointAt("tod", "estimated-tod", "TOD", 12),
+      waypointAt("toc", "estimated-toc", "TOC", 6),
+    ]));
+
+    expect(orderedTwentyFour.waypoints.map(({ label }) => label)).toEqual([
+      "P0", "TOC", "P1", "TOD", "P2",
+    ]);
+    [6, 3, 3, 12].forEach((distance, index) => {
+      expect(orderedTwentyFour.spans[index]?.distanceNauticalMiles).toBeCloseTo(distance, 2);
+    });
+    expect(orderedTwentyFour.spans.map(({ sourceLegId }) => sourceLegId)).toEqual(["L0", "L0", "L1", "L1"]);
+    expect(orderedTwentyFour.spans).toHaveLength(4);
+    expect(orderedTwentyFour.spans.reduce((total, span) => total + span.distanceNauticalMiles, 0)).toBeCloseTo(24, 2);
+  });
+
+  it("retains a coincident pilot/generated pair without a zero span and keeps a nearby positive span", () => {
+    const preparedRoute = routeAtDistances([0, 20, 40, 60]).prepared;
+    const checkpointDistance = preparedRoute.pilotPoints[1]?.routeDistanceNauticalMiles ?? 0;
+    const ordered = value(orderPreparedWaypoints(preparedRoute, [
+      waypointAt("near", "estimated-transition-end", "Transition end", checkpointDistance + 0.01),
+      waypointAt("tied-transition", "estimated-transition-end", "Transition start", checkpointDistance),
+      waypointAt("toc", "estimated-toc", "TOC", checkpointDistance),
+    ]));
+    const orderedInReverse = value(orderPreparedWaypoints(preparedRoute, [
+      waypointAt("toc", "estimated-toc", "TOC", checkpointDistance),
+      waypointAt("tied-transition", "estimated-transition-end", "Transition start", checkpointDistance),
+      waypointAt("near", "estimated-transition-end", "Transition end", checkpointDistance + 0.01),
+    ]));
+    const coincident = ordered.waypoints.filter(({ routeDistanceNauticalMiles }) => routeDistanceNauticalMiles === checkpointDistance);
+
+    expect(coincident.map(({ label }) => label)).toEqual(["P1", "TOC", "Transition start"]);
+    expect(orderedInReverse.waypoints.map(({ id }) => id)).toEqual(ordered.waypoints.map(({ id }) => id));
+    expect(ordered.spans.every(({ distanceNauticalMiles }) => distanceNauticalMiles > 0)).toBe(true);
+    expect(ordered.spans.some(({ from, to, distanceNauticalMiles }) =>
+      from.label === "Transition start" && to.label === "Transition end" && distanceNauticalMiles > 0,
+    )).toBe(true);
+  });
+});
+
+describe("validateWaypointGeometry", () => {
+  it("accepts ordered phase boundaries and a transition ending at its next checkpoint", () => {
+    const preparedRoute = routeAtDistances([0, 30, 50, 80]).prepared;
+
+    expect(validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 60),
+      transitions: [{
+        startPointId: "P1",
+        end: waypointAt("transition", "estimated-transition-end", "Transition end", 50),
+        nextPilotPointId: "P2",
+      }],
+    })).toEqual({ ok: true, value: true });
+  });
+
+  it("rejects TOC/TOD overlap with both distances and corrective guidance", () => {
+    const preparedRoute = routeAtDistances([0, 14]).prepared;
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 2),
+      transitions: [],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/TOC.*NM 6.*TOD.*NM 2/i);
+      expect(result.error.message).toMatch(/review|revise|lower|performance|route/i);
+      expect(result.error.details).toMatchObject({
+        tocWaypointId: "toc",
+        tocWaypointLabel: "TOC",
+        tocDistanceNauticalMiles: 6,
+        todWaypointId: "tod",
+        todWaypointLabel: "TOD",
+        todDistanceNauticalMiles: 2,
+      });
+    }
+  });
+
+  it("rejects coincident TOC and TOD because they leave no positive cruise span", () => {
+    const preparedRoute = routeAtDistances([0, 14]).prepared;
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 6),
+      transitions: [],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+  });
+
+  it("rejects a transition extending beyond its next pilot checkpoint", () => {
+    const preparedRoute = routeAtDistances([0, 30, 50, 80]).prepared;
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 68),
+      transitions: [{
+        startPointId: "P1",
+        end: waypointAt("transition", "estimated-transition-end", "Transition end", 52),
+        nextPilotPointId: "P2",
+      }],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/Transition end.*NM 52.*P2.*NM 50/i);
+      expect(result.error.message).toMatch(/revise|performance|checkpoint|route/i);
+      expect(result.error.details).toMatchObject({
+        transitionEndId: "transition",
+        transitionEndLabel: "Transition end",
+        transitionEndDistanceNauticalMiles: 52,
+        nextPilotPointId: "P2",
+        nextPilotPointLabel: "P2",
+      });
+      expect(result.error.details?.nextPilotPointDistanceNauticalMiles).toBeCloseTo(50, 8);
+    }
+  });
+
+  it("rejects a transition whose estimated end crosses TOD", () => {
+    const preparedRoute = routeAtDistances([0, 30, 80]).prepared;
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 60),
+      transitions: [{
+        startPointId: "P1",
+        end: waypointAt("transition", "estimated-transition-end", "Transition end", 70),
+        nextPilotPointId: "P2",
+      }],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/Transition end.*NM 70.*TOD.*NM 60/i);
+      expect(result.error.message).toMatch(/revise|performance|descent|route/i);
+      expect(result.error.details).toMatchObject({
+        transitionEndId: "transition",
+        transitionEndLabel: "Transition end",
+        transitionEndDistanceNauticalMiles: 70,
+        todWaypointId: "tod",
+        todWaypointLabel: "TOD",
+        todDistanceNauticalMiles: 60,
+      });
+    }
   });
 });
