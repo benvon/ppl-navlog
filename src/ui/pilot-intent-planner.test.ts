@@ -22,9 +22,11 @@ class MemoryInputs implements PilotInputRepository {
   profileSaveGate?: Promise<void>;
   failSubmit = false;
   failInitialize = false;
+  failOpen = false;
   async initialize(): Promise<void> { if (this.failInitialize) throw new Error("storage initialization failed"); }
   async listPlans(): Promise<readonly PilotInputPlan[]> { return this.plans; }
   async getPlan(id: string): Promise<PilotInputPlan | undefined> {
+    if (this.failOpen) throw new Error("read failed");
     return this.plans.find((p) => p.id === id);
   }
   async saveWorkingCopy(plan: PilotInputPlan): Promise<void> {
@@ -918,7 +920,21 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[data-current-result]")).toBeNull();
   });
 
-  it("keeps an autosave failure visible across Open and New until a later write succeeds", async () => {
+  it("keeps the active draft visible when opening another saved plan fails", async () => {
+    const repository = new MemoryInputs();
+    repository.plans.push(
+      { id: "active", title: "Active route", rawFields: { "plan-title": "Active route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] },
+      { id: "other", title: "Other route", rawFields: { "plan-title": "Other route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] },
+    );
+    const root = await mount(repository);
+    repository.failOpen = true;
+    choosePlan(root, "Other route");
+    await settle();
+    expect(input(root, "plan-title").value).toBe("Active route");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("read failed");
+  });
+
+  it("keeps the failed draft and accepted destination until confirmed discard", async () => {
     const repository = new MemoryInputs();
     const other: PilotInputPlan = {
       id: "other-saved-plan", title: "Other saved plan", rawFields: { "plan-title": "Other saved plan" },
@@ -927,22 +943,24 @@ describe("pilot intent planner", () => {
     repository.plans.push(other);
     const root = await mount(repository);
     repository.failSave = true;
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
     edit(root, "plan-title", "Failed write", true);
-    await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
-
-    choosePlan(root, "Other saved plan");
-    await settle();
-    expect(input(root, "plan-title").value).toBe("Other saved plan");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     button(root, "New plan").click();
-    expect(input(root, "plan-title").value).toBe("New study route");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
-
-    repository.failSave = false;
-    edit(root, "plan-title", "Write recovered", true);
+    release();
     await settle();
-    expect(root.querySelector("[role='status']")?.textContent).toBe("Pilot inputs saved.");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Discard draft and continue");
+    expect(planSelector(root).disabled).toBe(true);
+    expect(button(root, "New plan").disabled).toBe(true);
+    edit(root, "departure-icao", "KORD");
+    expect(input(root, "departure-icao").value).toBe("KORD");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const discard = [...root.querySelectorAll<HTMLButtonElement>("[role='status'] button")].find((candidate) => candidate.textContent === "Discard draft and continue");
+    expect(discard?.textContent).toBe("Discard draft and continue");
+    discard?.click();
+    await settle();
+    expect(input(root, "plan-title").value).toBe("New study route");
   });
 
   it("restores incomplete profile text and ordered checkpoint text after reopening a saved plan", async () => {
@@ -1465,6 +1483,9 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "New plan").click();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Saving");
+    await settle();
+    expect(input(root, "plan-title").value).toBe("New study route");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
     choosePlan(root, "Synthetic route");
     await settle();
@@ -1496,5 +1517,97 @@ describe("pilot intent planner", () => {
     await settle();
     expect(input(root, "plan-title").value).toBe("Other plan");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
+  });
+
+  it("captures an immediate New click during blur save and locks editing until the destination opens", async () => {
+    const repository = new MemoryInputs();
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const root = await mount(repository);
+    const title = input(root, "plan-title");
+    title.value = "Pending draft";
+    title.dispatchEvent(new Event("input", { bubbles: true }));
+    title.dispatchEvent(new Event("blur", { bubbles: true }));
+    button(root, "New plan").click();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Saving");
+    expect(button(root, "New plan").disabled).toBe(false);
+    expect(input(root, "departure-icao").disabled).toBe(true);
+    release();
+    await settle();
+    expect(input(root, "plan-title").value).toBe("New study route");
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Pending draft");
+  });
+
+  it("coalesces rapid blur events into one write containing the latest literal fields", async () => {
+    const repository = new MemoryInputs();
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const root = await mount(repository);
+    const editorBeforeSave = input(root, "plan-title");
+    edit(root, "plan-title", "First title", true);
+    edit(root, "departure-icao", "KORD", true);
+    edit(root, "destination-icao", "KJVL", true);
+    await settle();
+    expect(repository.saveAttempts).toBe(1);
+    release();
+    await settle();
+    expect(repository.plans[0]?.rawFields).toMatchObject({ "plan-title": "First title", "departure-icao": "KORD", "destination-icao": "KJVL" });
+    expect(input(root, "plan-title")).toBe(editorBeforeSave);
+    expect([...planSelector(root).options].some((option) => option.textContent === "First title")).toBe(true);
+  });
+
+  it("keeps keyboard focus on New during the pending save and moves it to the new editor", async () => {
+    const repository = new MemoryInputs();
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const root = await mount(repository);
+    document.body.append(root);
+    const title = input(root, "plan-title");
+    title.focus();
+    title.value = "Focused draft";
+    title.dispatchEvent(new Event("input", { bubbles: true }));
+    const create = button(root, "New plan");
+    title.dispatchEvent(new Event("blur", { bubbles: true }));
+    create.focus();
+    create.click();
+    expect(create.disabled).toBe(false);
+    expect(document.activeElement).toBe(create);
+    release();
+    await settle();
+    expect(document.activeElement).toBe(root.querySelector('[data-stage="aircraft"] summary'));
+    root.remove();
+  });
+
+  it("waits for a pending autosave before Update navlog and aborts submission after save failure", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    repository.failSave = true;
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    edit(root, "plan-title", "Pending update draft", true);
+    await Promise.resolve();
+    expect(button(root, "Update navlog").disabled).toBe(false);
+    button(root, "Update navlog").click();
+    expect(button(root, "Update navlog").disabled).toBe(true);
+    release();
+    await settle();
+    expect(repository.submissions).toHaveLength(0);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+    expect(input(root, "plan-title").value).toBe("Pending update draft");
+  });
+
+  it("offers retry after failed blur save and does not retry on another blur", async () => {
+    const repository = new MemoryInputs(); repository.failSave = true;
+    const root = await mount(repository);
+    edit(root, "plan-title", "Failed draft", true);
+    await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+    expect(button(root, "Retry save")).toBeTruthy();
+    const attempts = repository.saveAttempts;
+    edit(root, "departure-icao", "KORD", true);
+    await settle();
+    expect(repository.saveAttempts).toBe(attempts);
+    expect(input(root, "departure-icao").value).toBe("KORD");
   });
 });
