@@ -1530,7 +1530,8 @@ describe("pilot intent planner", () => {
     title.dispatchEvent(new Event("blur", { bubbles: true }));
     button(root, "New plan").click();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Saving");
-    expect(button(root, "New plan").disabled).toBe(false);
+    expect(button(root, "New plan").disabled).toBe(true);
+    expect(planSelector(root).disabled).toBe(true);
     expect(input(root, "departure-icao").disabled).toBe(true);
     release();
     await settle();
@@ -1556,7 +1557,7 @@ describe("pilot intent planner", () => {
     expect([...planSelector(root).options].some((option) => option.textContent === "First title")).toBe(true);
   });
 
-  it("keeps keyboard focus on New during the pending save and moves it to the new editor", async () => {
+  it("moves keyboard focus to the new editor after the accepted switch", async () => {
     const repository = new MemoryInputs();
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
@@ -1570,8 +1571,7 @@ describe("pilot intent planner", () => {
     title.dispatchEvent(new Event("blur", { bubbles: true }));
     create.focus();
     create.click();
-    expect(create.disabled).toBe(false);
-    expect(document.activeElement).toBe(create);
+    expect(create.disabled).toBe(true);
     release();
     await settle();
     expect(document.activeElement).toBe(root.querySelector('[data-stage="aircraft"] summary'));
@@ -1595,6 +1595,25 @@ describe("pilot intent planner", () => {
     expect(repository.submissions).toHaveLength(0);
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(input(root, "plan-title").value).toBe("Pending update draft");
+    expect(button(root, "New plan").disabled).toBe(true);
+    expect(planSelector(root).disabled).toBe(true);
+  });
+
+  it("locks Update navlog once a destination is accepted during saving", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    edit(root, "plan-title", "Switching draft", true);
+    await Promise.resolve();
+    expect(button(root, "Update navlog").disabled).toBe(false);
+    button(root, "New plan").click();
+    expect(button(root, "Update navlog").disabled).toBe(true);
+    expect(button(root, "New plan").disabled).toBe(true);
+    release();
+    await settle();
+    expect(input(root, "plan-title").value).toBe("New study route");
   });
 
   it("offers retry after failed blur save and does not retry on another blur", async () => {
