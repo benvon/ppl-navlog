@@ -1599,6 +1599,21 @@ describe("pilot intent planner", () => {
     expect(planSelector(root).disabled).toBe(true);
   });
 
+  it("replaces a failed update message after Retry save succeeds", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const root = await mount(repository);
+    await makeLocallyValid(root);
+    repository.failSave = true;
+    button(root, "Update navlog").click();
+    await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+    repository.failSave = false;
+    button(root, "Retry save").click();
+    await settle();
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved.");
+    expect(root.querySelector("[role='status']")?.textContent).not.toContain("write failed");
+  });
+
   it("locks Update navlog once a destination is accepted during saving", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);

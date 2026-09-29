@@ -50,7 +50,7 @@ class PilotIntentPlanner {
   private lastPlanPhase: PlannerPlanView["phase"] = "editing";
   private result?: PlanRevision;
   private inspected?: NavlogInspectionSelection;
-  private updateError = "";
+  private feedback: { readonly kind: "message" | "error"; readonly text: string } = { kind: "message", text: "" };
   private profileDraftDirty = false;
   private readonly openOverrideEditors = new Set<number>();
   private readonly touchedFields = new Set<string>();
@@ -80,9 +80,7 @@ class PilotIntentPlanner {
       const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
       this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
       this.activateStage(this.current?.selectedProfileId ? "route" : "aircraft");
-      this.status.textContent = this.current?.title === "New study route"
-        ? "Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates."
-        : "Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates.";
+      this.showGuidance();
       this.render();
     } catch (error) { this.fail(error); this.render(); }
   }
@@ -97,28 +95,34 @@ class PilotIntentPlanner {
     }
     this.renderedDraftId = draftId;
     this.lastPlanPhase = view.phase;
-    this.showPlanStatus(view);
+    if (view.phase === "editing" && view.error) this.feedback = { kind: "error", text: view.error };
+    this.renderFeedback(view);
     this.syncPlanControls(view);
   }
 
   private showActiveDraft(view: PlannerPlanView): void {
     this.openOverrideEditors.clear();
-    this.result = undefined; this.inspected = undefined; this.updateError = "";
+    this.result = undefined; this.inspected = undefined;
     const selected = this.profiles.find((profile) => profile.id === view.activeDraft?.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(view.activeDraft?.rawFields ?? {}, selected);
     this.touchedFields.clear();
     this.activateStage(view.activeDraft?.selectedProfileId ? "route" : "aircraft");
     this.renderedDraftId = view.activeDraft?.id;
     this.lastPlanPhase = view.phase;
-    this.status.textContent = view.activeDraft?.id && view.activeDraft.title !== "New study route"
-      ? "Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates."
-      : "Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates.";
+    this.showGuidance();
     this.render();
     this.content.querySelector<HTMLElement>(`[data-stage="${this.activeStage}"] summary`)?.focus();
   }
 
-  private showPlanStatus(view: PlannerPlanView): void {
-    this.status.replaceChildren(document.createTextNode(view.error ? `${view.status}: ${view.error}` : view.status));
+  private showGuidance(): void {
+    this.setStatus(this.current?.title !== "New study route"
+      ? "Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates."
+      : "Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates.");
+  }
+
+  private renderFeedback(view = this.planState.view): void {
+    const planMessage = view.error ? [view.status, view.error].filter(Boolean).join(": ") : view.status;
+    this.status.replaceChildren(document.createTextNode(view.phase === "editing" ? this.feedback.text : planMessage));
     if (view.phase === "save-failed") {
       const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry save";
       retry.addEventListener("click", () => void this.retrySave()); this.status.append(" ", retry);
@@ -562,7 +566,6 @@ class PilotIntentPlanner {
   private invalidate(): void {
     this.result = undefined;
     this.inspected = undefined;
-    this.updateError = "";
     this.setStatus("Inputs changed. Save changes or Update navlog to use the current inputs.");
     const output = this.content.querySelector("[data-current-result]");
     output?.replaceWith(document.createTextNode("Update navlog to retrieve current weather and display a calculated navlog."));
@@ -579,7 +582,6 @@ class PilotIntentPlanner {
   private async saveChanges(): Promise<void> {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
-    this.updateError = "";
     const result = this.planState.view.phase === "save-failed" ? await this.planState.retry() : await this.planState.save();
     if (result.ok) { this.refreshUpdateGate(); this.setStatus("Changes saved."); }
     else if (result.reason === "failed") this.refreshUpdateGate();
@@ -625,7 +627,6 @@ class PilotIntentPlanner {
       const { draft, profile } = await this.prepareDraft();
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;
-      this.updateError = "";
       this.setStatus("Plan updated with current route weather.");
       this.activateStage("navlog");
     } catch (error) {
@@ -634,7 +635,7 @@ class PilotIntentPlanner {
     } finally {
       this.updating = false;
       this.render();
-      this.content.querySelector<HTMLElement>(`[data-stage="${this.updateError ? "calculate" : "navlog"}"] summary`)?.focus();
+      this.content.querySelector<HTMLElement>(`[data-stage="${this.feedback.kind === "error" ? "calculate" : "navlog"}"] summary`)?.focus();
     }
   }
   private async prepareDraft(): Promise<{ readonly draft: PlanDraft; readonly profile: AircraftProfile }> {
@@ -740,10 +741,14 @@ class PilotIntentPlanner {
       calculationSnapshot: calc.calculationSnapshot, warnings: calc.warnings,
     };
   }
-  private fail(error: unknown): void { this.result = undefined; this.updateError = error instanceof Error ? error.message : "The requested action failed."; this.setStatus(""); }
+  private fail(error: unknown): void {
+    this.result = undefined;
+    this.feedback = { kind: "error", text: error instanceof Error ? error.message : "The requested action failed." };
+    this.renderFeedback();
+  }
   private setStatus(message: string): void {
-    if (this.planState.view.phase === "save-failed") { this.onPlanState(this.planState.view); return; }
-    this.status.textContent = this.updateError || message;
+    this.feedback = { kind: "message", text: message };
+    this.renderFeedback();
   }
   private refreshUpdateGate(): void {
     const reason = this.localError();
