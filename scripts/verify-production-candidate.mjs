@@ -7,9 +7,10 @@ const rcPattern = new RegExp(`^(v${stableSemver})-rc\\.([1-9]\\d*)$`);
 export function validateProductionCandidate({ rcTag, ciRunId, repository, run, release, artifact, tagSha, packageVersion, productionConfig, stableTagSha }) {
   const match = rcPattern.exec(rcTag ?? '');
   if (!match) throw new Error('RC tag must be vX.Y.Z-rc.N.');
-  if (!/^[1-9]\d*$/.test(ciRunId ?? '')) throw new Error('CI run ID must be a positive integer.');
+  if (!/^[1-9]\d*$/.test(ciRunId ?? '') || !Number.isSafeInteger(Number(ciRunId))) throw new Error('CI run ID must be a positive safe integer.');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) throw new Error('Repository is invalid.');
   const [ , stableTag, runNumber ] = match;
+  if (!Number.isSafeInteger(Number(runNumber))) throw new Error('RC run number must be a safe integer.');
   if (packageVersion !== stableTag.slice(1)) throw new Error('RC version differs from the tagged package version.');
   if (release?.tag_name !== rcTag || release?.draft !== false || release?.prerelease !== true) throw new Error('RC must have a published GitHub prerelease.');
   if (run?.id !== Number(ciRunId) || run?.run_number !== Number(runNumber) || run?.event !== 'push' || run?.head_branch !== 'main' || run?.status !== 'completed' || run?.conclusion !== 'success' || run?.head_repository?.full_name !== repository || run?.path !== '.github/workflows/ci.yml') {
@@ -32,7 +33,7 @@ if (process.argv[1]?.endsWith('/verify-production-candidate.mjs')) {
   const rcTag = process.env.RC_TAG;
   const ciRunId = process.env.CI_RUN_ID;
   const repository = process.env.GITHUB_REPOSITORY;
-  if (!rcPattern.test(rcTag ?? '') || !/^[1-9]\d*$/.test(ciRunId ?? '') || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) {
+  if (!rcPattern.test(rcTag ?? '') || !/^[1-9]\d*$/.test(ciRunId ?? '') || !Number.isSafeInteger(Number(ciRunId)) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) {
     throw new Error('Invalid production promotion input.');
   }
   const gh = (endpoint) => JSON.parse(execFileSync('gh', ['api', endpoint], { encoding: 'utf8' }));

@@ -46,6 +46,8 @@ describe('production promotion candidate', () => {
   it.each([
     [{ rcTag: 'v0.1.0-rc.0' }, /RC tag/],
     [{ ciRunId: '0' }, /run ID/],
+    [{ ciRunId: '9007199254740993' }, /run ID/],
+    [{ rcTag: 'v0.1.0-rc.9007199254740993' }, /run number/],
     [{ run: { ...input.run, event: 'pull_request' } }, /successful main/],
     [{ run: { ...input.run, conclusion: 'failure' } }, /successful main/],
     [{ run: { ...input.run, head_sha: 'b'.repeat(40) } }, /same commit/],
