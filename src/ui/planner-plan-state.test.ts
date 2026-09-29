@@ -6,11 +6,15 @@ class MemoryPlans implements PilotInputRepository {
   plans: PilotInputPlan[] = [];
   writes: PilotInputPlan[] = [];
   failWrite = false;
+  failList = false;
   failRead = false;
   readGate?: Promise<void>;
   writeGate?: Promise<void>;
   async initialize(): Promise<void> {}
-  async listPlans(): Promise<readonly PilotInputPlan[]> { return this.plans; }
+  async listPlans(): Promise<readonly PilotInputPlan[]> {
+    if (this.failList) throw new Error("list failed");
+    return this.plans;
+  }
   async getPlan(id: string): Promise<PilotInputPlan | undefined> {
     if (this.readGate) await this.readGate;
     if (this.failRead) throw new Error("read failed");
@@ -182,6 +186,19 @@ describe("PlannerPlanState", () => {
     await state.save();
     expect(state.view.savedPlans).toHaveLength(1);
     expect(state.view.savedPlans[0]?.title).toBe("After");
+  });
+
+  it("keeps a successful write successful when a later saved-list read fails", async () => {
+    const { state, repository } = owner();
+    repository.plans = [makePlan("existing", "Before")];
+    await state.initialize();
+    repository.failList = true;
+    state.edit({ ...state.view.activeDraft!, title: "After" });
+    const result = await state.save();
+    expect(result).toEqual({ ok: true });
+    expect(state.view.phase).toBe("editing");
+    expect(state.view.savedPlans[0]?.title).toBe("After");
+    expect(repository.plans[0]?.title).toBe("After");
   });
 
   it("saves an edited draft before opening a destination", async () => {

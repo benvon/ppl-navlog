@@ -136,8 +136,13 @@ export class PlannerPlanState {
     try {
       await this.repository.saveWorkingCopy(snapshot);
       this.dirty = false;
-      this.savedPlans = structuredClone(await this.repository.listPlans());
-      if (!this.activeDraft || this.activeDraft.id === snapshot.id) this.activeDraft = structuredClone(snapshot);
+      const prior = this.savedPlans.find((plan) => plan.id === snapshot.id);
+      const savedSnapshot = structuredClone({ ...snapshot, submissions: prior?.submissions ?? snapshot.submissions });
+      const index = this.savedPlans.findIndex((plan) => plan.id === snapshot.id);
+      this.savedPlans = index < 0
+        ? [...this.savedPlans, savedSnapshot]
+        : this.savedPlans.map((plan) => plan.id === snapshot.id ? savedSnapshot : plan);
+      if (!this.activeDraft || this.activeDraft.id === snapshot.id) this.activeDraft = structuredClone(savedSnapshot);
       const pending = this.accepted;
       if (pending) return await this.performDestination(pending);
       this.phase = "editing";
