@@ -19,7 +19,7 @@ const input = {
     head_sha: sha,
   },
   release: { tag_name: 'v0.1.0-rc.42', draft: false, prerelease: true },
-  artifact: { name: 'static-assets-12345-2', expired: false, workflow_run: { head_sha: sha } },
+  artifacts: [{ name: 'static-assets-12345-1', expired: false, workflow_run: { head_sha: sha } }],
   tagSha: sha,
   packageVersion: '0.1.0',
   productionConfig: {
@@ -39,7 +39,7 @@ const input = {
 describe('production promotion candidate', () => {
   it('accepts a stable tag on a published RC commit built by successful main CI', () => {
     expect(validateProductionCandidate(input)).toEqual({
-      stableTag: 'v0.1.0', rcTag: 'v0.1.0-rc.42', commitSha: sha, ciRunId: 12345, artifactName: 'static-assets-12345-2',
+      stableTag: 'v0.1.0', rcTag: 'v0.1.0-rc.42', commitSha: sha, ciRunId: 12345, artifactName: 'static-assets-12345-1',
     });
   });
 
@@ -50,8 +50,8 @@ describe('production promotion candidate', () => {
     [{ run: { ...input.run, conclusion: 'failure' } }, /successful main/],
     [{ run: { ...input.run, head_sha: 'b'.repeat(40) } }, /same commit/],
     [{ release: { ...input.release, prerelease: false } }, /prerelease/],
-    [{ artifact: { ...input.artifact, name: 'static-assets-12345-1' } }, /artifact/],
-    [{ artifact: { ...input.artifact, expired: true } }, /artifact/],
+    [{ artifacts: [{ ...input.artifacts[0], name: 'static-assets-12345-3' }] }, /artifact/],
+    [{ artifacts: [{ ...input.artifacts[0], expired: true }] }, /artifact/],
     [{ packageVersion: '0.2.0' }, /package version/],
     [{ productionConfig: { name: 'ppl-navlog', env: { production: { routes: [] } } } }, /two-domain/],
   ])('rejects an invalid stable-tag promotion source', (change, error) => {

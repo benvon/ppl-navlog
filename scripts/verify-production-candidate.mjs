@@ -1,10 +1,11 @@
 import { appendFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { selectValidatedArtifact } from './validated-artifact.mjs';
 
 const stableSemver = '(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)';
 const stablePattern = new RegExp(`^v${stableSemver}$`);
 
-export function validateProductionCandidate({ stableTag, rcTag, repository, run, release, artifact, tagSha, packageVersion, productionConfig }) {
+export function validateProductionCandidate({ stableTag, rcTag, repository, run, release, artifacts, tagSha, packageVersion, productionConfig }) {
   if (!stablePattern.test(stableTag ?? '')) throw new Error('Production tag must be stable vX.Y.Z.');
   const runNumber = run?.run_number;
   if (!Number.isSafeInteger(runNumber) || runNumber < 1 || rcTag !== `${stableTag}-rc.${runNumber}`) {
@@ -21,11 +22,8 @@ export function validateProductionCandidate({ stableTag, rcTag, repository, run,
   if (productionConfig?.name !== 'ppl-navlog' || productionConfig?.env?.production?.workers_dev !== false || !Array.isArray(routes) || routes.length !== 2 || !['navlog.benvon.net', 'navlog.pplstudyguide.com'].every((pattern) => routes.some((route) => route.pattern === pattern && route.custom_domain === true)) || !productionConfig.env.production.services?.some((service) => service.binding === 'RUNWAY_PICKER_API' && service.service === 'runway-picker-metar-api') || !productionConfig.env.production.ratelimits?.some((limit) => limit.name === 'API_RATE_LIMITER')) {
     throw new Error('Tagged commit lacks the required two-domain production Worker configuration.');
   }
-  const artifactName = `static-assets-${run.id}-${run.run_attempt}`;
-  if (!Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1 || artifact?.name !== artifactName || artifact?.expired !== false || artifact?.workflow_run?.head_sha !== tagSha) {
-    throw new Error('Validated artifact from the successful CI attempt is unavailable.');
-  }
-  return { stableTag, rcTag, commitSha: tagSha, ciRunId: run.id, artifactName };
+  const artifact = selectValidatedArtifact({ runId: run.id, runAttempt: run.run_attempt, sha: tagSha, artifacts });
+  return { stableTag, rcTag, commitSha: tagSha, ciRunId: run.id, artifactName: artifact.name };
 }
 
 if (process.argv[1]?.endsWith('/verify-production-candidate.mjs')) {
@@ -48,10 +46,9 @@ if (process.argv[1]?.endsWith('/verify-production-candidate.mjs')) {
     const rcTag = `${stableTag}-rc.${run.run_number}`;
     if (git('tag', '--list', rcTag) !== rcTag || git('rev-parse', `refs/tags/${rcTag}^{commit}`) !== tagSha) continue;
     const release = gh(`repos/${repository}/releases/tags/${rcTag}`);
-    const artifactName = `static-assets-${run.id}-${run.run_attempt}`;
-    const artifacts = gh(`repos/${repository}/actions/runs/${run.id}/artifacts?name=${artifactName}&per_page=100`).artifacts;
-    const artifact = artifacts?.find((item) => item.name === artifactName);
-    result = validateProductionCandidate({ stableTag, rcTag, repository, run, release, artifact, tagSha, packageVersion, productionConfig });
+    const artifactResponse = gh(`repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`);
+    if (!Number.isSafeInteger(artifactResponse.total_count) || artifactResponse.total_count > 100) throw new Error('CI artifact listing is incomplete.');
+    result = validateProductionCandidate({ stableTag, rcTag, repository, run, release, artifacts: artifactResponse.artifacts, tagSha, packageVersion, productionConfig });
     break;
   }
   if (!result) throw new Error('Stable tag must point to a successful published RC on main.');

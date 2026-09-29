@@ -19,7 +19,9 @@ Each merge should be monitored in GitHub Actions and Cloudflare. Confirm the `va
 
 ## Versioning and promotion policy
 
-`package.json` carries the next stable SemVer train. Every merged `main` CI run produces `v<package-version>-rc.<GitHub run number>`; run-number gaps from PR runs are harmless. Rerunning the same workflow reuses its RC tag only if it points to the same commit. Once the stable `v<package-version>` tag exists, CI refuses another RC on that train until `package.json` is bumped. Do not move tags.
+`package.json` carries the next stable SemVer train. Every merged `main` CI run produces `v<package-version>-rc.<GitHub run number>`; run-number gaps from PR runs are harmless. Rerunning the same workflow reuses its RC tag only if it points to the same commit. A failed-jobs-only rerun uses the artifact uploaded by the earlier successful validation job; a full rerun uses the latest validated artifact from that CI run. Once the stable `v<package-version>` tag exists, CI refuses another RC on that train until `package.json` is bumped. Do not move tags.
+
+The `v0.1.0` tag was pushed before its development RC was published, so production verification rejected it and neither environment deployed that commit. Leave the tag in place. The next candidate is on the `0.1.1` train; wait for its development deploy, smoke check, RC tag, and prerelease before creating a `v0.1.1` stable tag.
 
 The production Wrangler environment deploys one Worker named `ppl-navlog-production` with one static asset bundle and two custom domains: `navlog.benvon.net` and `navlog.pplstudyguide.com`. Both hostnames serve the same release and same-origin `/api/*` routes. Browser IndexedDB remains separate by origin. The production Worker binds `RUNWAY_PICKER_API` to `runway-picker-metar-api` and has its own rate-limit namespace, separate from development. Both Cloudflare zones are in the same account.
 
@@ -33,12 +35,12 @@ The production Wrangler environment deploys one Worker named `ppl-navlog-product
 ## Promoting a release candidate
 
 1. After this workflow and configuration reach protected `main`, select a **new** successful development RC produced from that commit or later. Confirm its development smoke and published prerelease completed. The CI artifact is retained for 14 days; promote while it is still available.
-2. Create an annotated stable tag (for example, `v0.1.0`) on the **same commit** as the selected RC tag, then push that stable tag. A signed tag may be used if your Git signing setup supports it. The tag push starts **Production promotion**; no workflow inputs or separate manual dispatch are needed. Do not tag a newer `main` commit unless that exact commit has the vetted RC and artifact.
+2. Create an annotated stable tag (for example, `v0.1.1`) on the **same commit** as the selected RC tag, then push that stable tag. A signed tag may be used if your Git signing setup supports it. The tag push starts **Production promotion**; no workflow inputs or separate manual dispatch are needed. Do not tag a newer `main` commit unless that exact commit has the vetted RC and artifact.
 
    ```sh
    git fetch origin main --tags
-   git tag -a v0.1.0 v0.1.0-rc.123 -m "Production release v0.1.0"
-   git push origin refs/tags/v0.1.0
+   git tag -a v0.1.1 v0.1.1-rc.123 -m "Production release v0.1.1"
+   git push origin refs/tags/v0.1.1
    ```
 
 3. The job verifies that the stable tag points to a published RC commit from a successful `main` push CI run, with a matching package version, production configuration, and unexpired artifact. It downloads the validated `dist/` artifact and deploys it **once** with `wrangler deploy --env production`. It checks static identity, API identity, security header, and the bound airport lookup through **each** hostname. Only after both pass does it publish the GitHub Release. The deployed build identity remains the promoted RC version because the artifact is not rebuilt or rewritten.
