@@ -22,3 +22,36 @@ describe("development API rate-limit budget", () => {
     expect(limiter.simple.limit).toBeGreaterThanOrEqual(maxRequests);
   });
 });
+
+describe("production deployment configuration", () => {
+  it("serves both production hostnames from one Worker with the required bindings", () => {
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "wrangler.jsonc"), "utf8")) as {
+      env: {
+        development: { ratelimits: Array<{ namespace_id: string }> };
+        production: {
+          workers_dev: boolean;
+          routes: Array<{ pattern: string; custom_domain: boolean }>;
+          assets: { binding: string; directory: string };
+          services: Array<{ binding: string; service: string }>;
+          ratelimits: Array<{ name: string; namespace_id: string; simple: { limit: number; period: number } }>;
+          vars: { APP_ENV: string };
+        };
+      };
+    };
+    const production = config.env.production;
+    expect(production.workers_dev).toBe(false);
+    expect(production.routes).toEqual([
+      { pattern: "navlog.benvon.net", custom_domain: true },
+      { pattern: "navlog.pplstudyguide.com", custom_domain: true },
+    ]);
+    expect(production.assets).toMatchObject({ binding: "ASSETS", directory: "./dist" });
+    expect(production.services).toContainEqual({ binding: "RUNWAY_PICKER_API", service: "runway-picker-metar-api" });
+    expect(production.vars.APP_ENV).toBe("production");
+    expect(production.ratelimits).toEqual([{
+      name: "API_RATE_LIMITER",
+      namespace_id: "90221002",
+      simple: { limit: 60, period: 60 },
+    }]);
+    expect(production.ratelimits[0]?.namespace_id).not.toBe(config.env.development.ratelimits[0]?.namespace_id);
+  });
+});
