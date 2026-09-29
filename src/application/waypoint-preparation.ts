@@ -608,9 +608,17 @@ const pilotWaypointEntries = (route: PreparedPilotRoute): WaypointOrderEntry[] =
   }),
 );
 
+const compareDestinationTie = (left: PreparedWaypoint, right: PreparedWaypoint): number => {
+  if (left.kind === "destination" && right.kind !== "destination") return 1;
+  if (right.kind === "destination" && left.kind !== "destination") return -1;
+  return 0;
+};
+
 const compareWaypointEntries = (left: WaypointOrderEntry, right: WaypointOrderEntry): number => {
   const distanceDifference = left.waypoint.routeDistanceNauticalMiles - right.waypoint.routeDistanceNauticalMiles;
   if (distanceDifference !== 0) return distanceDifference;
+  const destinationTieOrder = compareDestinationTie(left.waypoint, right.waypoint);
+  if (destinationTieOrder !== 0) return destinationTieOrder;
   if (left.authoredIndex !== undefined && right.authoredIndex !== undefined) return left.authoredIndex - right.authoredIndex;
   if (left.authoredIndex !== undefined) return -1;
   if (right.authoredIndex !== undefined) return 1;

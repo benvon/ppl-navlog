@@ -85,3 +85,5 @@
 ## Handoff to issue #28
 
 The sequential calculator calls `preparePilotRoute` once, requests TOC and transition-end placement at the proper starting waypoints, then requests TOD before calculating the cruise span that reaches it. It consumes the ordered positive spans and computes weather, headings, UTC, and fuel one row at a time. No row result may change a generated position already returned by this module.
+
+For coincident pilot and generated points, #28 must treat all labels at the shared route distance as one worksheet boundary: carry one UTC/fuel state, select weather once, and apply all phase and checkpoint choices before the next positive-distance row. Test the next row's actual phase and altitude, not only the ordered labels. When TOD coincides with a pilot checkpoint, use TOD descent inputs even if the checkpoint's outbound altitude selection conflicts; retain that authored selection for provenance.
