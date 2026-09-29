@@ -478,6 +478,32 @@ describe("validateWaypointGeometry", () => {
     }
   });
 
+  it("rejects a transition that skips the immediate checkpoint when naming its next checkpoint", () => {
+    const preparedRoute = routeAtDistances([0, 30, 50, 80]).prepared;
+    const result = validateWaypointGeometry({
+      route: preparedRoute,
+      toc: waypointAt("toc", "estimated-toc", "TOC", 6),
+      tod: waypointAt("tod", "estimated-tod", "TOD", 68),
+      transitions: [{
+        startPointId: "P0",
+        end: waypointAt("transition", "estimated-transition-end", "Transition end", 32),
+        nextPilotPointId: "P2",
+      }],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/P1 at NM 30 immediately follows P0/i);
+      expect(result.error.message).toMatch(/checkpoint|route/i);
+      expect(result.error.details).toMatchObject({
+        startPointId: "P0",
+        nextPilotPointId: "P2",
+        actualNextPilotPointId: "P1",
+      });
+      expect(result.error.details?.actualNextPilotPointDistanceNauticalMiles).toBeCloseTo(30, 8);
+    }
+  });
+
   it("rejects a transition whose estimated end crosses TOD", () => {
     const preparedRoute = routeAtDistances([0, 30, 80]).prepared;
     const result = validateWaypointGeometry({

@@ -387,6 +387,12 @@ type PreparedWaypointSpan = {
   readonly distanceNauticalMiles: number;
 };
 
+interface PreparedWaypointTransition {
+  readonly startPointId: string;
+  readonly end: PreparedWaypoint;
+  readonly nextPilotPointId: string;
+}
+
 const pilotWaypointEntries = (route: PreparedPilotRoute): WaypointOrderEntry[] => route.pilotPoints.map(
   ({ point: source, routeDistanceNauticalMiles }, index) => ({
     waypoint: {
@@ -496,16 +502,46 @@ export const orderPreparedWaypoints = (
   return success({ waypoints, spans: spans.value });
 };
 
+const findTransitionPilotPoints = (
+  route: PreparedPilotRoute,
+  transition: PreparedWaypointTransition,
+): DomainResult<{ readonly start: PreparedPilotPoint; readonly next: PreparedPilotPoint }> => {
+  const startIndex = route.pilotPoints.findIndex(({ point }) => point.id === transition.startPointId);
+  const start = route.pilotPoints[startIndex];
+  const next = route.pilotPoints.find(({ point }) => point.id === transition.nextPilotPointId);
+  const actualNext = startIndex >= 0 ? route.pilotPoints[startIndex + 1] : undefined;
+  if (start === undefined || next === undefined || actualNext === undefined) {
+    return invalidRoute(`Transition ${transition.end.label} must reference a pilot point and its following route checkpoint.`, {
+      transitionEndId: transition.end.id,
+      startPointId: transition.startPointId,
+      nextPilotPointId: transition.nextPilotPointId,
+    });
+  }
+  if (next.point.id !== actualNext.point.id) {
+    return invalidRoute(
+      `Transition from ${start.point.name} identifies ${next.point.name} at ${distanceLabel(next.routeDistanceNauticalMiles)} as its next checkpoint, but ${actualNext.point.name} at ${distanceLabel(actualNext.routeDistanceNauticalMiles)} immediately follows ${start.point.name} at ${distanceLabel(start.routeDistanceNauticalMiles)}. Correct the checkpoint selection or route.`,
+      {
+        startPointId: transition.startPointId,
+        startPointLabel: start.point.name,
+        startPointDistanceNauticalMiles: start.routeDistanceNauticalMiles,
+        nextPilotPointId: transition.nextPilotPointId,
+        nextPilotPointLabel: next.point.name,
+        nextPilotPointDistanceNauticalMiles: next.routeDistanceNauticalMiles,
+        actualNextPilotPointId: actualNext.point.id,
+        actualNextPilotPointLabel: actualNext.point.name,
+        actualNextPilotPointDistanceNauticalMiles: actualNext.routeDistanceNauticalMiles,
+      },
+    );
+  }
+  return success({ start, next });
+};
+
 /** Rejects estimated climb/descent geometry that cannot be ordered on the prepared route. */
 export const validateWaypointGeometry = (input: {
   readonly route: PreparedPilotRoute;
   readonly toc: PreparedWaypoint;
   readonly tod: PreparedWaypoint;
-  readonly transitions: readonly {
-    readonly startPointId: string;
-    readonly end: PreparedWaypoint;
-    readonly nextPilotPointId: string;
-  }[];
+  readonly transitions: readonly PreparedWaypointTransition[];
 }): DomainResult<true> => {
   const validateDistance = (waypoint: PreparedWaypoint): DomainResult<true> => {
     if (!Number.isFinite(waypoint.routeDistanceNauticalMiles) || waypoint.routeDistanceNauticalMiles < 0 ||
@@ -538,17 +574,11 @@ export const validateWaypointGeometry = (input: {
   }
 
   for (const transition of input.transitions) {
-    const start = input.route.pilotPoints.find(({ point }) => point.id === transition.startPointId);
-    const next = input.route.pilotPoints.find(({ point }) => point.id === transition.nextPilotPointId);
     const endDistance = validateDistance(transition.end);
     if (!endDistance.ok) return endDistance;
-    if (start === undefined || next === undefined) {
-      return invalidRoute(`Transition ${transition.end.label} references a pilot point that is not on the prepared route.`, {
-        transitionEndId: transition.end.id,
-        startPointId: transition.startPointId,
-        nextPilotPointId: transition.nextPilotPointId,
-      });
-    }
+    const pilotPoints = findTransitionPilotPoints(input.route, transition);
+    if (!pilotPoints.ok) return propagateFailure(pilotPoints);
+    const { start, next } = pilotPoints.value;
     if (start.routeDistanceNauticalMiles >= next.routeDistanceNauticalMiles) {
       return invalidRoute(`Transition ${transition.end.label} must start before its next pilot checkpoint. Review the authored route order.`, {
         startPointId: transition.startPointId,
