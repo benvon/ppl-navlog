@@ -211,6 +211,14 @@ const validPositive = (value: number, field: string): DomainResult<number> => {
 const distanceLabel = (distance: number): string => `NM ${Math.round(distance)}`;
 const preciseDistance = (distance: number): string => distance.toFixed(2);
 
+// Accumulated great-circle legs and a separately estimated phase distance can
+// differ by several floating-point operations at the same authored endpoint.
+// This remains many orders of magnitude below any meaningful route spacing.
+const equalWithinAccumulatedRouteRoundoff = (left: number, right: number): boolean =>
+  equalWithinArithmeticRoundoff(left, right) ||
+  (Number.isFinite(left) && Number.isFinite(right) &&
+    Math.abs(left - right) <= Number.EPSILON * 128 * Math.max(1, Math.abs(left), Math.abs(right)));
+
 interface TodAltitudes {
   readonly cruiseAltitudeFeetMsl: number;
   readonly patternAltitudeFeetMsl: number;
@@ -284,7 +292,7 @@ const estimateTodDescentDistance = (
     ...input.route.pilotPoints.map(({ routeDistanceNauticalMiles }) => routeDistanceNauticalMiles),
   ];
   const candidateDistanceNauticalMiles = anchors.find((distance) =>
-    equalWithinArithmeticRoundoff(calculatedDistance, distance)) ?? calculatedDistance;
+    equalWithinAccumulatedRouteRoundoff(calculatedDistance, distance)) ?? calculatedDistance;
   return success({
     finalLeg,
     durationMinutes,
@@ -535,13 +543,17 @@ export const estimateForwardVerticalWaypoint = (
   if (!validated.ok) return propagateFailure(validated);
   const located = locateForwardVerticalWaypoint(input, validated.value.durationMinutes, validated.value.trueAirspeedKnots);
   if (!located.ok) return propagateFailure(located);
-  const routeDistance = nauticalMiles(located.value.routeDistanceNauticalMiles);
+  const coincidentPilot = input.route.pilotPoints.find(({ point, routeDistanceNauticalMiles }) =>
+    (equalWithinAccumulatedRouteRoundoff(point.coordinate.latitude, located.value.coordinate.latitude) &&
+      equalWithinAccumulatedRouteRoundoff(point.coordinate.longitude, located.value.coordinate.longitude)) ||
+    equalWithinAccumulatedRouteRoundoff(located.value.routeDistanceNauticalMiles, routeDistanceNauticalMiles));
+  const routeDistance = nauticalMiles(coincidentPilot?.routeDistanceNauticalMiles ?? located.value.routeDistanceNauticalMiles);
   if (!routeDistance.ok) return propagateFailure(routeDistance);
   return success({
     id: input.id,
     kind: input.kind,
     label: input.label,
-    coordinate: located.value.coordinate,
+    coordinate: coincidentPilot?.point.coordinate ?? located.value.coordinate,
     routeDistanceNauticalMiles: routeDistance.value,
     sourceLegId: located.value.leg.sourceLeg.id,
     placement: {
