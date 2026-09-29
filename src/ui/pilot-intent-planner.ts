@@ -12,6 +12,7 @@ import type { PlanDraft, PlanRevision } from "../domain/route";
 import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 import { localDateTimeToUtcText, utcTextToLocalDateTime } from "./departure-time";
+import { PlannerPlanState, type PlannerPlanView } from "./planner-plan-state";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
@@ -23,6 +24,13 @@ export interface PilotIntentPlannerDependencies {
 
 const fieldNames = ["plan-title", "departure-time", "fuel-aboard", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
 type FieldName = typeof fieldNames[number];
+interface PlanControlAvailability {
+  readonly edit: boolean;
+  readonly destination: boolean;
+  readonly save: boolean;
+  readonly update: boolean;
+  readonly recovery: boolean;
+}
 const initialFields: Readonly<Record<FieldName, string>> = {
   "plan-title": "New study route", "departure-time": "", "fuel-aboard": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
   "departure-icao": "", "destination-icao": "", "departure-metar-icao": "",
@@ -36,20 +44,18 @@ export function renderPilotIntentPlanner(root: HTMLElement, dependencies: PilotI
 class PilotIntentPlanner {
   private activeStage: "aircraft" | "route" | "calculate" | "navlog" = "aircraft";
   private stageOpen: Record<"aircraft" | "route" | "calculate" | "navlog", boolean> = { aircraft: true, route: false, calculate: false, navlog: false };
-  private plans: readonly PilotInputPlan[] = [];
   private profiles: readonly AircraftProfile[] = [];
-  private current?: PilotInputPlan;
-  private fields: Record<string, string> = { ...initialFields };
+  private readonly planState: PlannerPlanState;
+  private renderedDraftId?: string;
+  private lastPlanPhase: PlannerPlanView["phase"] = "editing";
   private result?: PlanRevision;
   private inspected?: NavlogInspectionSelection;
-  private updateError = "";
-  private saveError = "";
+  private feedback: { readonly kind: "message" | "error"; readonly text: string } = { kind: "message", text: "" };
   private profileDraftDirty = false;
   private readonly openOverrideEditors = new Set<number>();
   private readonly touchedFields = new Set<string>();
   private updating = false;
   private savingProfile = false;
-  private saveQueue: Promise<void> = Promise.resolve();
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
   private clockTimer?: number;
@@ -57,18 +63,137 @@ class PilotIntentPlanner {
   private readonly handleSaveChanges = (): void => { void this.saveChanges(); };
 
   constructor(private readonly root: HTMLElement, private readonly dependencies: PilotIntentPlannerDependencies) {
+    this.planState = new PlannerPlanState(dependencies.repository, { ids: dependencies.ids, clock: dependencies.clock });
     this.status.setAttribute("role", "status");
     this.status.className = "planner-feedback";
+    this.planState.subscribe((view) => this.onPlanState(view));
   }
+
+  private get current(): PilotInputPlan | undefined { return this.planState.view.activeDraft; }
+  private get plans(): readonly PilotInputPlan[] { return this.planState.view.savedPlans; }
+  private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}); }
 
   async initialize(): Promise<void> {
     try {
-      await this.dependencies.repository.initialize();
-      [this.plans, this.profiles] = await Promise.all([this.dependencies.repository.listPlans(), this.dependencies.repository.listProfiles()]);
+      await this.planState.initialize();
+      this.profiles = await this.dependencies.repository.listProfiles();
+      const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
+      this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
+      this.activateStage(this.current?.selectedProfileId ? "route" : "aircraft");
+      this.showGuidance();
       this.render();
-      if (this.plans.length > 0) await this.open(this.plans[0]!.id);
-      else this.newPlan();
     } catch (error) { this.fail(error); this.render(); }
+  }
+
+  private onPlanState(view: PlannerPlanView): void {
+    const draftId = view.activeDraft?.id;
+    const destinationCompleted = this.lastPlanPhase === "switching" && view.phase === "editing";
+    const draftChanged = this.renderedDraftId !== undefined && draftId !== this.renderedDraftId;
+    if (draftChanged || (destinationCompleted && !view.error)) {
+      this.showActiveDraft(view);
+      return;
+    }
+    this.renderedDraftId = draftId;
+    this.lastPlanPhase = view.phase;
+    if (view.phase === "editing" && view.error) this.feedback = { kind: "error", text: view.error };
+    this.renderFeedback(view);
+    this.syncPlanControls(view);
+  }
+
+  private showActiveDraft(view: PlannerPlanView): void {
+    this.openOverrideEditors.clear();
+    this.result = undefined; this.inspected = undefined;
+    const selected = this.profiles.find((profile) => profile.id === view.activeDraft?.selectedProfileId);
+    this.profileDraftDirty = profileDraftDiffersFromSaved(view.activeDraft?.rawFields ?? {}, selected);
+    this.touchedFields.clear();
+    this.activateStage(view.activeDraft?.selectedProfileId ? "route" : "aircraft");
+    this.renderedDraftId = view.activeDraft?.id;
+    this.lastPlanPhase = view.phase;
+    this.showGuidance();
+    this.render();
+    this.content.querySelector<HTMLElement>(`[data-stage="${this.activeStage}"] summary`)?.focus();
+  }
+
+  private showGuidance(): void {
+    this.setStatus(this.current?.title !== "New study route"
+      ? "Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates."
+      : "Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates.");
+  }
+
+  private renderFeedback(view = this.planState.view): void {
+    const planMessage = view.error ? [view.status, view.error].filter(Boolean).join(": ") : view.status;
+    this.status.replaceChildren(document.createTextNode(view.phase === "editing" ? this.feedback.text : planMessage));
+    if (view.phase === "save-failed") {
+      const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry save";
+      retry.addEventListener("click", () => void this.retrySave()); this.status.append(" ", retry);
+      if (view.acceptedDestination) {
+        const discard = document.createElement("button"); discard.type = "button"; discard.textContent = "Discard draft and continue";
+        discard.addEventListener("click", () => { if (window.confirm("Discard the unsaved pilot inputs and continue to the requested plan?")) void this.planState.discardPending(); });
+        this.status.append(" ", discard);
+      }
+    }
+  }
+
+  private syncPlanControls(view = this.planState.view): void {
+    const availability = this.planControlAvailability(view);
+    this.syncEditorControls(!availability.edit);
+    this.syncDestinationControls(view, availability.destination);
+    this.syncActionControls(availability);
+    this.status.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = !availability.recovery; });
+  }
+
+  private planControlAvailability(view: PlannerPlanView): PlanControlAvailability {
+    const ready = !this.updating && !this.savingProfile;
+    const editing = view.phase === "editing";
+    const savingWithoutDestination = view.phase === "saving" && view.acceptedDestination === undefined;
+    const editingOrFailed = editing || view.phase === "save-failed";
+    const canNavigate = editing || savingWithoutDestination;
+    return {
+      edit: ready && editingOrFailed,
+      destination: ready && canNavigate,
+      save: ready && editingOrFailed,
+      update: ready && canNavigate && this.localError() === undefined,
+      recovery: ready && view.phase === "save-failed",
+    };
+  }
+
+  private syncEditorControls(lockEditing: boolean): void {
+    this.content.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>(".route-form input, .route-form select, .route-form textarea, .route-form button, [data-profile-editor] input, [data-profile-editor] select, [data-profile-editor] button, [name='selectedProfileId']").forEach((control) => {
+      if (lockEditing) {
+        if (control.dataset.plannerPriorDisabled === undefined) control.dataset.plannerPriorDisabled = String(control.disabled);
+        control.disabled = true;
+      } else if (control.dataset.plannerPriorDisabled !== undefined) {
+        control.disabled = control.dataset.plannerPriorDisabled === "true";
+        delete control.dataset.plannerPriorDisabled;
+      }
+    });
+  }
+
+  private syncDestinationControls(view: PlannerPlanView, destinationEnabled: boolean): void {
+    const selector = this.content.querySelector<HTMLSelectElement>("select[aria-label='Saved plan']");
+    if (selector) {
+      const selectedId = this.current?.id ?? "";
+      this.syncPlanSelector(selector, view.savedPlans, selectedId);
+      selector.disabled = !destinationEnabled;
+    }
+    const create = [...this.content.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "New plan");
+    if (create) create.disabled = !destinationEnabled;
+  }
+
+  private syncPlanSelector(selector: HTMLSelectElement, savedPlans: readonly PilotInputPlan[], selectedId: string): void {
+    const optionsMatch = selector.options.length === savedPlans.length + 1 && savedPlans.every((plan, index) => selector.options[index + 1]?.value === plan.id && selector.options[index + 1]?.textContent === plan.title);
+    if (!optionsMatch) {
+      selector.replaceChildren(new Option("Choose saved plan", ""));
+      savedPlans.forEach((plan) => selector.append(new Option(plan.title, plan.id, false, plan.id === selectedId)));
+    }
+    if (selector.value !== selectedId) selector.value = selectedId;
+  }
+
+  private syncActionControls(availability: PlanControlAvailability): void {
+    const save = this.content.querySelector<HTMLButtonElement>("[data-save-changes]");
+    if (save) save.disabled = !availability.save;
+    const update = this.content.querySelector<HTMLButtonElement>("[data-update-plan]");
+    if (update) update.disabled = !availability.update;
   }
 
   private render(): void {
@@ -84,11 +209,11 @@ class PilotIntentPlanner {
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
     shell.append(heading, this.status);
     const plans = document.createElement("section"); plans.className = "plan-picker"; plans.append(this.el("h3", "Saved pilot inputs"));
-    const planSelect = document.createElement("select"); planSelect.setAttribute("aria-label", "Saved plan"); planSelect.disabled = this.savingProfile || this.updating; planSelect.append(new Option("Choose saved plan", ""));
+    const planSelect = document.createElement("select"); planSelect.setAttribute("aria-label", "Saved plan"); planSelect.append(new Option("Choose saved plan", ""));
     this.plans.forEach((plan) => planSelect.append(new Option(plan.title, plan.id, false, plan.id === this.current?.id)));
     planSelect.addEventListener("change", () => { if (planSelect.value) void this.open(planSelect.value); });
     plans.append(planSelect);
-    const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.disabled = this.savingProfile; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
+    const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
     const groups: Record<"identity" | "timing" | "fuel" | "arrival" | "weather", HTMLElement> = {
       identity: document.createElement("fieldset"), timing: document.createElement("fieldset"), fuel: document.createElement("fieldset"), arrival: document.createElement("fieldset"), weather: document.createElement("fieldset"),
@@ -116,7 +241,7 @@ class PilotIntentPlanner {
           ...(selected ? { profileSnapshot: selected } : {}),
         };
         if (!selected) delete next.profileSnapshot;
-        this.current = next;
+        this.editDraft(next);
       }
       this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
       this.invalidate();
@@ -127,14 +252,14 @@ class PilotIntentPlanner {
     profileLabel.append(profile);
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.arrival, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.fields[input.name] = input.value; this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist(); });
     });
-    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.disabled = this.updating || this.localError() !== undefined; update.addEventListener("click", () => void this.update());
+    const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
     const aircraftStage = this.stage("aircraft", `Aircraft · ${this.profiles.find((p) => p.id === this.current?.selectedProfileId)?.name ?? "Select a profile"}`, profileLabel, this.renderProfileEditor());
     const routeStage = this.stage("route", "Route information", form);
-    const saveChanges = document.createElement("button"); saveChanges.type = "button"; saveChanges.dataset.saveChanges = "true"; saveChanges.textContent = "Save changes"; saveChanges.disabled = this.savingProfile; saveChanges.addEventListener("click", this.handleSaveChanges);
+    const saveChanges = document.createElement("button"); saveChanges.type = "button"; saveChanges.dataset.saveChanges = "true"; saveChanges.textContent = "Save changes"; saveChanges.addEventListener("click", this.handleSaveChanges);
     routeStage.append(saveChanges);
     const continueButton = document.createElement("button"); continueButton.type = "button"; continueButton.textContent = "Continue to Calculate";
     continueButton.addEventListener("click", () => { this.activateStage("calculate"); this.content.querySelector<HTMLElement>('[data-stage="calculate"] summary')?.focus(); });
@@ -145,7 +270,6 @@ class PilotIntentPlanner {
     shell.append(aircraftStage, routeStage, calculateStage, navlogStage);
     this.content.append(shell);
     this.refreshUpdateGate();
-    if (this.updating || this.savingProfile) shell.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button").forEach((control) => { control.disabled = true; });
     if (this.root.firstChild === null) this.root.append(this.content); else if (!this.root.contains(this.content)) this.root.replaceChildren(this.content);
     this.startClock();
   }
@@ -255,12 +379,12 @@ class PilotIntentPlanner {
       const current = this.current ?? this.blankPlan();
       const altitudes = [...current.cruiseAltitudeTexts];
       altitudes.splice(Math.max(0, altitudes.length - 1), 0, "4500");
-      this.current = this.withIdentity({
+      this.editDraft(this.withIdentity({
         ...current,
         checkpoints: [...current.checkpoints, { name: "", coordinateText: "" }],
         cruiseAltitudeTexts: altitudes,
         overrideReasons: {},
-      });
+      }));
       this.invalidate();
       this.render();
       void this.persist().then(() => {
@@ -313,7 +437,7 @@ class PilotIntentPlanner {
     nextCheckpoints.splice(index, 1);
     const altitudes = [...current.cruiseAltitudeTexts];
     if (index < altitudes.length - 1) altitudes.splice(index, 1);
-    this.current = this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} });
+    this.editDraft(this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} }));
     this.invalidate();
     this.render();
     void this.persist().then(() => {
@@ -330,8 +454,8 @@ class PilotIntentPlanner {
       group.append(this.input(`override-tas-${legIndex}`, `Leg ${legIndex + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${legIndex}`, `Leg ${legIndex + 1} override reason`, this.current?.overrideReasons[`tas-${legIndex}`] ?? ""));
       const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${legIndex + 1}`;
       restore.addEventListener("click", () => {
-        delete this.fields[`override-tas-${legIndex}`]; delete this.fields[`override-reason-${legIndex}`];
-        if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.current = { ...this.current, overrideReasons: reasons }; }
+        const fields = this.fields; delete fields[`override-tas-${legIndex}`]; delete fields[`override-reason-${legIndex}`];
+        if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.editDraft({ ...this.current, rawFields: fields, overrideReasons: reasons }); }
         this.openOverrideEditors.delete(legIndex); this.invalidate(); this.render(); void this.persist();
       });
       group.append(restore);
@@ -348,10 +472,10 @@ class PilotIntentPlanner {
     const values: readonly [string, string][] = [["profile-name", "Profile name"], ["cruiseTasKnots", "Cruise TAS (kt)"], ["cruiseFuelFlowGallonsPerHour", "Cruise fuel flow (gal/hr)"], ["climbRateFeetPerMinute", "Climb rate (ft/min)"], ["climbTasKnots", "Climb TAS (kt)"], ["climbFuelFlowGallonsPerHour", "Climb fuel flow (gal/hr)"], ["descentRateFeetPerMinute", "Descent rate (ft/min)"], ["descentTasKnots", "Descent TAS (kt)"], ["descentFuelFlowGallonsPerHour", "Descent fuel flow (gal/hr)"], ["usableFuelGallons", "Usable fuel (gal, optional)"], ["compass-deviation-card", "Compass deviation entries (e.g. 000:+1, 090:-1)"]];
     values.forEach(([id, label]) => form.append(this.input(id, label, this.fields[`profile-${id}`] ?? "")));
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.fields[`profile-${input.name}`] = input.value; this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => { this.fields[`profile-${input.name}`] = input.value; void this.persist(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.setField(`profile-${input.name}`, input.value); this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("blur", () => { this.setField(`profile-${input.name}`, input.value); void this.persist(); });
     });
-    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; save.disabled = this.savingProfile; form.append(save); section.append(form); return section;
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; form.append(save); section.append(form); return section;
   }
   private async saveProfile(form: HTMLFormElement): Promise<void> {
     try {
@@ -397,7 +521,7 @@ class PilotIntentPlanner {
       this.render();
       await this.dependencies.repository.saveProfile(saved);
       this.profiles = [...this.profiles, saved];
-      if (this.current) this.current = { ...this.current, selectedProfileId: saved.id, profileSnapshot: saved };
+      if (this.current) this.editDraft({ ...this.current, selectedProfileId: saved.id, profileSnapshot: saved });
       this.invalidate();
       this.profileDraftDirty = false;
       this.profileEditorOpen = false;
@@ -415,59 +539,33 @@ class PilotIntentPlanner {
     }
   }
   private el(tag: "h3", value: string): HTMLElement { const e = document.createElement(tag); e.textContent = value; return e; }
-  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: this.fields["plan-title"] ?? "New study route", rawFields: { ...this.fields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
-  private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...this.fields }, title: this.fields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
+  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: "New study route", rawFields: { ...initialFields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
+  private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...plan.rawFields }, title: plan.rawFields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
+  private editDraft(plan: PilotInputPlan): void { this.planState.edit(plan); }
+  private setField(name: string, value: string): void {
+    const current = this.current;
+    if (!current) return;
+    this.planState.edit({ ...current, rawFields: { ...current.rawFields, [name]: value }, title: name === "plan-title" ? value : current.title, updatedAt: this.dependencies.clock.now().toISOString() });
+  }
   private newPlan(): void {
     if (this.updating || this.savingProfile) return;
     const selectedProfile = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
-    this.openOverrideEditors.clear();
-    this.fields = { ...initialFields };
-    this.current = { ...this.blankPlan(), ...(selectedProfile ? { selectedProfileId: selectedProfile.id, profileSnapshot: selectedProfile } : {}) };
-    this.result = undefined;
-    this.inspected = undefined;
-    this.updateError = "";
-    this.profileDraftDirty = false;
-    this.touchedFields.clear();
-    this.activateStage(selectedProfile ? "route" : "aircraft");
-    this.setStatus("Enter pilot inputs. Save changes stores the inputs; Update navlog retrieves current weather and calculates.");
-    this.render();
+    void this.planState.requestNew(() => ({ ...this.blankPlan(), ...(selectedProfile ? { selectedProfileId: selectedProfile.id, profileSnapshot: selectedProfile } : {}) }));
   }
 
-  private async open(planId: string): Promise<void> {
-    if (this.updating || this.savingProfile) return;
-    await this.saveQueue.catch(() => undefined);
-    if (this.updating || this.savingProfile) return;
-    const plan = this.plans.find((candidate) => candidate.id === planId);
-    if (!plan) {
-      this.fail(new Error("Saved plan no longer exists."));
-      return;
-    }
-    this.openOverrideEditors.clear();
-    this.current = plan;
-    this.fields = restorePilotFields(plan.rawFields);
-    this.result = undefined;
-    this.inspected = undefined;
-    this.updateError = "";
-    const selectedProfile = this.profiles.find((profile) => profile.id === plan.selectedProfileId);
-    this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selectedProfile);
-    this.touchedFields.clear();
-    this.activateStage("route");
-    this.setStatus("Saved pilot inputs are ready to edit. Save changes stores edits; Update navlog retrieves current weather and calculates.");
-    this.render();
-  }
+  private async open(planId: string): Promise<void> { if (this.updating || this.savingProfile) return; await this.planState.requestOpen(planId); }
   private captureStructured(form: HTMLFormElement): void {
     const get = (selector: string) => form.querySelector<HTMLInputElement>(`[name="${selector}"]`)?.value ?? "";
     const checkpoints = (this.current?.checkpoints ?? []).map((_point, i) => ({ name: get(`checkpoint-name-${i}`), coordinateText: get(`checkpoint-coordinate-${i}`) }));
     const cruiseAltitudeTexts = [...form.querySelectorAll<HTMLInputElement>("input[name^='altitude-']")].map((x) => x.value);
     const overrideReasons = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("input[name^='override-reason-']")].map((x) => [`tas-${x.name.slice("override-reason-".length)}`, x.value]));
-    [...form.querySelectorAll<HTMLInputElement>("input[name^='override-tas-']")].forEach((x) => { this.fields[x.name] = x.value; });
-    this.fields = { ...this.fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) };
-    this.current = this.withIdentity({ ...(this.current ?? this.blankPlan()), checkpoints, cruiseAltitudeTexts, overrideReasons });
+    const fields = this.fields;
+    [...form.querySelectorAll<HTMLInputElement>("input[name^='override-tas-']")].forEach((x) => { fields[x.name] = x.value; });
+    this.editDraft(this.withIdentity({ ...(this.current ?? this.blankPlan()), rawFields: { ...fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) }, checkpoints, cruiseAltitudeTexts, overrideReasons }));
   }
   private invalidate(): void {
     this.result = undefined;
     this.inspected = undefined;
-    this.updateError = "";
     this.setStatus("Inputs changed. Save changes or Update navlog to use the current inputs.");
     const output = this.content.querySelector("[data-current-result]");
     output?.replaceWith(document.createTextNode("Update navlog to retrieve current weather and display a calculated navlog."));
@@ -477,42 +575,30 @@ class PilotIntentPlanner {
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
     ) || Object.values(this.current?.overrideReasons ?? {}).some((reason) => reason.trim() !== "");
     this.openOverrideEditors.clear();
-    this.fields = Object.fromEntries(Object.entries(this.fields).filter(([key]) => !/^override-(?:tas|reason)-\d+$/.test(key)));
-    if (this.current) this.current = { ...this.current, overrideReasons: {} };
+    const fields = Object.fromEntries(Object.entries(this.fields).filter(([key]) => !/^override-(?:tas|reason)-\d+$/.test(key)));
+    if (this.current) this.editDraft({ ...this.current, rawFields: fields, overrideReasons: {} });
     return hadOverrides;
   }
   private async saveChanges(): Promise<void> {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
-    this.updateError = "";
-    const button = this.content.querySelector<HTMLButtonElement>("button[data-save-changes]");
-    if (button) button.disabled = true;
-    try {
-      await this.persist("Changes saved.");
-    } finally {
-      if (button) button.disabled = this.savingProfile || this.updating;
-    }
+    const result = this.planState.view.phase === "save-failed" ? await this.planState.retry() : await this.planState.save();
+    if (result.ok) { this.refreshUpdateGate(); this.setStatus("Changes saved."); }
+    else if (result.reason === "failed") this.refreshUpdateGate();
+  }
+  private async retrySave(): Promise<void> {
+    const result = await this.planState.retry();
+    if (result.ok) this.setStatus("Pilot inputs saved.");
   }
   private async persist(successMessage = "Pilot inputs saved."): Promise<void> {
     if (!this.current) return;
-    const snapshot = this.withIdentity({ ...this.current, rawFields: { ...this.fields } });
-    this.current = snapshot;
-    const operation = this.saveQueue
-      .catch(() => undefined)
-      .then(async () => {
-        await this.dependencies.repository.saveWorkingCopy(snapshot);
-        this.plans = [...this.plans.filter((plan) => plan.id !== snapshot.id), snapshot];
-        this.refreshUpdateGate();
-        this.saveError = "";
-        this.setStatus(successMessage);
-      });
-    this.saveQueue = operation;
-    try {
-      await operation;
-    } catch (error) {
-      this.fail(error, "save");
-    }
-    // Do not replace the editor while focus leaves a field.
+    // Browser events in the same turn (including blur followed immediately by
+    // New/Open) contribute to the same owner snapshot before the write starts.
+    await Promise.resolve();
+    if (this.planState.view.phase !== "editing") return;
+    const result = await this.planState.save();
+    if (result.ok) { this.refreshUpdateGate(); this.setStatus(successMessage); }
+    else if (result.reason === "failed") this.refreshUpdateGate();
   }
   private localError(): string | undefined {
     return validateLocalInputs(this.fields, this.current, this.profiles, this.profileDraftDirty);
@@ -528,28 +614,28 @@ class PilotIntentPlanner {
     this.render();
     try {
       if (!this.current) throw new Error("Open a plan before updating it.");
-      await this.saveQueue.catch(() => undefined);
+      if (this.planState.view.phase === "save-failed") throw new Error(this.planState.view.error ?? "Save the current pilot inputs before updating the navlog.");
+      const saveResult = await this.planState.save();
+      if (!saveResult.ok) throw new Error(saveResult.error ?? "Pilot inputs could not be saved; update stopped.");
       const invalid = this.localError();
       if (invalid) throw new Error(invalid);
       this.setStatus("Updating navlog…");
       const current = this.current;
       const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
-      this.current = { ...current, profileSnapshot: selectedProfile };
-      await this.dependencies.repository.submitInputs(this.current);
-      this.saveError = "";
+      this.editDraft({ ...current, profileSnapshot: selectedProfile });
+      await this.dependencies.repository.submitInputs(this.current!);
       const { draft, profile } = await this.prepareDraft();
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;
-      this.updateError = "";
       this.setStatus("Plan updated with current route weather.");
       this.activateStage("navlog");
     } catch (error) {
-      this.fail(error, "update");
+      this.fail(error);
       this.activateStage("calculate");
     } finally {
       this.updating = false;
       this.render();
-      this.content.querySelector<HTMLElement>(`[data-stage="${this.updateError ? "calculate" : "navlog"}"] summary`)?.focus();
+      this.content.querySelector<HTMLElement>(`[data-stage="${this.feedback.kind === "error" ? "calculate" : "navlog"}"] summary`)?.focus();
     }
   }
   private async prepareDraft(): Promise<{ readonly draft: PlanDraft; readonly profile: AircraftProfile }> {
@@ -655,12 +741,17 @@ class PilotIntentPlanner {
       calculationSnapshot: calc.calculationSnapshot, warnings: calc.warnings,
     };
   }
-  private fail(error: unknown, kind: "update" | "save" = "update"): void { this.result = undefined; const message = error instanceof Error ? error.message : "The requested action failed."; if (kind === "save") this.saveError = message; else this.updateError = message; this.setStatus(""); }
-  private setStatus(message: string): void { this.status.textContent = this.saveError || this.updateError || message; }
+  private fail(error: unknown): void {
+    this.result = undefined;
+    this.feedback = { kind: "error", text: error instanceof Error ? error.message : "The requested action failed." };
+    this.renderFeedback();
+  }
+  private setStatus(message: string): void {
+    this.feedback = { kind: "message", text: message };
+    this.renderFeedback();
+  }
   private refreshUpdateGate(): void {
-    const update = this.content.querySelector<HTMLButtonElement>("button[data-update-plan]");
     const reason = this.localError();
-    if (update) update.disabled = this.updating || reason !== undefined;
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.refreshCurrentUtcControl();
@@ -672,6 +763,7 @@ class PilotIntentPlanner {
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
     });
+    this.syncPlanControls();
   }
 
   private refreshCurrentUtcControl(): void {
