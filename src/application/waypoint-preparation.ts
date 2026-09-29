@@ -1,6 +1,6 @@
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
+import { coordinate, type Coordinate } from "../domain/coordinates";
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
-import type { Coordinate } from "../domain/coordinates";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
 import { nauticalMiles } from "../domain/units";
 import type { Wind } from "../domain/wind";
@@ -70,6 +70,8 @@ export const preparePilotRoute = (route: RouteDefinition): DomainResult<Prepared
     if (!point.id || allIds.has(point.id)) {
       return invalidRoute("Pilot route point IDs must be present and unique.", { pointId: point.id });
     }
+    const checkedCoordinate = coordinate(point.coordinate.latitude, point.coordinate.longitude);
+    if (!checkedCoordinate.ok) return propagateFailure(checkedCoordinate);
     allIds.add(point.id);
     pointById.set(point.id, point);
   }

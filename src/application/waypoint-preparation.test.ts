@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { coordinate } from "../domain/coordinates";
+import { coordinate, type Coordinate } from "../domain/coordinates";
 import type { DomainResult } from "../domain/errors";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
 import { preparePilotRoute } from "./waypoint-preparation";
@@ -91,6 +91,18 @@ describe("preparePilotRoute", () => {
     expect(preparePilotRoute(route([a, b, c], [leg("AB", "A", "B"), leg("AC", "A", "C")]))).toMatchObject({
       ok: false,
       error: { code: "ROUTE_GEOMETRY_ERROR" },
+    });
+  });
+
+  it("rejects persisted point coordinates outside the supported latitude and longitude ranges", () => {
+    const invalidPoint: RoutePoint = {
+      ...point("invalid", 1),
+      coordinate: { latitude: 100, longitude: 1 } as Coordinate,
+    };
+
+    expect(preparePilotRoute(route([point("A", 0), invalidPoint], [leg("AB", "A", "invalid")]))).toMatchObject({
+      ok: false,
+      error: { code: "OUT_OF_RANGE" },
     });
   });
 });
