@@ -108,9 +108,13 @@ jobs:
       - name: Install deployment tooling
         run: npm ci
 
+      - name: Select validated artifact from this CI run
+        id: artifact
+        run: node scripts/validated-artifact.mjs
+
       - name: Download validated artifact from this CI run
         env:
-          ARTIFACT_NAME: static-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
         run: gh run download "$GITHUB_RUN_ID" --name "$ARTIFACT_NAME" --dir dist
 
       - name: Verify artifact identity
