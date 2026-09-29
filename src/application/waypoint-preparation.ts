@@ -208,6 +208,7 @@ const validPositive = (value: number, field: string): DomainResult<number> => {
 };
 
 const distanceLabel = (distance: number): string => `NM ${Math.round(distance)}`;
+const preciseDistance = (distance: number): string => distance.toFixed(2);
 
 interface TodAltitudes {
   readonly cruiseAltitudeFeetMsl: number;
@@ -438,6 +439,29 @@ const estimateForwardVerticalLeg = (
   return success({ kind: "placed", traveled, coordinate: position.value, routeDistanceNauticalMiles: segmentStart + traveled });
 };
 
+const forwardVerticalOverflowFailure = (
+  input: ForwardVerticalWaypointInput,
+  traveledDistanceNauticalMiles: number,
+  remainingPhaseTimeMinutes: number,
+): DomainResult<never> => {
+  const { route } = input;
+  const destination = route.pilotPoints[route.pilotPoints.length - 1]?.point;
+  const availableDistance = route.totalRouteDistanceNauticalMiles - input.startRouteDistanceNauticalMiles;
+  return invalidRoute(
+    `${input.label} estimate extends beyond destination ${destination?.name ?? "route endpoint"} at ${distanceLabel(route.totalRouteDistanceNauticalMiles)}. The route provides ${preciseDistance(availableDistance)} NM from the start point; ${preciseDistance(traveledDistanceNauticalMiles)} NM can be traveled before the destination, with ${preciseDistance(remainingPhaseTimeMinutes)} minutes remaining in the phase. Review the target altitude, vertical performance, or route.`,
+    {
+      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
+      destinationPointId: destination?.id ?? null,
+      destinationPointName: destination?.name ?? null,
+      destinationRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+      availableDistanceNauticalMiles: availableDistance,
+      traveledDistanceNauticalMiles,
+      remainingPhaseTimeMinutes,
+      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+    },
+  );
+};
+
 const locateForwardVerticalWaypoint = (
   input: ForwardVerticalWaypointInput,
   durationMinutes: number,
@@ -467,11 +491,7 @@ const locateForwardVerticalWaypoint = (
     cursorDistance = leg.routeEndDistanceNauticalMiles;
   }
   if (remainingMinutes > 1e-10 || placedLeg === undefined || placedCoordinate === undefined) {
-    return invalidRoute(`${input.label} estimate extends beyond the prepared route.`, {
-      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
-      estimatedDistanceNauticalMiles: estimatedDistance,
-      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
-    });
+    return forwardVerticalOverflowFailure(input, estimatedDistance, remainingMinutes);
   }
   return success({
     leg: placedLeg,

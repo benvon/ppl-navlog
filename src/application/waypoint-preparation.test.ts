@@ -232,9 +232,28 @@ describe("estimateForwardVerticalWaypoint", () => {
       startingAltitudeFeetMsl: 5_000,
       targetAltitudeFeetMsl: 4_000,
     }))).toMatchObject({ ok: false });
-    expect(estimateForwardVerticalWaypoint(verticalInput({ startRouteDistanceNauticalMiles: 119 }))).toMatchObject({
-      ok: false,
-      error: { code: "ROUTE_GEOMETRY_ERROR" },
+  });
+
+  it("reports destination, available distance, and remaining phase time on route overflow", () => {
+    const route = straightPreparedRoute(2);
+    const availableDistance = route.totalRouteDistanceNauticalMiles - 119;
+    const remainingPhaseTime = 6 - availableDistance;
+    const result = estimateForwardVerticalWaypoint(verticalInput({ route, startRouteDistanceNauticalMiles: 119 }));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("ROUTE_GEOMETRY_ERROR");
+    expect(result.error.message).toContain("destination destination at NM 120");
+    expect(result.error.message).toContain(`${availableDistance.toFixed(2)} NM from the start point; ${availableDistance.toFixed(2)} NM can be traveled`);
+    expect(result.error.message).toContain(`${remainingPhaseTime.toFixed(2)} minutes remaining in the phase`);
+    expect(result.error.message).toContain("Review the target altitude, vertical performance, or route.");
+    expect(result.error.details).toMatchObject({
+      destinationPointId: "destination",
+      destinationPointName: "destination",
+      destinationRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+      availableDistanceNauticalMiles: availableDistance,
+      traveledDistanceNauticalMiles: availableDistance,
+      remainingPhaseTimeMinutes: remainingPhaseTime,
     });
   });
 });
