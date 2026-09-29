@@ -1,0 +1,113 @@
+name: Production promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: Release candidate tag to promote (vX.Y.Z-rc.N)
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful main push CI run ID that built the candidate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-promotion
+
+jobs:
+  promote:
+    name: Promote release candidate to production
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://navlog.benvon.net
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      RC_TAG: ${{ inputs.rc_tag }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout workflow source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Verify production candidate and CI run
+        id: candidate
+        run: node scripts/verify-production-candidate.mjs
+
+      - name: Checkout exact release candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.candidate.outputs.commit_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install deployment tooling
+        run: npm ci
+
+      - name: Check production credentials
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Production Cloudflare token is missing.' >&2; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Production Cloudflare account ID is missing.' >&2; exit 1; }
+
+      - name: Download artifact from the verified CI run attempt
+        env:
+          ARTIFACT_NAME: ${{ steps.candidate.outputs.artifact_name }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          gh run download "$CI_RUN_ID" --name "$ARTIFACT_NAME" --dir dist
+          RELEASE_VERSION="$RC_TAG" env GITHUB_SHA="$CANDIDATE_SHA" node scripts/verify-deployment-artifact.mjs
+
+      - name: Deploy to production
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: npx wrangler deploy --env production --var "APP_ENV:production" --var "APP_VERSION:$RC_TAG" --var "APP_COMMIT_SHA:$CANDIDATE_SHA"
+
+      - name: Smoke deployed application
+        env:
+          RELEASE_VERSION: ${{ steps.candidate.outputs.rc_tag }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: env GITHUB_SHA="$CANDIDATE_SHA" node scripts/smoke-production.mjs
+
+      - name: Create stable release tag
+        env:
+          STABLE_TAG: ${{ steps.candidate.outputs.stable_tag }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/$STABLE_TAG"; then
+            test "$(git rev-list -n 1 "$STABLE_TAG")" = "$CANDIDATE_SHA" || { echo 'Stable tag points to another commit.' >&2; exit 1; }
+          else
+            git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -a "$STABLE_TAG" -m "Production release $STABLE_TAG" "$CANDIDATE_SHA"
+            git push origin "refs/tags/$STABLE_TAG"
+          fi
+
+      - name: Publish GitHub release
+        env:
+          STABLE_TAG: ${{ steps.candidate.outputs.stable_tag }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: |
+          if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
+            echo 'Stable release already published.'
+          else
+            gh release create "$STABLE_TAG" --verify-tag --latest --title "$STABLE_TAG" --notes "Production release for $CANDIDATE_SHA, deployed and smoke-tested at https://navlog.benvon.net and https://navlog.pplstudyguide.com."
+          fi
