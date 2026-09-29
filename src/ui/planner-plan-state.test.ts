@@ -115,7 +115,7 @@ describe("PlannerPlanState", () => {
     expect(state.view.phase).toBe("editing");
   });
 
-  it("does not auto retry on edit or blur-like save after failure; explicit discard keeps draft", async () => {
+  it("does not auto retry on edit or blur-like save after failure and rejects discard without a destination", async () => {
     const { state, repository } = owner();
     await state.initialize();
     repository.failWrite = true;
@@ -124,10 +124,25 @@ describe("PlannerPlanState", () => {
     state.edit({ ...state.view.activeDraft!, title: "Kept draft" });
     await state.save();
     expect(repository.writes).toHaveLength(attempts);
-    state.discardPending();
-    expect(state.view.phase).toBe("editing");
+    const result = await state.discardPending();
+    expect(result).toEqual({ ok: false, reason: "unavailable" });
+    expect(state.view.phase).toBe("save-failed");
     expect(state.view.activeDraft?.title).toBe("Kept draft");
     expect(state.view.acceptedDestination).toBeUndefined();
+    expect(state.view.error).toBe("write failed");
+  });
+
+  it("retries the latest edited draft after a failed save without a destination", async () => {
+    const { state, repository } = owner();
+    await state.initialize();
+    repository.failWrite = true;
+    await state.save();
+    state.edit({ ...state.view.activeDraft!, title: "Latest draft" });
+    repository.failWrite = false;
+    await state.retry();
+    expect(repository.writes.at(-1)?.title).toBe("Latest draft");
+    expect(state.view.savedPlans[0]?.title).toBe("Latest draft");
+    expect(state.view.phase).toBe("editing");
   });
 
   it("retains the active draft when Open is missing or its read fails", async () => {

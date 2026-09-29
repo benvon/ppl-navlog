@@ -92,21 +92,15 @@ export class PlannerPlanState {
   }
 
   public discardPending(): Promise<PlannerCommandResult> {
-    if (this.phase !== "save-failed") return Promise.resolve(unavailable);
+    if (this.phase !== "save-failed" || !this.accepted) return Promise.resolve(unavailable);
     const pending = this.accepted;
     this.dirty = false;
-    if (pending) {
-      this.phase = "switching";
-      this.error = undefined;
-      this.publish();
-      const operation = this.performDestination(pending);
-      this.operation = operation;
-      return operation.finally(() => { if (this.operation === operation) this.operation = undefined; });
-    }
+    this.phase = "switching";
     this.error = undefined;
-    this.phase = "editing";
     this.publish();
-    return Promise.resolve({ ok: true });
+    const operation = this.performDestination(pending);
+    this.operation = operation;
+    return operation.finally(() => { if (this.operation === operation) this.operation = undefined; });
   }
 
   private requestDestination(request: DestinationRequest): Promise<PlannerCommandResult> {
