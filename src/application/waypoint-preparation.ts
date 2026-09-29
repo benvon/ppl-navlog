@@ -2,7 +2,7 @@ import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } f
 import { coordinate, type Coordinate } from "../domain/coordinates";
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
 import type { RouteDefinition, RoutePoint, UserRouteLeg } from "../domain/route";
-import { feetMsl, nauticalMiles, positiveKnots, trueCourse } from "../domain/units";
+import { feetMsl, nauticalMiles, positiveKnots, trueCourse, type Knots } from "../domain/units";
 import type { Wind } from "../domain/wind";
 import { solveWindTriangle } from "../domain/wind-triangle";
 
@@ -53,8 +53,7 @@ export interface PreparedWaypoint {
 const invalidRoute = (message: string, details?: Readonly<Record<string, string | number | boolean | null>>): DomainResult<never> =>
   failure("ROUTE_GEOMETRY_ERROR", message, details);
 
-/** Validates the pilot's ordered route and prepares its cumulative great-circle geometry. */
-export const preparePilotRoute = (route: RouteDefinition): DomainResult<PreparedPilotRoute> => {
+const validatePilotRouteShape = (route: RouteDefinition): DomainResult<never> | undefined => {
   if (route.points.length < 2 || route.legs.length === 0) {
     return invalidRoute("A pilot route requires at least two points and one leg.");
   }
@@ -64,24 +63,86 @@ export const preparePilotRoute = (route: RouteDefinition): DomainResult<Prepared
       legCount: route.legs.length,
     });
   }
+  return undefined;
+};
 
+const indexPilotRoutePoints = (route: RouteDefinition): DomainResult<Map<string, RoutePoint>> => {
   const pointById = new Map<string, RoutePoint>();
-  const allIds = new Set<string>();
   for (const point of route.points) {
-    if (!point.id || allIds.has(point.id)) {
+    if (!point.id || pointById.has(point.id)) {
       return invalidRoute("Pilot route point IDs must be present and unique.", { pointId: point.id });
     }
     const checkedCoordinate = coordinate(point.coordinate.latitude, point.coordinate.longitude);
     if (!checkedCoordinate.ok) return propagateFailure(checkedCoordinate);
-    allIds.add(point.id);
     pointById.set(point.id, point);
   }
+  return success(pointById);
+};
+
+const validatePilotRouteLegIds = (route: RouteDefinition, pointById: ReadonlyMap<string, RoutePoint>): DomainResult<never> | undefined => {
+  const allIds = new Set(pointById.keys());
   for (const leg of route.legs) {
     if (!leg.id || allIds.has(leg.id)) {
       return invalidRoute("Pilot route point and leg IDs must be present and unique.", { legId: leg.id });
     }
     allIds.add(leg.id);
   }
+  return undefined;
+};
+
+const preparePilotRouteLeg = (
+  point: RoutePoint,
+  nextPoint: RoutePoint,
+  leg: UserRouteLeg,
+  pointById: ReadonlyMap<string, RoutePoint>,
+  accumulatedDistance: number,
+): DomainResult<{ readonly preparedLeg: PreparedPilotLeg; readonly nextAccumulatedDistance: number }> => {
+  if (!pointById.has(leg.fromPointId) || !pointById.has(leg.toPointId)) {
+    return invalidRoute("A route leg references a point that does not exist.", {
+      legId: leg.id,
+      fromPointId: leg.fromPointId,
+      toPointId: leg.toPointId,
+    });
+  }
+  if (leg.fromPointId !== point.id || leg.toPointId !== nextPoint.id) {
+    return invalidRoute("Route legs must connect adjacent pilot points in authored order.", {
+      legId: leg.id,
+      expectedFromPointId: point.id,
+      expectedToPointId: nextPoint.id,
+      fromPointId: leg.fromPointId,
+      toPointId: leg.toPointId,
+    });
+  }
+  const geometry = calculateGreatCircleDistanceAndInitialCourse(point.coordinate, nextPoint.coordinate);
+  if (!geometry.ok) return propagateFailure(geometry);
+  const startDistance = nauticalMiles(accumulatedDistance);
+  if (!startDistance.ok) return propagateFailure(startDistance);
+  const nextAccumulatedDistance = accumulatedDistance + geometry.value.distance;
+  const endDistance = nauticalMiles(nextAccumulatedDistance);
+  if (!endDistance.ok) return propagateFailure(endDistance);
+  return success({
+    preparedLeg: {
+      sourceLeg: leg,
+      start: point.coordinate,
+      end: nextPoint.coordinate,
+      trueCourseDegrees: geometry.value.initialTrueCourse,
+      distanceNauticalMiles: geometry.value.distance,
+      routeStartDistanceNauticalMiles: startDistance.value,
+      routeEndDistanceNauticalMiles: endDistance.value,
+    },
+    nextAccumulatedDistance,
+  });
+};
+
+/** Validates the pilot's ordered route and prepares its cumulative great-circle geometry. */
+export const preparePilotRoute = (route: RouteDefinition): DomainResult<PreparedPilotRoute> => {
+  const shapeError = validatePilotRouteShape(route);
+  if (shapeError !== undefined) return shapeError;
+  const pointIndex = indexPilotRoutePoints(route);
+  if (!pointIndex.ok) return propagateFailure(pointIndex);
+  const pointById = pointIndex.value;
+  const legIdError = validatePilotRouteLegIds(route, pointById);
+  if (legIdError !== undefined) return legIdError;
 
   const preparedPoints: PreparedPilotPoint[] = [];
   const preparedLegs: PreparedPilotLeg[] = [];
@@ -100,39 +161,10 @@ export const preparePilotRoute = (route: RouteDefinition): DomainResult<Prepared
     if (nextPoint === undefined || leg === undefined) {
       return invalidRoute("Pilot route is missing a point or leg in its ordered geometry.", { index });
     }
-    if (!pointById.has(leg.fromPointId) || !pointById.has(leg.toPointId)) {
-      return invalidRoute("A route leg references a point that does not exist.", {
-        legId: leg.id,
-        fromPointId: leg.fromPointId,
-        toPointId: leg.toPointId,
-      });
-    }
-    if (leg.fromPointId !== point.id || leg.toPointId !== nextPoint.id) {
-      return invalidRoute("Route legs must connect adjacent pilot points in authored order.", {
-        legId: leg.id,
-        expectedFromPointId: point.id,
-        expectedToPointId: nextPoint.id,
-        fromPointId: leg.fromPointId,
-        toPointId: leg.toPointId,
-      });
-    }
-
-    const geometry = calculateGreatCircleDistanceAndInitialCourse(point.coordinate, nextPoint.coordinate);
-    if (!geometry.ok) return propagateFailure(geometry);
-    const startDistance = nauticalMiles(accumulatedDistance);
-    if (!startDistance.ok) return propagateFailure(startDistance);
-    accumulatedDistance += geometry.value.distance;
-    const endDistance = nauticalMiles(accumulatedDistance);
-    if (!endDistance.ok) return propagateFailure(endDistance);
-    preparedLegs.push({
-      sourceLeg: leg,
-      start: point.coordinate,
-      end: nextPoint.coordinate,
-      trueCourseDegrees: geometry.value.initialTrueCourse,
-      distanceNauticalMiles: geometry.value.distance,
-      routeStartDistanceNauticalMiles: startDistance.value,
-      routeEndDistanceNauticalMiles: endDistance.value,
-    });
+    const preparedLeg = preparePilotRouteLeg(point, nextPoint, leg, pointById, accumulatedDistance);
+    if (!preparedLeg.ok) return propagateFailure(preparedLeg);
+    accumulatedDistance = preparedLeg.value.nextAccumulatedDistance;
+    preparedLegs.push(preparedLeg.value.preparedLeg);
   }
 
   const totalDistance = nauticalMiles(accumulatedDistance);
@@ -177,103 +209,12 @@ const validPositive = (value: number, field: string): DomainResult<number> => {
 
 const distanceLabel = (distance: number): string => `NM ${Math.round(distance)}`;
 
-/** Places a TOC or transition end by consuming estimated time along charted legs in forward order. */
-export const estimateForwardVerticalWaypoint = (
-  input: ForwardVerticalWaypointInput,
-): DomainResult<PreparedWaypoint> => {
-  const { route } = input;
-  if (!input.id || !input.label) return invalidRoute("Generated vertical waypoint requires an ID and label.");
-  if (!Number.isFinite(input.startRouteDistanceNauticalMiles) || input.startRouteDistanceNauticalMiles < 0 ||
-      input.startRouteDistanceNauticalMiles > route.totalRouteDistanceNauticalMiles) {
-    return invalidRoute("Vertical waypoint start distance must lie on the prepared route.", {
-      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
-      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
-    });
-  }
-  const startAltitude = feetMsl(input.startingAltitudeFeetMsl);
-  if (!startAltitude.ok) return propagateFailure(startAltitude);
-  const targetAltitude = feetMsl(input.targetAltitudeFeetMsl);
-  if (!targetAltitude.ok) return propagateFailure(targetAltitude);
-  const altitudeDifference = Math.abs(targetAltitude.value - startAltitude.value);
-  if (altitudeDifference === 0 || (input.kind === "estimated-toc" && targetAltitude.value <= startAltitude.value)) {
-    return failure("INVALID_PHASE_ALTITUDES", input.kind === "estimated-toc"
-      ? "TOC target altitude must be above the starting altitude."
-      : "Transition end altitude must differ from the starting altitude.", {
-      startingAltitudeFeetMsl: startAltitude.value,
-      targetAltitudeFeetMsl: targetAltitude.value,
-    });
-  }
-  const rate = validPositive(input.verticalRateFeetPerMinute, "vertical rate");
-  if (!rate.ok) return propagateFailure(rate);
-  const tas = positiveKnots(input.trueAirspeedKnots);
-  if (!tas.ok) return propagateFailure(tas);
-  const duration = altitudeDifference / rate.value;
-  if (!Number.isFinite(duration) || duration <= 0) return failure("NON_FINITE_RESULT", "Vertical waypoint duration is not usable.");
+interface TodAltitudes {
+  readonly cruiseAltitudeFeetMsl: number;
+  readonly patternAltitudeFeetMsl: number;
+}
 
-  let remainingMinutes = duration;
-  let estimatedDistance = 0;
-  let cursorDistance = input.startRouteDistanceNauticalMiles;
-  let placedLeg: PreparedPilotLeg | undefined;
-  let placedCoordinate: Coordinate | undefined;
-  for (const leg of route.legs) {
-    if (leg.routeEndDistanceNauticalMiles <= cursorDistance) continue;
-    if (remainingMinutes <= 0) break;
-    const segmentStart = Math.max(cursorDistance, leg.routeStartDistanceNauticalMiles);
-    const availableDistance = leg.routeEndDistanceNauticalMiles - segmentStart;
-    if (availableDistance <= 0) continue;
-    const course = trueCourse(leg.trueCourseDegrees);
-    if (!course.ok) return propagateFailure(course);
-    const triangle = solveWindTriangle(course.value, tas.value, input.planningWind);
-    if (!triangle.ok) return propagateFailure(triangle);
-    const segmentMinutes = (availableDistance / triangle.value.groundspeed) * 60;
-    const traveled = Math.min(availableDistance, triangle.value.groundspeed * remainingMinutes / 60);
-    estimatedDistance += traveled;
-    if (remainingMinutes <= segmentMinutes) {
-      const positionDistance = nauticalMiles(segmentStart - leg.routeStartDistanceNauticalMiles + traveled);
-      if (!positionDistance.ok) return propagateFailure(positionDistance);
-      const position = pointAlongGreatCircle(leg.start, course.value, positionDistance.value);
-      if (!position.ok) return propagateFailure(position);
-      placedLeg = leg;
-      placedCoordinate = position.value;
-      cursorDistance = segmentStart + traveled;
-      remainingMinutes = 0;
-      break;
-    }
-    remainingMinutes -= segmentMinutes;
-    cursorDistance = leg.routeEndDistanceNauticalMiles;
-  }
-  if (remainingMinutes > 1e-10 || placedLeg === undefined || placedCoordinate === undefined) {
-    return invalidRoute(`${input.label} estimate extends beyond the prepared route.`, {
-      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
-      estimatedDistanceNauticalMiles: estimatedDistance,
-      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
-    });
-  }
-  const routeDistance = nauticalMiles(cursorDistance);
-  if (!routeDistance.ok) return propagateFailure(routeDistance);
-  return success({
-    id: input.id,
-    kind: input.kind,
-    label: input.label,
-    coordinate: placedCoordinate,
-    routeDistanceNauticalMiles: routeDistance.value,
-    sourceLegId: placedLeg.sourceLeg.id,
-    placement: {
-      altitudeDifferenceFeet: altitudeDifference,
-      verticalRateFeetPerMinute: rate.value,
-      trueAirspeedKnots: tas.value,
-      planningWind: input.planningWind,
-      estimatedDurationMinutes: duration,
-      estimatedDistanceNauticalMiles: estimatedDistance,
-      formulaId: "vertical-rate-groundspeed-distance",
-      sourceLegId: placedLeg.sourceLeg.id,
-    },
-  });
-};
-
-/** Estimates TOD once from the final charted course, then locates it forward on route geometry. */
-export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<PreparedWaypoint> => {
-  const { route, currentWaypoint } = input;
+const validateTodAltitudes = (input: TopOfDescentInput): DomainResult<TodAltitudes> => {
   const cruiseAltitude = feetMsl(input.cruiseAltitudeFeetMsl);
   if (!cruiseAltitude.ok) return propagateFailure(cruiseAltitude);
   const patternAltitude = feetMsl(input.patternAltitudeFeetMsl);
@@ -284,52 +225,102 @@ export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<Pre
       patternAltitudeFeetMsl: patternAltitude.value,
     });
   }
+  return success({ cruiseAltitudeFeetMsl: cruiseAltitude.value, patternAltitudeFeetMsl: patternAltitude.value });
+};
+
+const validateCurrentWaypointDistance = (input: TopOfDescentInput): DomainResult<never> | undefined => {
+  const distance = input.currentWaypoint.routeDistanceNauticalMiles;
+  if (!Number.isFinite(distance) || distance < 0 || distance > input.route.totalRouteDistanceNauticalMiles) {
+    return invalidRoute("Current waypoint distance must lie on the prepared route.", {
+      waypointId: input.currentWaypoint.id,
+      waypointDistanceNauticalMiles: distance,
+      totalRouteDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles,
+    });
+  }
+  return undefined;
+};
+
+interface TodDescentEstimate {
+  readonly finalLeg: PreparedPilotLeg;
+  readonly durationMinutes: number;
+  readonly descentDistanceNauticalMiles: number;
+  readonly candidateDistanceNauticalMiles: number;
+}
+
+interface ValidatedTodDescentPerformance {
+  readonly verticalRateFeetPerMinute: number;
+  readonly trueAirspeedKnots: Knots;
+}
+
+const validateTodDescentPerformance = (input: TopOfDescentInput): DomainResult<ValidatedTodDescentPerformance> => {
   const rate = validPositive(input.descentRateFeetPerMinute, "descent rate");
   if (!rate.ok) return propagateFailure(rate);
   const tas = positiveKnots(input.descentTrueAirspeedKnots);
   if (!tas.ok) return propagateFailure(tas);
-  if (!Number.isFinite(currentWaypoint.routeDistanceNauticalMiles) || currentWaypoint.routeDistanceNauticalMiles < 0 ||
-      currentWaypoint.routeDistanceNauticalMiles > route.totalRouteDistanceNauticalMiles) {
-    return invalidRoute("Current waypoint distance must lie on the prepared route.", {
-      waypointId: currentWaypoint.id,
-      waypointDistanceNauticalMiles: currentWaypoint.routeDistanceNauticalMiles,
-      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
-    });
-  }
-  const finalLeg = route.legs[route.legs.length - 1];
+  return success({ verticalRateFeetPerMinute: rate.value, trueAirspeedKnots: tas.value });
+};
+
+const estimateTodDescentDistance = (
+  input: TopOfDescentInput,
+  altitudes: TodAltitudes,
+  performance: ValidatedTodDescentPerformance,
+): DomainResult<TodDescentEstimate> => {
+  const finalLeg = input.route.legs[input.route.legs.length - 1];
   if (finalLeg === undefined) return invalidRoute("TOD requires a prepared route with a final charted leg.");
   const course = trueCourse(finalLeg.trueCourseDegrees);
   if (!course.ok) return propagateFailure(course);
-  const triangle = solveWindTriangle(course.value, tas.value, input.planningWind);
+  const triangle = solveWindTriangle(course.value, performance.trueAirspeedKnots, input.planningWind);
   if (!triangle.ok) return propagateFailure(triangle);
-  const duration = (cruiseAltitude.value - patternAltitude.value) / rate.value;
-  const descentDistance = triangle.value.groundspeed * duration / 60;
-  if (!Number.isFinite(descentDistance) || descentDistance <= 0) {
+  const durationMinutes = (altitudes.cruiseAltitudeFeetMsl - altitudes.patternAltitudeFeetMsl) / performance.verticalRateFeetPerMinute;
+  const descentDistanceNauticalMiles = triangle.value.groundspeed * durationMinutes / 60;
+  if (!Number.isFinite(descentDistanceNauticalMiles) || descentDistanceNauticalMiles <= 0) {
     return failure("NON_FINITE_RESULT", "TOD descent distance is not usable.");
   }
-  const candidateDistance = route.totalRouteDistanceNauticalMiles - descentDistance;
+  return success({
+    finalLeg,
+    durationMinutes,
+    descentDistanceNauticalMiles,
+    candidateDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles - descentDistanceNauticalMiles,
+  });
+};
+
+const validateTodCandidateDistance = (
+  input: TopOfDescentInput,
+  estimate: TodDescentEstimate,
+): DomainResult<never> | undefined => {
+  const { candidateDistanceNauticalMiles: candidateDistance, descentDistanceNauticalMiles: descentDistance } = estimate;
   if (candidateDistance < 0) {
-    return invalidRoute(`Estimated TOD descent distance ${distanceLabel(descentDistance)} exceeds total route distance ${distanceLabel(route.totalRouteDistanceNauticalMiles)}. Review the selected cruise altitude, descent performance, or route.`, {
+    return invalidRoute(`Estimated TOD descent distance ${distanceLabel(descentDistance)} exceeds total route distance ${distanceLabel(input.route.totalRouteDistanceNauticalMiles)}. Review the selected cruise altitude, descent performance, or route.`, {
       descentDistanceNauticalMiles: descentDistance,
-      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+      totalRouteDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles,
     });
   }
-  if (candidateDistance < currentWaypoint.routeDistanceNauticalMiles) {
+  if (candidateDistance < input.currentWaypoint.routeDistanceNauticalMiles) {
     const candidateLabel = distanceLabel(candidateDistance);
-    const currentLabel = distanceLabel(currentWaypoint.routeDistanceNauticalMiles);
-    if (currentWaypoint.kind === "estimated-toc") {
+    const currentLabel = distanceLabel(input.currentWaypoint.routeDistanceNauticalMiles);
+    if (input.currentWaypoint.kind === "estimated-toc") {
       return invalidRoute(`Estimated TOC at ${currentLabel} and TOD at ${candidateLabel} overlap on the route. Review the selected cruise altitude, climb/descent performance, or route.`, {
-        waypointId: currentWaypoint.id,
-        currentWaypointDistanceNauticalMiles: currentWaypoint.routeDistanceNauticalMiles,
+        waypointId: input.currentWaypoint.id,
+        currentWaypointDistanceNauticalMiles: input.currentWaypoint.routeDistanceNauticalMiles,
         todDistanceNauticalMiles: candidateDistance,
       });
     }
-    return invalidRoute(`TOD is calculated to be before final waypoint ${currentWaypoint.label} (estimated TOD at ${candidateLabel}; waypoint at ${currentLabel}). Review the waypoint position, selected cruise altitude, descent performance, or route.`, {
-      waypointId: currentWaypoint.id,
-      currentWaypointDistanceNauticalMiles: currentWaypoint.routeDistanceNauticalMiles,
+    return invalidRoute(`TOD is calculated to be before final waypoint ${input.currentWaypoint.label} (estimated TOD at ${candidateLabel}; waypoint at ${currentLabel}). Review the waypoint position, selected cruise altitude, descent performance, or route.`, {
+      waypointId: input.currentWaypoint.id,
+      currentWaypointDistanceNauticalMiles: input.currentWaypoint.routeDistanceNauticalMiles,
       todDistanceNauticalMiles: candidateDistance,
     });
   }
+  return undefined;
+};
+
+interface LocatedTod {
+  readonly leg: PreparedPilotLeg;
+  readonly coordinate: Coordinate;
+  readonly routeDistanceNauticalMiles: number;
+}
+
+const locateTodOnRoute = (route: PreparedPilotRoute, candidateDistance: number): DomainResult<LocatedTod> => {
   let locatedLeg: PreparedPilotLeg | undefined;
   for (const leg of route.legs) {
     if (candidateDistance <= leg.routeEndDistanceNauticalMiles) {
@@ -344,24 +335,214 @@ export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<Pre
   if (!locatedCourse.ok) return propagateFailure(locatedCourse);
   const position = pointAlongGreatCircle(locatedLeg.start, locatedCourse.value, legOffset.value);
   if (!position.ok) return propagateFailure(position);
-  const routeDistance = nauticalMiles(candidateDistance);
+  return success({ leg: locatedLeg, coordinate: position.value, routeDistanceNauticalMiles: candidateDistance });
+};
+
+interface ValidatedForwardVerticalWaypointInput {
+  readonly altitudeDifferenceFeet: number;
+  readonly verticalRateFeetPerMinute: number;
+  readonly trueAirspeedKnots: Knots;
+  readonly durationMinutes: number;
+}
+
+const validateForwardWaypointIdentityAndStart = (input: ForwardVerticalWaypointInput): DomainResult<never> | undefined => {
+  if (!input.id || !input.label) return invalidRoute("Generated vertical waypoint requires an ID and label.");
+  if (!Number.isFinite(input.startRouteDistanceNauticalMiles) || input.startRouteDistanceNauticalMiles < 0 ||
+      input.startRouteDistanceNauticalMiles > input.route.totalRouteDistanceNauticalMiles) {
+    return invalidRoute("Vertical waypoint start distance must lie on the prepared route.", {
+      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
+      totalRouteDistanceNauticalMiles: input.route.totalRouteDistanceNauticalMiles,
+    });
+  }
+  return undefined;
+};
+
+const getVerticalAltitudeDifference = (input: ForwardVerticalWaypointInput): DomainResult<number> => {
+  const startAltitude = feetMsl(input.startingAltitudeFeetMsl);
+  if (!startAltitude.ok) return propagateFailure(startAltitude);
+  const targetAltitude = feetMsl(input.targetAltitudeFeetMsl);
+  if (!targetAltitude.ok) return propagateFailure(targetAltitude);
+  const altitudeDifferenceFeet = Math.abs(targetAltitude.value - startAltitude.value);
+  if (altitudeDifferenceFeet === 0 || (input.kind === "estimated-toc" && targetAltitude.value <= startAltitude.value)) {
+    return failure("INVALID_PHASE_ALTITUDES", input.kind === "estimated-toc"
+      ? "TOC target altitude must be above the starting altitude."
+      : "Transition end altitude must differ from the starting altitude.", {
+      startingAltitudeFeetMsl: startAltitude.value,
+      targetAltitudeFeetMsl: targetAltitude.value,
+    });
+  }
+  return success(altitudeDifferenceFeet);
+};
+
+const estimateVerticalDuration = (altitudeDifferenceFeet: number, input: ForwardVerticalWaypointInput): DomainResult<{
+  readonly verticalRateFeetPerMinute: number;
+  readonly trueAirspeedKnots: Knots;
+  readonly durationMinutes: number;
+}> => {
+  const rate = validPositive(input.verticalRateFeetPerMinute, "vertical rate");
+  if (!rate.ok) return propagateFailure(rate);
+  const tas = positiveKnots(input.trueAirspeedKnots);
+  if (!tas.ok) return propagateFailure(tas);
+  const durationMinutes = altitudeDifferenceFeet / rate.value;
+  if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+    return failure("NON_FINITE_RESULT", "Vertical waypoint duration is not usable.");
+  }
+  return success({ verticalRateFeetPerMinute: rate.value, trueAirspeedKnots: tas.value, durationMinutes });
+};
+
+const validateForwardVerticalWaypointInput = (
+  input: ForwardVerticalWaypointInput,
+): DomainResult<ValidatedForwardVerticalWaypointInput> => {
+  const identityError = validateForwardWaypointIdentityAndStart(input);
+  if (identityError !== undefined) return identityError;
+  const altitudeDifference = getVerticalAltitudeDifference(input);
+  if (!altitudeDifference.ok) return propagateFailure(altitudeDifference);
+  const duration = estimateVerticalDuration(altitudeDifference.value, input);
+  if (!duration.ok) return propagateFailure(duration);
+  return success({ altitudeDifferenceFeet: altitudeDifference.value, ...duration.value });
+};
+
+interface LocatedForwardVerticalWaypoint {
+  readonly leg: PreparedPilotLeg;
+  readonly coordinate: Coordinate;
+  readonly routeDistanceNauticalMiles: number;
+  readonly estimatedDistanceNauticalMiles: number;
+}
+
+type ForwardVerticalLegEstimate =
+  | { readonly kind: "skip" }
+  | { readonly kind: "traverse"; readonly traveled: number; readonly segmentMinutes: number }
+  | { readonly kind: "placed"; readonly traveled: number; readonly coordinate: Coordinate; readonly routeDistanceNauticalMiles: number };
+
+const estimateForwardVerticalLeg = (
+  leg: PreparedPilotLeg,
+  cursorDistance: number,
+  remainingMinutes: number,
+  trueAirspeedKnots: Knots,
+  planningWind: Wind,
+): DomainResult<ForwardVerticalLegEstimate> => {
+  const segmentStart = Math.max(cursorDistance, leg.routeStartDistanceNauticalMiles);
+  const availableDistance = leg.routeEndDistanceNauticalMiles - segmentStart;
+  if (availableDistance <= 0) return success({ kind: "skip" });
+  const course = trueCourse(leg.trueCourseDegrees);
+  if (!course.ok) return propagateFailure(course);
+  const triangle = solveWindTriangle(course.value, trueAirspeedKnots, planningWind);
+  if (!triangle.ok) return propagateFailure(triangle);
+  const segmentMinutes = (availableDistance / triangle.value.groundspeed) * 60;
+  const traveled = Math.min(availableDistance, triangle.value.groundspeed * remainingMinutes / 60);
+  if (remainingMinutes > segmentMinutes) return success({ kind: "traverse", traveled, segmentMinutes });
+  const positionDistance = nauticalMiles(segmentStart - leg.routeStartDistanceNauticalMiles + traveled);
+  if (!positionDistance.ok) return propagateFailure(positionDistance);
+  const position = pointAlongGreatCircle(leg.start, course.value, positionDistance.value);
+  if (!position.ok) return propagateFailure(position);
+  return success({ kind: "placed", traveled, coordinate: position.value, routeDistanceNauticalMiles: segmentStart + traveled });
+};
+
+const locateForwardVerticalWaypoint = (
+  input: ForwardVerticalWaypointInput,
+  durationMinutes: number,
+  trueAirspeedKnots: Knots,
+): DomainResult<LocatedForwardVerticalWaypoint> => {
+  const { route } = input;
+  let remainingMinutes = durationMinutes;
+  let estimatedDistance = 0;
+  let cursorDistance = input.startRouteDistanceNauticalMiles;
+  let placedLeg: PreparedPilotLeg | undefined;
+  let placedCoordinate: Coordinate | undefined;
+  for (const leg of route.legs) {
+    if (leg.routeEndDistanceNauticalMiles <= cursorDistance) continue;
+    if (remainingMinutes <= 0) break;
+    const segment = estimateForwardVerticalLeg(leg, cursorDistance, remainingMinutes, trueAirspeedKnots, input.planningWind);
+    if (!segment.ok) return propagateFailure(segment);
+    if (segment.value.kind === "skip") continue;
+    estimatedDistance += segment.value.traveled;
+    if (segment.value.kind === "placed") {
+      placedLeg = leg;
+      placedCoordinate = segment.value.coordinate;
+      cursorDistance = segment.value.routeDistanceNauticalMiles;
+      remainingMinutes = 0;
+      break;
+    }
+    remainingMinutes -= segment.value.segmentMinutes;
+    cursorDistance = leg.routeEndDistanceNauticalMiles;
+  }
+  if (remainingMinutes > 1e-10 || placedLeg === undefined || placedCoordinate === undefined) {
+    return invalidRoute(`${input.label} estimate extends beyond the prepared route.`, {
+      startRouteDistanceNauticalMiles: input.startRouteDistanceNauticalMiles,
+      estimatedDistanceNauticalMiles: estimatedDistance,
+      totalRouteDistanceNauticalMiles: route.totalRouteDistanceNauticalMiles,
+    });
+  }
+  return success({
+    leg: placedLeg,
+    coordinate: placedCoordinate,
+    routeDistanceNauticalMiles: cursorDistance,
+    estimatedDistanceNauticalMiles: estimatedDistance,
+  });
+};
+
+/** Places a TOC or transition end by consuming estimated time along charted legs in forward order. */
+export const estimateForwardVerticalWaypoint = (
+  input: ForwardVerticalWaypointInput,
+): DomainResult<PreparedWaypoint> => {
+  const validated = validateForwardVerticalWaypointInput(input);
+  if (!validated.ok) return propagateFailure(validated);
+  const located = locateForwardVerticalWaypoint(input, validated.value.durationMinutes, validated.value.trueAirspeedKnots);
+  if (!located.ok) return propagateFailure(located);
+  const routeDistance = nauticalMiles(located.value.routeDistanceNauticalMiles);
+  if (!routeDistance.ok) return propagateFailure(routeDistance);
+  return success({
+    id: input.id,
+    kind: input.kind,
+    label: input.label,
+    coordinate: located.value.coordinate,
+    routeDistanceNauticalMiles: routeDistance.value,
+    sourceLegId: located.value.leg.sourceLeg.id,
+    placement: {
+      altitudeDifferenceFeet: validated.value.altitudeDifferenceFeet,
+      verticalRateFeetPerMinute: validated.value.verticalRateFeetPerMinute,
+      trueAirspeedKnots: validated.value.trueAirspeedKnots,
+      planningWind: input.planningWind,
+      estimatedDurationMinutes: validated.value.durationMinutes,
+      estimatedDistanceNauticalMiles: located.value.estimatedDistanceNauticalMiles,
+      formulaId: "vertical-rate-groundspeed-distance",
+      sourceLegId: located.value.leg.sourceLeg.id,
+    },
+  });
+};
+
+/** Estimates TOD once from the final charted course, then locates it forward on route geometry. */
+export const estimateTopOfDescent = (input: TopOfDescentInput): DomainResult<PreparedWaypoint> => {
+  const altitudes = validateTodAltitudes(input);
+  if (!altitudes.ok) return propagateFailure(altitudes);
+  const performance = validateTodDescentPerformance(input);
+  if (!performance.ok) return propagateFailure(performance);
+  const currentWaypointError = validateCurrentWaypointDistance(input);
+  if (currentWaypointError !== undefined) return currentWaypointError;
+  const estimate = estimateTodDescentDistance(input, altitudes.value, performance.value);
+  if (!estimate.ok) return propagateFailure(estimate);
+  const candidateError = validateTodCandidateDistance(input, estimate.value);
+  if (candidateError !== undefined) return candidateError;
+  const located = locateTodOnRoute(input.route, estimate.value.candidateDistanceNauticalMiles);
+  if (!located.ok) return propagateFailure(located);
+  const routeDistance = nauticalMiles(located.value.routeDistanceNauticalMiles);
   if (!routeDistance.ok) return propagateFailure(routeDistance);
   return success({
     id: "estimated-tod",
     kind: "estimated-tod",
     label: "TOD",
-    coordinate: position.value,
+    coordinate: located.value.coordinate,
     routeDistanceNauticalMiles: routeDistance.value,
-    sourceLegId: locatedLeg.sourceLeg.id,
+    sourceLegId: located.value.leg.sourceLeg.id,
     placement: {
-      altitudeDifferenceFeet: cruiseAltitude.value - patternAltitude.value,
-      verticalRateFeetPerMinute: rate.value,
-      trueAirspeedKnots: tas.value,
+      altitudeDifferenceFeet: altitudes.value.cruiseAltitudeFeetMsl - altitudes.value.patternAltitudeFeetMsl,
+      verticalRateFeetPerMinute: performance.value.verticalRateFeetPerMinute,
+      trueAirspeedKnots: performance.value.trueAirspeedKnots,
       planningWind: input.planningWind,
-      estimatedDurationMinutes: duration,
-      estimatedDistanceNauticalMiles: descentDistance,
+      estimatedDurationMinutes: estimate.value.durationMinutes,
+      estimatedDistanceNauticalMiles: estimate.value.descentDistanceNauticalMiles,
       formulaId: "route-total-minus-final-course-descent-distance",
-      sourceLegId: finalLeg.sourceLeg.id,
+      sourceLegId: estimate.value.finalLeg.sourceLeg.id,
     },
   });
 };
