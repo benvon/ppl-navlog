@@ -1,6 +1,6 @@
-# Development CI/CD setup
+# CI/CD setup
 
-The intended flow is PR to `main` → full CI and CodeQL → manual merge decision → development deployment to `navlog.benvon.dev` → deployment smoke check → SemVer RC tag and GitHub prerelease. Production at `navlog.benvon.net` is deliberately not configured yet. The workflow exists in `.github/workflows/ci.yml`; it has not been proven against GitHub and Cloudflare until the first merged run succeeds.
+The flow is PR to `main` → full CI and CodeQL → manual merge decision → development deployment to `navlog.benvon.dev` → deployment smoke check → SemVer RC tag and GitHub prerelease. Manually tagging the vetted RC commit with a stable `vX.Y.Z` tag and pushing that tag triggers production promotion. The workflow deploys the RC's existing artifact to one Worker with two custom domains, `navlog.benvon.net` and `navlog.pplstudyguide.com`. Development runs from `.github/workflows/ci.yml`; production runs from `.github/workflows/production.yml`.
 
 ## GitHub configuration required
 
@@ -21,7 +21,29 @@ Each merge should be monitored in GitHub Actions and Cloudflare. Confirm the `va
 
 `package.json` carries the next stable SemVer train. Every merged `main` CI run produces `v<package-version>-rc.<GitHub run number>`; run-number gaps from PR runs are harmless. Rerunning the same workflow reuses its RC tag only if it points to the same commit. Once the stable `v<package-version>` tag exists, CI refuses another RC on that train until `package.json` is bumped. Do not move tags.
 
-Later, after testing and approval, the production workflow should select one existing RC, verify its tag and immutable artifact, create the stable `vX.Y.Z` tag on **the same commit**, deploy that artifact behind a protected `production` environment to `navlog.benvon.net`, smoke-test it, and create the non-prerelease GitHub Release. It must not rebuild from a newer `main` commit. That production workflow and any production Cloudflare secret are out of scope for this development-only setup.
+The production Wrangler environment deploys one Worker named `ppl-navlog-production` with one static asset bundle and two custom domains: `navlog.benvon.net` and `navlog.pplstudyguide.com`. Both hostnames serve the same release and same-origin `/api/*` routes. Browser IndexedDB remains separate by origin. The production Worker binds `RUNWAY_PICKER_API` to `runway-picker-metar-api` and has its own rate-limit namespace, separate from development. Both Cloudflare zones are in the same account.
+
+## Production setup required before the first promotion
+
+1. The GitHub `production` environment already exists. In repository Settings → Environments → `production`, verify its deployment tag policy accepts stable `vX.Y.Z` tags. On 2026-09-29 its pattern was `v[0-9]+.[0-9]+.[0-9]+$`; GitHub uses glob matching for these rules, so the `+` and `$` are literal and that pattern will not accept `v0.1.0`. Replace it with `v*.*.*` (the workflow validates exact stable SemVer and excludes RC tags). Keep `main` protected by the repository ruleset. Pushing the stable tag is the release decision. If you configure required reviewers, ensure an eligible reviewer can approve the job, and check plan/repository support for that rule.
+2. The `production` environment already has entries named `CLOUDFLARE_ACCOUNT_ID` (variable) and `CLOUDFLARE_API_TOKEN` (secret); their values and permissions cannot be inferred from their names. Verify that the token is a separate production credential with Worker deployment access for `ppl-navlog-production` and Workers Routes Write on **both** the `benvon.net` and `pplstudyguide.com` zones so Wrangler can attach both custom domains. Scope it to the one Cloudflare account and the smallest available Worker/zone resources. Do not copy it into repository files or logs.
+3. In Cloudflare, verify neither production hostname has a conflicting CNAME or other existing route, and confirm rate-limit namespace `90221002` is not used by another binding in the account. Confirm `runway-picker-metar-api` is available in the same account. Review the production WAF/bot controls and security gates in `docs/security-review.md` before public traffic.
+4. Ensure the repository Actions settings permit the workflow `GITHUB_TOKEN` to write contents for the GitHub Release. The production job requests `contents: write` and `actions: read`; no personal GitHub token is required.
+
+## Promoting a release candidate
+
+1. After this workflow and configuration reach protected `main`, select a **new** successful development RC produced from that commit or later. Confirm its development smoke and published prerelease completed. The CI artifact is retained for 14 days; promote while it is still available.
+2. Create an annotated stable tag (for example, `v0.1.0`) on the **same commit** as the selected RC tag, then push that stable tag. A signed tag may be used if your Git signing setup supports it. The tag push starts **Production promotion**; no workflow inputs or separate manual dispatch are needed. Do not tag a newer `main` commit unless that exact commit has the vetted RC and artifact.
+
+   ```sh
+   git fetch origin main --tags
+   git tag -a v0.1.0 v0.1.0-rc.123 -m "Production release v0.1.0"
+   git push origin refs/tags/v0.1.0
+   ```
+
+3. The job verifies that the stable tag points to a published RC commit from a successful `main` push CI run, with a matching package version, production configuration, and unexpired artifact. It downloads the validated `dist/` artifact and deploys it **once** with `wrangler deploy --env production`. It checks static identity, API identity, security header, and the bound airport lookup through **each** hostname. Only after both pass does it publish the GitHub Release. The deployed build identity remains the promoted RC version because the artifact is not rebuilt or rewritten.
+
+If a deploy or smoke step fails, the manually pushed stable tag remains but no GitHub Release is created. The Worker may already be serving the attempted version, so inspect both hostnames and roll back the `ppl-navlog-production` Worker in Cloudflare if needed; Cloudflare rollback restores the selected Worker version across its custom domains. Investigate before rerunning that workflow. The first deploy has no prior production version to restore. Production has not been deployed by adding this workflow.
 
 ## References
 
