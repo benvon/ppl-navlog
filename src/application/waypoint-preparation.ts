@@ -415,6 +415,9 @@ type ForwardVerticalLegEstimate =
   | { readonly kind: "traverse"; readonly traveled: number; readonly segmentMinutes: number }
   | { readonly kind: "placed"; readonly traveled: number; readonly coordinate: Coordinate; readonly routeDistanceNauticalMiles: number };
 
+// Numerical roundoff guard only; waypoint placement has no planning precision threshold.
+const PHASE_TIME_ROUNDOFF_MINUTES = 1e-10;
+
 const estimateForwardVerticalLeg = (
   leg: PreparedPilotLeg,
   cursorDistance: number,
@@ -431,7 +434,9 @@ const estimateForwardVerticalLeg = (
   if (!triangle.ok) return propagateFailure(triangle);
   const segmentMinutes = (availableDistance / triangle.value.groundspeed) * 60;
   const traveled = Math.min(availableDistance, triangle.value.groundspeed * remainingMinutes / 60);
-  if (remainingMinutes > segmentMinutes) return success({ kind: "traverse", traveled, segmentMinutes });
+  if (remainingMinutes - segmentMinutes > PHASE_TIME_ROUNDOFF_MINUTES) {
+    return success({ kind: "traverse", traveled, segmentMinutes });
+  }
   const positionDistance = nauticalMiles(segmentStart - leg.routeStartDistanceNauticalMiles + traveled);
   if (!positionDistance.ok) return propagateFailure(positionDistance);
   const position = pointAlongGreatCircle(leg.start, course.value, positionDistance.value);
@@ -490,7 +495,7 @@ const locateForwardVerticalWaypoint = (
     remainingMinutes -= segment.value.segmentMinutes;
     cursorDistance = leg.routeEndDistanceNauticalMiles;
   }
-  if (remainingMinutes > 1e-10 || placedLeg === undefined || placedCoordinate === undefined) {
+  if (remainingMinutes > PHASE_TIME_ROUNDOFF_MINUTES || placedLeg === undefined || placedCoordinate === undefined) {
     return forwardVerticalOverflowFailure(input, estimatedDistance, remainingMinutes);
   }
   return success({

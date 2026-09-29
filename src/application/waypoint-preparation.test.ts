@@ -197,6 +197,19 @@ describe("estimateForwardVerticalWaypoint", () => {
     if (result.ok) expect(result.value.routeDistanceNauticalMiles).toBeCloseTo(6, 8);
   });
 
+  it("places a boundary at the destination despite a floating-point time residual", () => {
+    const preparedRoute = straightPreparedRoute(1);
+    const legMinutes = (preparedRoute.totalRouteDistanceNauticalMiles / 60) * 60;
+    const rate = 3_000 / (legMinutes + Number.EPSILON * legMinutes * 4);
+    const result = estimateForwardVerticalWaypoint(verticalInput({ route: preparedRoute, verticalRateFeetPerMinute: rate }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.routeDistanceNauticalMiles).toBe(preparedRoute.totalRouteDistanceNauticalMiles);
+      expect(result.value.sourceLegId).toBe("leg-1");
+    }
+  });
+
   it("places a transition by walking forward and re-solving groundspeed after a turn", () => {
     const bent = value(preparePilotRoute(route(
       [point("A", 0), point("B", 1), point("C", 1, 1)],
