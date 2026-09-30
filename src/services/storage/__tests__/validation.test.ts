@@ -45,7 +45,7 @@ describe("storage model validation", () => {
   it("uses the shared [0, 360) canonical heading range for compass-deviation entries", () => {
     const profile = aircraftProfile();
     expect(validateAircraftProfile({ ...profile, compassDeviationTable: [{ magneticHeadingDegrees: 0, deviationDegrees: 0 }] }, new Date("2027-01-01T00:00:00.000Z"))).toBe(true);
-    expect(() => validateAircraftProfile({ ...profile, compassDeviationTable: [{ magneticHeadingDegrees: 360, deviationDegrees: 0 }] }, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/at most/);
+    expect(() => validateAircraftProfile({ ...profile, compassDeviationTable: [{ magneticHeadingDegrees: 360, deviationDegrees: 0 }] }, new Date("2027-01-01T00:00:00.000Z"))).toThrow(/less than 360/);
   });
 
   it("rejects a route leg that skips the next user-defined point", () => {
@@ -149,7 +149,7 @@ describe("storage model validation", () => {
   it("rejects timestamps, ranges, and collection structures outside persistence limits", () => {
     const fixedNow = new Date("2027-01-01T00:00:00.000Z");
     const profile = aircraftProfile();
-    expect(() => validateAircraftProfile({ ...profile, usableFuelGallons: -1 }, fixedNow)).toThrow(/at least 0/);
+    expect(() => validateAircraftProfile({ ...profile, usableFuelGallons: -1 }, fixedNow)).toThrow(/nonnegative/);
     expect(() => validateAircraftProfile({ ...profile, createdAt: "2030-01-01T00:00:00.000Z" }, fixedNow)).toThrow(/future/);
     expect(() => validatePlanDraft({ ...planDraft(), fuelInputs: "not-an-object" }, fixedNow)).toThrow(/fuelInputs/);
     expect(() => validatePlanRevision({ ...planRevision(), weatherSnapshotIds: "not-an-array" }, fixedNow)).toThrow(/weatherSnapshotIds/);

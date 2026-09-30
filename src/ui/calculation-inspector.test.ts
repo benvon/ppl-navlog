@@ -17,6 +17,22 @@ describe("calculation inspector", () => {
     expect(rendered.textContent).toContain("Result: 1800 → 1800 ft MSL as shown in the navlog.");
     expect(rendered.textContent).toContain("1798.3");
   });
+  it("explains marked altitude as the fixed selected cruise-altitude assumption", () => {
+    const revision = teachingRevision();
+    const subleg = revision.calculationSnapshot.navlog.rows[0]!.subleg as Record<string, unknown>;
+    delete subleg.startingAltitude;
+    delete subleg.endingAltitude;
+    subleg.phase = "descent";
+    subleg.altitudePresentation = "cruise-assumption";
+    subleg.selectedCruiseAltitude = 4523.6;
+
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
+    expect(rendered.textContent).toContain("Result: 4500 ft MSL as shown in the navlog.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 4523.6.");
+    expect(rendered.textContent).toContain("fixed cruise-altitude assumption");
+    expect(rendered.textContent).toContain("does not represent a row altitude transition or a crossing altitude");
+    expect(rendered.textContent).not.toContain("unavailable ft to unavailable ft");
+  });
   it("matches whole-degree headings and whole-knot wind and groundspeed in the navlog", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;
@@ -160,6 +176,7 @@ describe("calculation inspector", () => {
         departureMetar: { stationIcao: "KORD", requestId: "dep-1", fetchedAt: "2026-09-22T12:00:00Z", observedAt: "2026-09-22T11:45:00Z", selectedForTerminalWind: false, cache: { status: "kv_hit", source: "kv", fetchedAt: "2026-09-22T12:00:00Z", expiresAt: "2026-09-22T12:05:00Z", freshnessRemainingSeconds: 300 } },
         destinationTaf: { stationIcao: "KJVL", requestId: "taf-1", issuedAt: "2026-09-22T10:00:00Z", validFrom: "2026-09-22T12:00:00Z", validUntil: "2026-09-23T12:00:00Z", selectedForTerminalWind: true },
         destinationMetar: { stationIcao: "KJVL", requestId: "metar-1", fetchedAt: "2026-09-22T12:00:00Z", observedAt: "2026-09-22T11:00:00Z", selectedForTerminalWind: false, cache: { status: "stale_on_error", source: "stale", fetchedAt: "2026-09-22T12:00:00Z", expiresAt: "2026-09-22T11:00:00Z", freshnessRemainingSeconds: 0 } },
+        destinationCruiseAltitudeForecast: { requestId: "aloft-1", plannedUtc: "2026-09-22T13:00:00Z", altitudeFeetMsl: 4500, method: "forecast-interpolation", validFrom: "2026-09-22T12:00:00Z", validUntil: "2026-09-22T18:00:00Z" },
       } }, navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise" }, assumptions: [], appliedOverrides: [] }] } },
     };
     const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
@@ -171,6 +188,41 @@ describe("calculation inspector", () => {
     expect(rendered.textContent).toContain("valid 2026-09-22T12:00:00Z to 2026-09-23T12:00:00Z");
     expect(rendered.textContent).toContain("Destination TAF (Selected for terminal wind)");
     expect(rendered.textContent).toContain("Destination METAR (Fetched source; not selected for terminal wind)");
+    expect(rendered.textContent).toContain("Destination cruise-altitude forecast (Used for TOD placement at cruise altitude)");
+    expect(rendered.textContent).toContain("preliminary UTC 2026-09-22T13:00:00Z; altitude 4500 ft MSL; forecast-interpolation");
+  });
+
+  it("explains both adjacent generated boundary placements using stored profile and wind results", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [
+          { kind: "top-of-climb", routeDistanceNauticalMiles: 10, placementAssumption: "Departure METAR wind is used as the climb placement approximation.", placementTrace: [
+          { name: "altitude difference", value: 3800, unit: "feet" },
+          { name: "vertical rate", value: 500, unit: "feet per minute" },
+          { name: "planning groundspeed", value: 100, unit: "knots" },
+          { name: "estimated duration", value: 7.6, unit: "minutes" },
+          { name: "estimated distance", value: 12.67, unit: "nautical miles" },
+          ] },
+          { kind: "top-of-descent", routeDistanceNauticalMiles: 20, placementAssumption: "The cruise-altitude wind forecast is fixed for TOD placement.", placementTrace: [
+            { name: "altitude difference", value: 3800, unit: "feet" },
+            { name: "vertical rate", value: 500, unit: "feet per minute" },
+            { name: "planning groundspeed", value: 110, unit: "knots" },
+            { name: "estimated duration", value: 7.6, unit: "minutes" },
+            { name: "estimated distance", value: 13.93, unit: "nautical miles" },
+          ] },
+        ] },
+        navlog: { rows: [{ subleg: { sourceLegId: "leg-1", startLabel: "TOC", endLabel: "TOD", phase: "cruise", routeStartDistance: 10, routeEndDistance: 20 }, traces: {} }] },
+      },
+    };
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
+    expect(rendered.querySelector("h3")?.textContent).toContain("TOC → TOD");
+    expect(rendered.textContent).toContain("3800 ft ÷ 500 ft/min = 7.6 min");
+    expect(rendered.textContent).toContain("100 kt × 7.6 min ÷ 60 = 12.67 NM");
+    expect(rendered.textContent).toContain("Departure METAR wind is used as the climb placement approximation.");
+    expect(rendered.textContent).toContain("110 kt × 7.6 min ÷ 60 = 13.93 NM");
+    expect(rendered.textContent).toContain("The cruise-altitude wind forecast is fixed for TOD placement.");
   });
 
   it("shows wind provenance and a phase-allocation explanation when no calculation trace applies", () => {

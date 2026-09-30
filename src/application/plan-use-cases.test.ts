@@ -78,6 +78,25 @@ describe("plan draft use cases", () => {
     expect(route.legs[0]).toMatchObject({ fromPointId: "route-point-1-airport-kord", toPointId: "route-point-2-airport-kord" });
   });
 
+  it("records destination field elevation as the current worksheet descent endpoint", async () => {
+    const airports = createLocalStudyAirportLookup();
+    const departure = await airports.lookupAirportCode("KORD");
+    const destination = await airports.lookupAirportCode("KJVL");
+    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
+    const draft = createPlanDraft({
+      title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route,
+      selectedAircraftProfileId: "aircraft-1", taxiRunupFuelGallons: 0, reserveFuelGallons: 3,
+      descentTargetAltitudeFeetMsl: destination.elevationFeetMsl, descentTargetSource: "destination-field-elevation",
+    }, ids("draft-1", "plan-1"), fixedClock);
+
+    expect(draft.descentTargetAltitudeFeetMsl).toMatchObject({
+      computedValue: destination.elevationFeetMsl,
+      effectiveValue: destination.elevationFeetMsl,
+      origin: "external-data",
+      provenance: { sourceId: "destination-field-elevation", sourceLabel: "Destination airport field elevation" },
+    });
+  });
+
   it("keeps route-point identities stable when reopening an unchanged route", async () => {
     const airports = createLocalStudyAirportLookup();
     const departure = await airports.lookupAirportCode("KORD");

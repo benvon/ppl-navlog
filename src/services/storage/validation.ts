@@ -1,9 +1,4 @@
-import {
-  AIRCRAFT_PROFILE_SCHEMA_VERSION,
-  type AircraftProfile,
-  type AircraftProfileSnapshot,
-  type CompassDeviationEntry,
-} from "../../domain/aircraft";
+import { type AircraftProfile, type AircraftProfileSnapshot } from "../../domain/aircraft";
 import type { PlanningValue, PlanningValueOrigin } from "../../domain/planning-value";
 import {
   PLAN_SCHEMA_VERSION,
@@ -15,6 +10,7 @@ import {
   type RoutePoint,
   type WeatherReferenceSnapshot,
 } from "../../domain/route";
+import { inspectAircraftProfile } from "../../domain/aircraft-profile-validation";
 
 export interface ValidationIssue {
   readonly path: string;
@@ -126,51 +122,11 @@ function checkNoFutureTimestamp(value: string, path: string, issues: ValidationI
   if (Date.parse(value) > now.getTime() + toleranceMs) add(issues, path, "must not be in the future");
 }
 
-function validateDeviationEntry(value: unknown, path: string, issues: ValidationIssue[]): value is CompassDeviationEntry {
-  if (!isRecord(value)) {
-    add(issues, path, "must be an object");
-    return false;
-  }
-  finiteNumber(value.magneticHeadingDegrees, `${path}.magneticHeadingDegrees`, issues, 0, 359.99999999999994);
-  finiteNumber(value.deviationDegrees, `${path}.deviationDegrees`, issues, -180, 180);
-  return true;
-}
-
 export function validateAircraftProfile(value: unknown, now = new Date()): value is AircraftProfile {
-  const issues: ValidationIssue[] = [];
-  if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
-  schemaVersion(value.schemaVersion, AIRCRAFT_PROFILE_SCHEMA_VERSION, "$.schemaVersion", issues);
-  identifier(value.id, "$.id", issues);
-  requiredString(value.name, "$.name", issues);
-  positiveNumber(value.cruiseTasKnots, "$.cruiseTasKnots", issues);
-  positiveNumber(value.cruiseFuelFlowGallonsPerHour, "$.cruiseFuelFlowGallonsPerHour", issues);
-  positiveNumber(value.climbRateFeetPerMinute, "$.climbRateFeetPerMinute", issues);
-  positiveNumber(value.climbTasKnots, "$.climbTasKnots", issues);
-  positiveNumber(value.climbFuelFlowGallonsPerHour, "$.climbFuelFlowGallonsPerHour", issues);
-  positiveNumber(value.descentRateFeetPerMinute, "$.descentRateFeetPerMinute", issues);
-  positiveNumber(value.descentTasKnots, "$.descentTasKnots", issues);
-  positiveNumber(value.descentFuelFlowGallonsPerHour, "$.descentFuelFlowGallonsPerHour", issues);
-  if (value.usableFuelGallons !== undefined) nonNegativeNumber(value.usableFuelGallons, "$.usableFuelGallons", issues);
-  if (!Array.isArray(value.compassDeviationTable) || value.compassDeviationTable.length === 0 || value.compassDeviationTable.length > 360) {
-    add(issues, "$.compassDeviationTable", "must be an array with between 1 and 360 entries");
-  } else {
-    const headings = new Set<number>();
-    value.compassDeviationTable.forEach((entry, index) => {
-      if (validateDeviationEntry(entry, `$.compassDeviationTable[${index}]`, issues) && isRecord(entry)) {
-        const heading = entry.magneticHeadingDegrees;
-        if (typeof heading === "number" && headings.has(heading)) add(issues, `$.compassDeviationTable[${index}].magneticHeadingDegrees`, "must be unique");
-        if (typeof heading === "number") headings.add(heading);
-      }
-    });
-  }
-  if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
-  if (utcInstant(value.updatedAt, "$.updatedAt", issues)) {
-    checkNoFutureTimestamp(value.updatedAt, "$.updatedAt", issues, now);
-    if (typeof value.createdAt === "string" && Date.parse(value.updatedAt) < Date.parse(value.createdAt)) {
-      add(issues, "$.updatedAt", "must not be earlier than createdAt");
-    }
-  }
-  if (issues.length > 0) throw new StorageValidationError(issues);
+  const checked = inspectAircraftProfile(value, now);
+  if (checked.kind !== "valid") throw new StorageValidationError(checked.kind === "unsupported-schema"
+    ? [{ path: "$.schemaVersion", message: `uses unsupported aircraft profile schema version ${checked.schemaVersion}` }]
+    : checked.issues);
   return true;
 }
 

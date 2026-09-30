@@ -50,7 +50,7 @@ function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, r
   const walkthroughHeading = document.createElement("h4");
   walkthroughHeading.textContent = "How it was calculated";
   walkthrough.append(walkthroughHeading);
-  appendWalkthrough(walkthrough, row, selection.field);
+  appendWalkthrough(walkthrough, row, selection.field, revision);
   section.append(walkthrough);
   appendTextList(section, "Planning assumptions", row.assumptions);
   appendOverrides(section, row.appliedOverrides);
@@ -95,7 +95,7 @@ function appendSupportingHeadingTraces(section: HTMLElement, row: RecordValue, f
   }
 }
 
-function appendWalkthrough(section: HTMLElement, row: RecordValue, field: NavlogInspectionField): void {
+function appendWalkthrough(section: HTMLElement, row: RecordValue, field: NavlogInspectionField, revision: PlanRevision | undefined): void {
   const subleg = nested(row, "subleg");
   const traces = nested(row, "traces");
   const steps: Array<[string, string]> = [];
@@ -103,6 +103,7 @@ function appendWalkthrough(section: HTMLElement, row: RecordValue, field: Navlog
   if (isHeadingField(field)) appendHeadingSteps(steps, row, subleg, field);
   if (field === "estimatedTimeEnroute" || field === "fuel") appendTimeFuelSteps(steps, row, subleg, field);
   if (!isWindDerivedField(field) && !["estimatedTimeEnroute", "fuel"].includes(field)) appendSourceValueStep(steps, row, subleg, field);
+  appendPlacementStep(steps, revision, subleg, field);
   if (steps.length === 0) {
     section.append(paragraph("This value comes from route or phase allocation; no detailed trace was stored for it."));
     return;
@@ -116,6 +117,42 @@ function appendWalkthrough(section: HTMLElement, row: RecordValue, field: Navlog
     list.append(item);
   }
   section.append(list, paragraph("Navlog table angles, speeds, and elapsed times use whole units; altitude is rounded to the nearest 100 ft, and distance and fuel to 0.1. Calculation traces retain stored unrounded values."));
+}
+
+function appendPlacementStep(steps: Array<[string, string]>, revision: PlanRevision | undefined, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
+  if (field !== "altitude" && field !== "distance") return;
+  for (const boundary of matchingPlacementBoundaries(revision, subleg)) {
+    const kind = boundaryKind(boundary);
+    if (kind === undefined) continue;
+    const chain = placementCalculationChain(boundary);
+    const assumption = typeof boundary.placementAssumption === "string" ? ` ${boundary.placementAssumption}` : "";
+    if (chain) steps.push([`${kind} placement estimate`, `${chain} along the ordered charted route.${assumption}`]);
+  }
+}
+
+function matchingPlacementBoundaries(revision: PlanRevision | undefined, subleg: RecordValue | undefined): RecordValue[] {
+  const boundaries = nested(revision?.calculationSnapshot, "phaseAllocation")?.boundaries;
+  if (!Array.isArray(boundaries)) return [];
+  return boundaries.filter((value): value is RecordValue => record(value) && typeof value.routeDistanceNauticalMiles === "number" &&
+    [subleg?.routeStartDistance, subleg?.routeEndDistance].some((distance) => typeof distance === "number" && Math.abs(distance - (value.routeDistanceNauticalMiles as number)) <= 1e-8));
+}
+
+function boundaryKind(boundary: RecordValue): string | undefined {
+  if (boundary.kind === "top-of-climb") return "TOC";
+  return boundary.kind === "top-of-descent" ? "TOD" : undefined;
+}
+
+function placementCalculationChain(boundary: RecordValue): string {
+  const trace = Array.isArray(boundary.placementTrace) ? boundary.placementTrace.filter(record) : [];
+  const value = (name: string): number | undefined => {
+    const item = trace.find((entry) => entry.name === name);
+    return typeof item?.value === "number" ? item.value : undefined;
+  };
+  const altitude = value("altitude difference"), rate = value("vertical rate"), duration = value("estimated duration");
+  const groundspeed = value("planning groundspeed"), distance = value("estimated distance");
+  const vertical = altitude === undefined || rate === undefined || duration === undefined ? "" : `${displayValue(altitude)} ft ÷ ${displayValue(rate)} ft/min = ${displayValue(duration)} min`;
+  const horizontal = groundspeed === undefined || duration === undefined || distance === undefined ? "" : `${displayValue(groundspeed)} kt × ${displayValue(duration)} min ÷ 60 = ${displayValue(distance)} NM`;
+  return [vertical, horizontal].filter(Boolean).join("; ");
 }
 
 const isWindDerivedField = (field: NavlogInspectionField): boolean => ["windCorrectionAngle", "trueHeading", "magneticHeading", "compassHeading", "groundspeed", "estimatedTimeEnroute", "fuel"].includes(field);
@@ -175,7 +212,9 @@ function appendSourceValueStep(steps: Array<[string, string]>, row: RecordValue,
 }
 
 function appendRouteSourceStep(steps: Array<[string, string]>, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
-  if (field === "altitude") steps.push(["Altitude", `${stepValue(subleg?.startingAltitude)} ft to ${stepValue(subleg?.endingAltitude)} ft MSL from this row's route/phase allocation.`]);
+  if (field === "altitude" && subleg?.altitudePresentation === "cruise-assumption") {
+    steps.push(["Altitude", `The displayed ${stepValue(subleg.selectedCruiseAltitude)} ft MSL is a fixed cruise-altitude assumption for this ${String(subleg.phase ?? "phase")} row. It does not represent a row altitude transition or a crossing altitude.`]);
+  } else if (field === "altitude") steps.push(["Altitude", `${stepValue(subleg?.startingAltitude)} ft to ${stepValue(subleg?.endingAltitude)} ft MSL from this row's route/phase allocation.`]);
   else if (field === "trueCourse") steps.push(["True course", `${stepValue(subleg?.trueCourse)}° is the course allocated to this route/phase row.`]);
   else if (field === "distance") steps.push(["Distance", `${stepValue(subleg?.distance)} NM is the distance allocated to this route/phase row.`]);
 }
@@ -220,6 +259,7 @@ function worksheetValue(value: unknown, field: NavlogInspectionField, row: Recor
 
 function worksheetAltitude(row: RecordValue): string {
   const subleg = nested(row, "subleg");
+  if (subleg?.altitudePresentation === "cruise-assumption") return worksheetWholeHundredsOfFeet(subleg.selectedCruiseAltitude);
   return `${worksheetWholeHundredsOfFeet(subleg?.startingAltitude)} → ${worksheetWholeHundredsOfFeet(subleg?.endingAltitude)}`;
 }
 
@@ -274,7 +314,7 @@ function appendEndpointSources(section: HTMLElement, revision: PlanRevision | un
   const heading = document.createElement("h4");
   heading.textContent = "Endpoint weather sources";
   section.append(heading);
-  for (const [key, label] of [["departureMetar", "Departure METAR"], ["destinationTaf", "Destination TAF"], ["destinationMetar", "Destination METAR"]] as const) {
+  for (const [key, label] of [["departureMetar", "Departure METAR"], ["destinationTaf", "Destination TAF"], ["destinationMetar", "Destination METAR"], ["destinationCruiseAltitudeForecast", "Destination cruise-altitude forecast"]] as const) {
     const source = nested(sources, key);
     if (source === undefined) continue;
     section.append(endpointSourceParagraph(key, label, source));
@@ -282,8 +322,8 @@ function appendEndpointSources(section: HTMLElement, revision: PlanRevision | un
 }
 
 function endpointSourceParagraph(key: string, label: string, source: RecordValue): HTMLParagraphElement {
-  const status = key === "departureMetar" ? "Departure surface anchor" : source.selectedForTerminalWind === true ? "Selected for terminal wind" : "Fetched source; not selected for terminal wind";
-  const timing = key === "destinationTaf" ? tafValidity(source) : metarTiming(source);
+  const status = key === "departureMetar" ? "Departure surface anchor" : key === "destinationCruiseAltitudeForecast" ? "Used for TOD placement at cruise altitude" : source.selectedForTerminalWind === true ? "Selected for terminal wind" : "Fetched source; not selected for terminal wind";
+  const timing = key === "destinationTaf" ? tafValidity(source) : key === "destinationCruiseAltitudeForecast" ? `preliminary UTC ${String(source.plannedUtc ?? "unknown")}; altitude ${String(source.altitudeFeetMsl ?? "unknown")} ft MSL; ${String(source.method ?? "unknown method")}` : metarTiming(source);
   return paragraph(`${label} (${status}): ${String(source.stationIcao ?? "unknown station")}; request ${String(source.requestId ?? "unknown")}; issued ${String(source.issuedAt ?? "unknown")}; ${timing}; ${cacheDescription(source)}.`);
 }
 
@@ -303,10 +343,20 @@ function cacheDescription(source: RecordValue): string {
 
 function selectionHeading(revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): string {
   const subleg = nested(row, "subleg");
+  const routeLabel = labelledRoute(subleg);
+  if (routeLabel !== undefined) return `${labels[selection.field]} · ${routeLabel} · ${String(subleg?.phase ?? "phase unknown")}`;
+  return `${labels[selection.field]} · ${authoredRouteLabel(revision, subleg)} · ${String(subleg?.phase ?? "phase unknown")}`;
+}
+
+function labelledRoute(subleg: RecordValue | undefined): string | undefined {
+  return typeof subleg?.startLabel === "string" && typeof subleg.endLabel === "string" ? `${subleg.startLabel} → ${subleg.endLabel}` : undefined;
+}
+
+function authoredRouteLabel(revision: PlanRevision | undefined, subleg: RecordValue | undefined): string {
   const source = revision?.draftSnapshot.route.legs.find((leg) => leg.id === subleg?.sourceLegId);
   const from = revision?.draftSnapshot.route.points.find((point) => point.id === source?.fromPointId)?.name ?? "Unknown origin";
   const to = revision?.draftSnapshot.route.points.find((point) => point.id === source?.toPointId)?.name ?? "unknown destination";
-  return `${labels[selection.field]} · ${from} → ${to} · ${String(subleg?.phase ?? "phase unknown")}`;
+  return `${from} → ${to}`;
 }
 
 function appendTrace(section: HTMLElement, trace: RecordValue | undefined): void {
@@ -324,12 +374,17 @@ function appendProvenance(section: HTMLElement, provenance: RecordValue | undefi
 
 function selectedValue(row: RecordValue, field: NavlogInspectionField): unknown {
   const subleg = nested(row, "subleg");
-  if (field === "altitude") return `${displayValue(subleg?.startingAltitude)} → ${displayValue(subleg?.endingAltitude)} ft MSL`;
+  if (field === "altitude") return selectedAltitudeValue(subleg);
   if (field === "trueCourse") return subleg?.trueCourse;
   if (field === "distance") return subleg?.distance;
   if (field === "wind") return nested(nested(row, "effectiveWind")?.wind, "effectiveValue");
   if (field === "variation") return nested(row, "variation")?.effectiveValue;
   return row[field];
+}
+
+function selectedAltitudeValue(subleg: RecordValue | undefined): unknown {
+  if (subleg?.altitudePresentation === "cruise-assumption") return subleg.selectedCruiseAltitude;
+  return `${displayValue(subleg?.startingAltitude)} → ${displayValue(subleg?.endingAltitude)} ft MSL`;
 }
 
 function selectedTrace(row: RecordValue, field: NavlogInspectionField): RecordValue | undefined {

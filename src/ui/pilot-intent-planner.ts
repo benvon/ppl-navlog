@@ -2,7 +2,7 @@ import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
 import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
-import { resolveRouteWeather, validateNominalCruiseSeparation } from "../application/route-weather-sampling";
+import { resolveRouteWeather, validateWorksheetPlanningInputs } from "../application/route-weather-sampling";
 import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
@@ -22,7 +22,7 @@ export interface PilotIntentPlannerDependencies {
   readonly clock: UseCaseClock;
 }
 
-const fieldNames = ["plan-title", "departure-time", "fuel-aboard", "taxi-fuel", "reserve-fuel", "descent-target", "departure-icao", "destination-icao", "departure-metar-icao"] as const;
+const fieldNames = ["plan-title", "departure-time", "fuel-aboard", "taxi-fuel", "reserve-fuel", "departure-icao", "destination-icao", "departure-metar-icao", "cruise-altitude"] as const;
 type FieldName = typeof fieldNames[number];
 interface PlanControlAvailability {
   readonly edit: boolean;
@@ -32,7 +32,7 @@ interface PlanControlAvailability {
   readonly recovery: boolean;
 }
 const initialFields: Readonly<Record<FieldName, string>> = {
-  "plan-title": "New study route", "departure-time": "", "fuel-aboard": "", "taxi-fuel": "0", "reserve-fuel": "0", "descent-target": "",
+  "plan-title": "New study route", "departure-time": "", "fuel-aboard": "", "taxi-fuel": "0", "reserve-fuel": "0", "cruise-altitude": "4500",
   "departure-icao": "", "destination-icao": "", "departure-metar-icao": "",
 };
 
@@ -71,18 +71,44 @@ class PilotIntentPlanner {
 
   private get current(): PilotInputPlan | undefined { return this.planState.view.activeDraft; }
   private get plans(): readonly PilotInputPlan[] { return this.planState.view.savedPlans; }
-  private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}); }
+  private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}, this.current?.cruiseAltitudeTexts ?? []); }
 
   async initialize(): Promise<void> {
     try {
       await this.planState.initialize();
-      this.profiles = await this.dependencies.repository.listProfiles();
+      const unsupportedNotice = await this.loadProfilesAndRecoverPlan();
       const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
       this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
       this.activateStage(this.current?.selectedProfileId ? "route" : "aircraft");
       this.showGuidance();
+      if (unsupportedNotice && this.feedback.kind !== "error") this.setStatus(unsupportedNotice);
       this.render();
     } catch (error) { this.fail(error); this.render(); }
+  }
+
+  private async loadProfilesAndRecoverPlan(): Promise<string | undefined> {
+    this.profiles = await this.dependencies.repository.listProfiles();
+    const unsupported = this.dependencies.repository.consumeUnsupportedProfileNotice?.() ?? false;
+    const unsupportedIds = this.dependencies.repository.consumeUnsupportedProfileIds?.() ?? [];
+    const draft = this.current;
+    this.includeAttachedProfile(draft);
+    const missingUnsupported = draft?.selectedProfileId && unsupportedIds.includes(draft.selectedProfileId) && !this.profiles.some(({ id }) => id === draft.selectedProfileId);
+    if (draft && missingUnsupported) await this.clearUnsupportedProfileReference(draft);
+    return unsupported ? "A saved aircraft profile uses an unsupported format and was removed. Recreate the profile and select it again; your route and pilot inputs are preserved." : undefined;
+  }
+
+  private includeAttachedProfile(draft: PilotInputPlan | undefined): void {
+    const attached = draft?.profileSnapshot;
+    if (attached && attached.id === draft?.selectedProfileId && !this.profiles.some(({ id }) => id === attached.id)) this.profiles = [...this.profiles, attached];
+  }
+
+  private async clearUnsupportedProfileReference(draft: PilotInputPlan): Promise<void> {
+    const cleaned = { ...draft };
+    delete (cleaned as { selectedProfileId?: string }).selectedProfileId;
+    delete (cleaned as { profileSnapshot?: AircraftProfile }).profileSnapshot;
+    this.editDraft(cleaned);
+    const saved = await this.planState.save();
+    if (!saved.ok && saved.reason === "failed") throw new Error(`The unsupported profile reference could not be removed from the saved plan: ${saved.error ?? "save failed"}`);
   }
 
   private onPlanState(view: PlannerPlanView): void {
@@ -103,6 +129,7 @@ class PilotIntentPlanner {
   private showActiveDraft(view: PlannerPlanView): void {
     this.openOverrideEditors.clear();
     this.result = undefined; this.inspected = undefined;
+    this.includeAttachedProfile(view.activeDraft);
     const selected = this.profiles.find((profile) => profile.id === view.activeDraft?.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(view.activeDraft?.rawFields ?? {}, selected);
     this.touchedFields.clear();
@@ -215,14 +242,15 @@ class PilotIntentPlanner {
     plans.append(planSelect);
     const create = document.createElement("button"); create.type = "button"; create.textContent = "New plan"; create.addEventListener("click", () => this.newPlan()); plans.append(create); shell.append(plans);
     const form = document.createElement("form"); form.className = "route-form"; form.addEventListener("submit", (event) => event.preventDefault());
-    const groups: Record<"identity" | "timing" | "fuel" | "arrival" | "weather", HTMLElement> = {
-      identity: document.createElement("fieldset"), timing: document.createElement("fieldset"), fuel: document.createElement("fieldset"), arrival: document.createElement("fieldset"), weather: document.createElement("fieldset"),
+    const groups: Record<"identity" | "timing" | "fuel" | "weather", HTMLElement> = {
+      identity: document.createElement("fieldset"), timing: document.createElement("fieldset"), fuel: document.createElement("fieldset"), weather: document.createElement("fieldset"),
     };
-    for (const [key, title] of [["identity", "Route"], ["timing", "Departure time"], ["fuel", "Starting fuel"], ["arrival", "Arrival"], ["weather", "Departure weather source"]] as const) {
+    for (const [key, title] of [["identity", "Route"], ["timing", "Departure time"], ["fuel", "Starting fuel"], ["weather", "Departure weather source"]] as const) {
       const legend = document.createElement("legend"); legend.textContent = title; groups[key].append(legend);
     }
     fieldNames.forEach((name) => {
-      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "fuel-aboard": "Fuel aboard before taxi/run-up (gal; pilot input)", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "descent-target": "Arrival descent target (ft MSL; leave blank to accept destination field elevation + 1,000 ft)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)" };
+      if (name === "cruise-altitude") return;
+      const labels: Record<FieldName, string> = { "plan-title": "Plan title", "departure-time": "Planned departure UTC", "fuel-aboard": "Fuel aboard before taxi/run-up (gal; pilot input)", "taxi-fuel": "Taxi/run-up fuel (gal)", "reserve-fuel": "Reserve fuel (gal)", "departure-icao": "Departure airport code (FAA LID or ICAO)", "destination-icao": "Destination airport code (FAA LID or ICAO)", "departure-metar-icao": "Departure METAR ICAO alternate (blank uses airport ICAO)", "cruise-altitude": "Cruise altitude (feet MSL)" };
       const group = routeFieldGroup(name, groups);
       group.append(this.input(name, labels[name], this.fields[name] ?? ""));
     });
@@ -250,7 +278,7 @@ class PilotIntentPlanner {
       this.render();
     });
     profileLabel.append(profile);
-    form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.arrival, groups.weather);
+    form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
       input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => { this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist(); });
@@ -362,7 +390,8 @@ class PilotIntentPlanner {
     const checkpoints = this.current?.checkpoints ?? [];
     const route = document.createElement("section");
     route.className = "waypoint-list";
-    route.append(this.el("h3", "Waypoint altitudes and final cruise target"));
+    route.append(this.el("h3", "Route checkpoints"));
+    route.append(this.input("cruise-altitude", "Cruise altitude (feet MSL)", this.fields["cruise-altitude"] ?? ""));
     const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
     route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
     checkpoints.forEach((point, index) => {
@@ -377,12 +406,9 @@ class PilotIntentPlanner {
       if ((this.current?.checkpoints.length ?? 0) >= MAX_CHECKPOINTS_PER_PLAN) return;
       const hadOverrides = this.clearRouteOverrides();
       const current = this.current ?? this.blankPlan();
-      const altitudes = [...current.cruiseAltitudeTexts];
-      altitudes.splice(Math.max(0, altitudes.length - 1), 0, "4500");
       this.editDraft(this.withIdentity({
         ...current,
         checkpoints: [...current.checkpoints, { name: "", coordinateText: "" }],
-        cruiseAltitudeTexts: altitudes,
         overrideReasons: {},
       }));
       this.invalidate();
@@ -410,11 +436,6 @@ class PilotIntentPlanner {
     legend.textContent = `${sourceLabel} — outbound to ${destinationLabel}`;
     group.append(legend);
     if (checkpoint !== undefined && checkpointIndex !== undefined) this.appendCheckpointEditor(group, checkpoint, checkpointIndex);
-    const altitude = this.current?.cruiseAltitudeTexts[legIndex] ?? "4500";
-    const altitudeLabel = destinationLabel === "Destination"
-      ? "Final cruise target before top of descent (feet MSL)"
-      : `Altitude required at ${destinationLabel} (feet MSL)`;
-    group.append(this.input(`altitude-${legIndex}`, altitudeLabel, altitude));
     this.appendTasControls(group, legIndex);
     return group;
   }
@@ -435,9 +456,7 @@ class PilotIntentPlanner {
     if (!current) return;
     const nextCheckpoints = [...current.checkpoints];
     nextCheckpoints.splice(index, 1);
-    const altitudes = [...current.cruiseAltitudeTexts];
-    if (index < altitudes.length - 1) altitudes.splice(index, 1);
-    this.editDraft(this.withIdentity({ ...current, checkpoints: nextCheckpoints, cruiseAltitudeTexts: altitudes, overrideReasons: {} }));
+    this.editDraft(this.withIdentity({ ...current, checkpoints: nextCheckpoints, overrideReasons: {} }));
     this.invalidate();
     this.render();
     void this.persist().then(() => {
@@ -557,11 +576,11 @@ class PilotIntentPlanner {
   private captureStructured(form: HTMLFormElement): void {
     const get = (selector: string) => form.querySelector<HTMLInputElement>(`[name="${selector}"]`)?.value ?? "";
     const checkpoints = (this.current?.checkpoints ?? []).map((_point, i) => ({ name: get(`checkpoint-name-${i}`), coordinateText: get(`checkpoint-coordinate-${i}`) }));
-    const cruiseAltitudeTexts = [...form.querySelectorAll<HTMLInputElement>("input[name^='altitude-']")].map((x) => x.value);
+    const cruiseAltitude = get("cruise-altitude");
     const overrideReasons = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("input[name^='override-reason-']")].map((x) => [`tas-${x.name.slice("override-reason-".length)}`, x.value]));
     const fields = this.fields;
     [...form.querySelectorAll<HTMLInputElement>("input[name^='override-tas-']")].forEach((x) => { fields[x.name] = x.value; });
-    this.editDraft(this.withIdentity({ ...(this.current ?? this.blankPlan()), rawFields: { ...fields, ...Object.fromEntries(fieldNames.map((name) => [name, get(name)])) }, checkpoints, cruiseAltitudeTexts, overrideReasons }));
+    this.editDraft(this.withIdentity({ ...(this.current ?? this.blankPlan()), rawFields: { ...fields, ...Object.fromEntries(fieldNames.map((name) => [name, name === "cruise-altitude" ? cruiseAltitude : get(name)])) }, checkpoints, overrideReasons }));
   }
   private invalidate(): void {
     this.result = undefined;
@@ -659,7 +678,7 @@ class PilotIntentPlanner {
       departure,
       checkpoints,
       destination,
-      cruiseAltitudesFeetMsl: current.cruiseAltitudeTexts.map(Number),
+      cruiseAltitudesFeetMsl: Array(current.checkpoints.length + 1).fill(Number(raw["cruise-altitude"])),
     }, this.dependencies.ids);
     const weatherSelection = weatherSelectionFromInputs(raw, departure.icao);
     const draft = createPlanDraft({
@@ -670,9 +689,8 @@ class PilotIntentPlanner {
       fuelAboardGallons: Number(raw["fuel-aboard"]),
       taxiRunupFuelGallons: Number(raw["taxi-fuel"]),
       reserveFuelGallons: Number(raw["reserve-fuel"]),
-      descentTargetAltitudeFeetMsl: raw["descent-target"]?.trim()
-        ? Number(raw["descent-target"])
-        : destination.elevationFeetMsl + 1000,
+      descentTargetAltitudeFeetMsl: destination.elevationFeetMsl,
+      descentTargetSource: "destination-field-elevation",
       weatherSelection,
     }, this.dependencies.ids, this.dependencies.clock);
     return { draft: this.applyOverrides(draft, profile, route, current), profile };
@@ -719,7 +737,7 @@ class PilotIntentPlanner {
     return { departureMetar };
   }
   private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
-    validateNominalCruiseSeparation(draft, profile);
+    validateWorksheetPlanningInputs(draft, profile);
     const { departureMetar } = await this.fetchEndpointWeather(draft);
     const solution = await resolveRouteWeather(draft, profile, {
       fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
@@ -783,10 +801,9 @@ class PilotIntentPlanner {
   }
 }
 
-function routeFieldGroup(name: FieldName, groups: Record<"identity" | "timing" | "fuel" | "arrival" | "weather", HTMLElement>): HTMLElement {
+function routeFieldGroup(name: FieldName, groups: Record<"identity" | "timing" | "fuel" | "weather", HTMLElement>): HTMLElement {
   if (name === "departure-time") return groups.timing;
   if (name === "fuel-aboard" || name === "taxi-fuel" || name === "reserve-fuel") return groups.fuel;
-  if (name === "descent-target") return groups.arrival;
   if (name === "departure-metar-icao") return groups.weather;
   return groups.identity;
 }
@@ -823,14 +840,20 @@ function buildWeatherSelection(departureMetarIcao: string | undefined) {
     ...(departureMetarIcao === undefined ? {} : { departureMetarIcao }),
   };
 }
-function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record<string, string> {
-  return {
+function restorePilotFields(rawFields: Readonly<Record<string, string>>, legacyCruiseAltitudes: readonly string[]): Record<string, string> {
+  const fields = {
     ...initialFields,
     ...rawFields,
     "departure-metar-icao": Object.hasOwn(rawFields, "departure-metar-icao")
       ? rawFields["departure-metar-icao"] ?? ""
       : rawFields["surface-weather-icao"] ?? "",
   };
+  if (!Object.hasOwn(rawFields, "cruise-altitude")) {
+    const sharedAltitude = legacyCruiseAltitudes[0];
+    fields["cruise-altitude"] = sharedAltitude !== undefined && sharedAltitude.trim() !== ""
+      && legacyCruiseAltitudes.every((text) => text.trim() === sharedAltitude.trim()) ? sharedAltitude : "";
+  }
+  return fields;
 }
 function weatherSelectionFromInputs(
   raw: Readonly<Record<string, string>>,
@@ -928,7 +951,7 @@ function validateLocalInputs(fields: Readonly<Record<string, string>>, plan: Pil
     profileDraftDirty ? "Save the edited aircraft profile first." : undefined,
     requiredFieldsError(fields), airportCodeError(fields["departure-icao"] ?? "", fields["destination-icao"] ?? ""),
     profileError(plan, profiles), departureTimeError(fields["departure-time"] ?? ""),
-    fuelError(fields), fuelAboardError(fields, plan, profiles), descentTargetError(fields["descent-target"] ?? ""), altitudeError(plan), checkpointError(plan),
+    fuelError(fields), fuelAboardError(fields, plan, profiles), altitudeError(fields, plan), checkpointError(plan),
     metarError(fields["departure-metar-icao"] ?? "", "Departure METAR"), tasOverrideError(plan, fields),
     overrideReasonError(plan, fields),
   ];
@@ -952,11 +975,10 @@ function fuelAboardError(fields: Readonly<Record<string, string>>, plan: PilotIn
   if (profile?.usableFuelGallons !== undefined && aboard > profile.usableFuelGallons) return `Fuel aboard exceeds usable capacity of ${profile.usableFuelGallons} gal.`;
   return undefined;
 }
-function descentTargetError(value: string): string | undefined { return value.trim() && !Number.isFinite(Number(value)) ? "Descent target must be a finite altitude." : undefined; }
-function altitudeError(plan: PilotInputPlan | undefined): string | undefined {
+function altitudeError(fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined): string | undefined {
   if (!plan) return "Open a plan first.";
-  if (plan.cruiseAltitudeTexts.length !== plan.checkpoints.length + 1) return "Enter exactly one altitude for every route checkpoint plus a final cruise target.";
-  return plan.cruiseAltitudeTexts.some((value) => value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) <= 0) ? "Enter a positive altitude in feet MSL for every checkpoint and the final cruise target." : undefined;
+  const value = fields["cruise-altitude"] ?? "";
+  return value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) <= 0 ? "Choose a cruise altitude in feet MSL before calculating." : undefined;
 }
 function checkpointError(plan: PilotInputPlan | undefined): string | undefined {
   if ((plan?.checkpoints.length ?? 0) > MAX_CHECKPOINTS_PER_PLAN) return `A plan can have no more than ${MAX_CHECKPOINTS_PER_PLAN} checkpoints.`;
@@ -975,7 +997,7 @@ function tasOverrideError(plan: PilotInputPlan | undefined, fields: Readonly<Rec
     const match = /^override-tas-(\d+)$/.exec(key);
     if (!match || text.trim() === "") continue;
     const index = Number(match[1]);
-    if (index >= plan.cruiseAltitudeTexts.length) return "Remove the TAS override for a leg that no longer exists.";
+    if (index >= plan.checkpoints.length + 1) return "Remove the TAS override for a leg that no longer exists.";
     if (!Number.isFinite(Number(text)) || Number(text) <= 0) return `Leg ${index + 1} TAS override must be a positive number of knots.`;
   }
   return undefined;
@@ -989,12 +1011,12 @@ function overrideReasonError(plan: PilotInputPlan | undefined, fields: Readonly<
   return undefined;
 }
 function fieldErrorFor(name: string, fields: Readonly<Record<string, string>>, plan: PilotInputPlan | undefined, profiles: readonly AircraftProfile[]): string | undefined {
-  return simpleFieldError(name, fields) ?? (name === "fuel-aboard" ? fuelAboardError(fields, plan, profiles) : undefined) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields);
+  return simpleFieldError(name, fields) ?? (name === "fuel-aboard" ? fuelAboardError(fields, plan, profiles) : undefined) ?? (name === "cruise-altitude" ? altitudeError(fields, plan) : undefined) ?? checkpointFieldError(name, fields) ?? legFieldError(name, fields);
 }
 function simpleFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";
   return titleFieldError(name, value) ?? departureTimeFieldError(name, value) ?? fuelFieldError(name, value)
-    ?? descentTargetFieldError(name, value) ?? airportFieldError(name, value)
+    ?? airportFieldError(name, value)
     ?? (name === "departure-metar-icao" ? metarError(value, "Departure METAR") : undefined);
 }
 function titleFieldError(name: string, value: string): string | undefined {
@@ -1004,7 +1026,6 @@ function titleFieldError(name: string, value: string): string | undefined {
 }
 function departureTimeFieldError(name: string, value: string): string | undefined { return name === "departure-time" ? departureTimeError(value) : undefined; }
 function fuelFieldError(name: string, value: string): string | undefined { return (name === "taxi-fuel" || name === "reserve-fuel") && (value.trim() === "" || !Number.isFinite(Number(value)) || Number(value) < 0) ? "Enter a nonnegative number." : undefined; }
-function descentTargetFieldError(name: string, value: string): string | undefined { return name === "descent-target" ? descentTargetError(value) : undefined; }
 function airportFieldError(name: string, value: string): string | undefined { return (name === "departure-icao" || name === "destination-icao") && !/^[A-Z0-9]{3,4}$/.test(value.trim().toUpperCase()) ? "Enter an exact three- or four-character airport code." : undefined; }
 function checkpointFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";
@@ -1017,11 +1038,7 @@ function checkpointFieldError(name: string, fields: Readonly<Record<string, stri
 }
 function legFieldError(name: string, fields: Readonly<Record<string, string>>): string | undefined {
   const value = fields[name] ?? "";
-  return altitudeFieldError(name, value) ?? overrideValueFieldError(name, value) ?? overrideReasonFieldError(name, fields);
-}
-function altitudeFieldError(name: string, value: string): string | undefined {
-  const altitude = /^altitude-(\d+)$/.exec(name);
-  return altitude && !(value.trim() && Number.isFinite(Number(value)) && Number(value) > 0) ? "Enter a positive required altitude in feet MSL." : undefined;
+  return overrideValueFieldError(name, value) ?? overrideReasonFieldError(name, fields);
 }
 function overrideValueFieldError(name: string, value: string): string | undefined {
   const override = /^override-tas-(\d+)$/.exec(name);

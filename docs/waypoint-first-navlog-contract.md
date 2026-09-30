@@ -1,4 +1,6 @@
-# Waypoint-first navlog behavioral contract
+# Waypoint-first navlog behavioral contract (superseded)
+
+Superseded on 2026-09-30 by [Navigation worksheet teaching contract](navigation-worksheet-teaching-contract.md). Retained as historical context for PR #33. Its intermediate altitude transitions, pattern-altitude endpoint, and final-checkpoint-based TOD rules are no longer current requirements.
 
 Status: **proposed for review** under [issue #26](https://github.com/benvon/ppl-navlog/issues/26). This document records agreed behavior and calls out choices that still need product approval. It supersedes conflicting calculation behavior in the older implementation plan only after approval and implementation; no calculation code changes in this issue.
 
