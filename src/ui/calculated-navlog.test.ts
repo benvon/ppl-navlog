@@ -76,6 +76,25 @@ describe("direct route generated event labels", () => {
   });
 });
 
+describe("field-elevation worksheet endpoint", () => {
+  it("labels the destination endpoint at field elevation and keeps legacy endpoint formats readable", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [], navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: 20 } },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-2", phaseId: "worksheet-descent", phase: "descent", startingAltitude: 4500, endingAltitude: 700, distance: 7 }, cumulative: { routeDistance: 20, estimatedTimeEnroute: 42 } },
+        ], fuelSummary: { requiredFuel: 10, enrouteFuel: 6, fuelAboard: 12, taxiRunupFuel: 1, fuelAfterTaxi: 11, estimatedArrivalFuel: 2, reserveFuel: 1, reserveMargin: 1 } },
+      },
+    };
+    const rendered = renderCalculatedNavlog(revision);
+    expect(rowLabels(rendered)[0]).toContain("Southern Wisconsin Regional (field elevation)");
+    expect(rendered?.textContent).toContain("Estimated fuel required through destination at field elevation");
+    expect(rendered?.textContent).toContain("Estimated balance at destination: 2.0 gal");
+  });
+});
+
 describe("generated navlog event labels", () => {
   it("keeps a nearby checkpoint distinct from TOC and TOD", () => {
     const parent = planRevision();

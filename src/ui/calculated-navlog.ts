@@ -3,7 +3,7 @@ import type { NavlogInspectionSelection, NavlogInspectionField } from "./calcula
 import { wholeNumberDisplay } from "./whole-number";
 
 type RecordValue = Record<string, unknown>;
-type NavlogEndpoint = { readonly kind: "pattern-altitude-airport" | "pattern-altitude-3nm"; readonly routeDistanceNauticalMiles: number };
+type NavlogEndpoint = { readonly kind: "pattern-altitude-airport" | "pattern-altitude-3nm" | "field-elevation-airport"; readonly routeDistanceNauticalMiles: number };
 const record = (value: unknown): value is RecordValue => typeof value === "object" && value !== null && !Array.isArray(value);
 const nested = (value: unknown, key: string): RecordValue | undefined => record(value) && record(value[key]) ? value[key] : undefined;
 const number = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
@@ -50,7 +50,7 @@ const calculatedNavlog = (snapshot: RecordValue): RecordValue | undefined => {
 
 const navlogEndpoint = (phaseAllocation: RecordValue | undefined): NavlogEndpoint | undefined => {
   const endpoint = nested(phaseAllocation, "navlogEndpoint");
-  return (endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "pattern-altitude-3nm")
+  return (endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "pattern-altitude-3nm" || endpoint?.kind === "field-elevation-airport")
     && typeof endpoint.routeDistanceNauticalMiles === "number"
     && Number.isFinite(endpoint.routeDistanceNauticalMiles)
     ? { kind: endpoint.kind, routeDistanceNauticalMiles: endpoint.routeDistanceNauticalMiles }
@@ -112,6 +112,7 @@ const renderCalculatedResult = (
 
 const fuelRequiredScope = (endpoint: NavlogEndpoint | undefined): string => {
   if (endpoint?.kind === "pattern-altitude-airport") return "Estimated fuel required through destination at pattern altitude, including taxi/run-up and reserve";
+  if (endpoint?.kind === "field-elevation-airport") return "Estimated fuel required through destination at field elevation, including taxi/run-up and reserve";
   if (endpoint?.kind === "pattern-altitude-3nm") return "Estimated fuel required through 3 NM point, including taxi/run-up and reserve";
   return "Estimated fuel required including taxi/run-up and reserve";
 };
@@ -123,7 +124,7 @@ const fuelBalance = (value: unknown): string => typeof value !== "number" || !Nu
   ? "—"
   : value < 0 ? `Deficit: ${fuelAmount(Math.abs(value))} gal` : `${fuelAmount(value)} gal`;
 const endpointFuelBalance = (value: unknown, endpoint: NavlogEndpoint | undefined): string => {
-  const location = endpoint?.kind === "pattern-altitude-airport" ? "at destination"
+  const location = endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "field-elevation-airport" ? "at destination"
     : endpoint?.kind === "pattern-altitude-3nm" ? "at 3 NM point" : "at arrival";
   return typeof value === "number" && Number.isFinite(value) && value < 0
     ? `Estimated deficit ${location}: ${fuelAmount(Math.abs(value))} gal`
@@ -338,6 +339,7 @@ const boundaryName = (candidate: unknown): string | undefined => {
 const patternEndpointLabel = (phase: unknown, routeDistance: unknown, endpoint: NavlogEndpoint | undefined, rowIndex: number, rowCount: number, routeEndpoint: string): string | undefined => {
   if (phase !== "descent" || rowIndex !== rowCount - 1 || endpoint === undefined) return undefined;
   if (typeof routeDistance !== "number" || Math.abs(endpoint.routeDistanceNauticalMiles - routeDistance) > 0.01) return undefined;
+  if (endpoint.kind === "field-elevation-airport") return `${routeEndpoint} (field elevation)`;
   return endpoint.kind === "pattern-altitude-airport" ? `${routeEndpoint} (pattern altitude)` : "3 NM before destination (pattern altitude)";
 };
 

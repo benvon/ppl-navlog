@@ -1,5 +1,7 @@
 # Route Phase Allocation
 
+Historical model: the active worksheet uses the [navigation teaching contract](navigation-worksheet-teaching-contract.md) and its one-time TOC/TOD estimates. The convergence, crossing-altitude, and intermediate-transition behavior described below remains only for legacy fixture callers pending issue #30 retirement.
+
 `allocateRoutePhases` turns the user route's selected per-leg cruise altitudes into an explicit vertical profile before any navigation-log rows are calculated. It accepts airport departure and destination altitudes as `FeetMsl`; callers must pass the actual field elevation when that is the intended starting or ending altitude. It does not assume sea level.
 
 The transition policy is `begin-at-checkpoint-and-consume-following-route-space`. Departure climb begins at the route origin. When the selected altitude changes between two user legs, the climb or descent begins at their shared checkpoint and occupies distance on the following route. Arrival descent begins at a generated TOD measured backwards from the destination. Thus an altitude chosen for a later leg is never represented as an instantaneous jump at its checkpoint.

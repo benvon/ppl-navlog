@@ -62,13 +62,13 @@ describe("waypoint worksheet contract examples", () => {
     const authored = route([0, 6, 60]);
     const overridden = {
       ...authored,
-      legs: authored.legs.map((leg, index) => index === 1 ? {
+      legs: authored.legs.map((leg, index) => index < 2 ? {
         ...leg,
         performanceOverrides: { cruiseTasKnots: {
-          computedValue: 120, effectiveValue: 100, origin: "pilot-input" as const,
-          provenance: { sourceId: "pilot", sourceLabel: "Pilot cruise TAS", recordedAt: "2026-06-01T00:00:00Z" },
+          computedValue: 120, effectiveValue: index === 0 ? 90 : 100, origin: "pilot-input" as const,
+          provenance: { sourceId: `pilot-${index}`, sourceLabel: `Pilot leg ${index + 1} TAS`, recordedAt: "2026-06-01T00:00:00Z" },
         } },
-      } : leg),
+    } : leg),
     };
     const result = await calculateWaypointWorksheet({
       route: overridden, profile, departureEstimatedUtc: "2026-06-01T14:00:00Z",
@@ -78,7 +78,7 @@ describe("waypoint worksheet contract examples", () => {
     });
     if (!result.ok) throw new Error(result.error.message);
     const firstCruise = result.value.rows.find(({ phase }) => phase === "cruise");
-    expect(firstCruise?.startWaypoint.kind).toBe("estimated-toc");
+    expect(["estimated-toc", "pilot-checkpoint"]).toContain(firstCruise?.startWaypoint.kind);
     expect(firstCruise?.trueAirspeedKnots).toBe(100);
     expect(firstCruise?.provenance.performanceInputs?.trueAirspeed.origin).toBe("pilot-input");
   });

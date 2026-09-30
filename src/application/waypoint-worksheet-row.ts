@@ -20,10 +20,11 @@ import { convertMagneticToCompassHeading, convertTrueToMagneticHeading } from ".
 import { calculateEstimatedTimeEnroute, calculateFuelForDuration } from "../domain/time-fuel";
 import { interpolateCompassDeviation, type DeviationTablePoint } from "../domain/deviation";
 import type { Wind } from "../domain/wind";
+import { trace, type CalculationTrace } from "../domain/calculation-trace";
 import type { PlanningValue } from "../domain/planning-value";
 import { solveWindTriangle } from "../domain/wind-triangle";
 
-export type WaypointWorksheetPhase = "climb" | "cruise" | "transition-climb" | "transition-descent" | "descent";
+export type WaypointWorksheetPhase = "climb" | "cruise" | "descent";
 
 export interface WaypointWorksheetRowInput {
   readonly startWaypoint: PreparedWaypoint;
@@ -86,6 +87,16 @@ export interface WaypointWorksheetRow {
   readonly cumulativeEstimatedMinutes: number;
   readonly cumulativeFuelUsedGallons: number;
   readonly provenance: WaypointWorksheetRowProvenance;
+  readonly traces: {
+    readonly effectiveWind: CalculationTrace;
+    readonly windTriangle: CalculationTrace;
+    readonly magneticVariation: CalculationTrace;
+    readonly trueToMagnetic: CalculationTrace;
+    readonly compassDeviation: CalculationTrace;
+    readonly magneticToCompass: CalculationTrace;
+    readonly estimatedTimeEnroute: CalculationTrace;
+    readonly fuel: CalculationTrace;
+  };
   readonly warnings: readonly string[];
 }
 
@@ -180,6 +191,7 @@ interface CalculatedRowLeg {
   readonly estimatedTimeEnrouteMinutes: number;
   readonly estimatedFuelGallons: number;
   readonly compassDeviationEastPositiveDegrees: number;
+  readonly traces: WaypointWorksheetRow["traces"];
 }
 
 const calculateLeg = (
@@ -213,6 +225,22 @@ const calculateLeg = (
     estimatedTimeEnrouteMinutes: ete.value.duration,
     estimatedFuelGallons: fuel.value.fuel,
     compassDeviationEastPositiveDegrees: deviation.value.deviation,
+    traces: {
+      effectiveWind: trace("selected-row-wind", [
+        { name: "wind direction from", value: input.wind.directionFrom, unit: "degrees-true" },
+        { name: "wind speed", value: input.wind.speed, unit: "knots" },
+      ], [], { name: "selected wind speed", value: input.wind.speed, unit: "knots" }),
+      windTriangle: windTriangle.value.trace,
+      magneticVariation: trace("row-magnetic-variation", [
+        { name: "true course", value: geometry.value.initialTrueCourse, unit: "degrees-true" },
+        { name: "variation (east positive)", value: validated.variation, unit: "degrees" },
+      ], [], { name: "variation (east positive)", value: validated.variation, unit: "degrees" }),
+      trueToMagnetic: magnetic.value.trace,
+      compassDeviation: deviation.value.trace,
+      magneticToCompass: compass.value.trace,
+      estimatedTimeEnroute: ete.value.trace,
+      fuel: fuel.value.trace,
+    },
   });
 };
 

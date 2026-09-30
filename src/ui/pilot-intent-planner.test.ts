@@ -5,7 +5,7 @@ import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
 import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
-import { coordinate, type Coordinate } from "../domain/coordinates";
+import { coordinate } from "../domain/coordinates";
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
@@ -134,7 +134,6 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
   edit(root, "fuel-aboard", "20");
   edit(root, "taxi-fuel", "0.8");
   edit(root, "reserve-fuel", "3");
-  edit(root, "descent-target", "1800");
   edit(root, "departure-icao", "KORD");
   edit(root, "destination-icao", "KJVL");
   if (withSurfaceMetar) edit(root, "departure-metar-icao", "KORD");
@@ -144,37 +143,51 @@ async function makeLocallyValid(root: HTMLElement, withSurfaceMetar = false): Pr
   await settle();
 }
 
+async function assertCompactNavlogInspector(root: HTMLElement, inspector: Element): Promise<void> {
+  const displayedNavlog = root.querySelector<HTMLElement>(".calculated-navlog");
+  expect(displayedNavlog?.nextElementSibling).toBe(inspector);
+  expect(displayedNavlog?.querySelectorAll("tbody tr").length).toBeGreaterThan(0);
+  expect(displayedNavlog?.textContent).not.toContain("Wind components");
+  const fuel = root.querySelector<HTMLButtonElement>('button[data-inspect-field="fuel"]');
+  if (!fuel) throw new Error("Missing fuel inspection control.");
+  fuel.click();
+  await settle();
+  const fuelInspector = root.querySelector(".calculation-inspector");
+  expect(fuelInspector?.querySelector(".calculation-walkthrough")?.textContent).toMatch(/Groundspeed[\s\S]*Time enroute[\s\S]*Fuel consumed/);
+  expect(root.querySelector(".calculated-navlog")?.nextElementSibling).toBe(fuelInspector);
+  const compass = root.querySelector<HTMLButtonElement>('button[data-inspect-field="compassHeading"]');
+  if (!compass) throw new Error("Missing compass-heading inspection control.");
+  compass.click();
+  await settle();
+  expect(root.querySelector(".calculation-inspector .calculation-walkthrough")?.textContent).toMatch(/Wind correction[\s\S]*True heading[\s\S]*Magnetic heading[\s\S]*Compass heading/);
+}
+
 function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], queries: readonly AloftPointQuery[]): void {
-  expect(callOrder).toEqual(["metar", ...queries.map(() => "point")]);
+  expect(callOrder).toEqual(["metar", "point", "point"]);
   expect(queries).toHaveLength(2);
   const departure = coordinate(41.9742, -87.9073), destination = coordinate(42.6203, -89.0416);
   if (!departure.ok || !destination.ok) throw new Error("Study airport fixture coordinates were invalid.");
-  const routeGeometry = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
-  if (!routeGeometry.ok) throw new Error(routeGeometry.error.message);
-  const interiorDistances = queries.map((query) => routeDistanceForWeatherQuery(query, departure.value, destination.value, routeGeometry.value.distance));
-
-  interiorDistances.forEach((distance) => {
-    expect(distance).toBeGreaterThan(0);
-    expect(distance).toBeLessThan(routeGeometry.value.distance);
-  });
-  expect(interiorDistances).toHaveLength(2);
-  expect(interiorDistances[1]).toBeGreaterThan(interiorDistances[0]!);
-}
-
-function routeDistanceForWeatherQuery(query: AloftPointQuery, departure: Coordinate, destination: Coordinate, routeDistance: number): number {
-  const point = coordinate(query.latitudeDeg, query.longitudeDeg);
-  if (!point.ok) throw new Error(point.error.message);
-  const fromDeparture = calculateGreatCircleDistanceAndInitialCourse(departure, point.value);
-  const toDestination = calculateGreatCircleDistanceAndInitialCourse(point.value, destination);
-  if (!fromDeparture.ok || !toDestination.ok) throw new Error("A sampled weather event coordinate was invalid.");
-  expect(fromDeparture.value.distance + toDestination.value.distance).toBeCloseTo(routeDistance, 1);
-  return fromDeparture.value.distance;
+  const route = calculateGreatCircleDistanceAndInitialCourse(departure.value, destination.value);
+  if (!route.ok) throw new Error(route.error.message);
+  const destinationForecast = queries[0]!;
+  expect(destinationForecast).toMatchObject({ latitudeDeg: destination.value.latitude, longitudeDeg: destination.value.longitude, altitudeFeetMsl: 4500 });
+  const estimatedArrival = new Date(Date.parse("2026-09-21T22:00:00.000Z") + route.value.distance / profile.cruiseTasKnots * 3_600_000);
+  expect(destinationForecast.plannedUtc).toBe(estimatedArrival.toISOString());
+  const tocForecast = queries[1]!;
+  expect(tocForecast.altitudeFeetMsl).toBe(4500);
+  expect(Date.parse(tocForecast.plannedUtc)).toBeLessThan(Date.parse(destinationForecast.plannedUtc));
+  const toc = coordinate(tocForecast.latitudeDeg, tocForecast.longitudeDeg);
+  if (!toc.ok) throw new Error(`${toc.error.message}: ${JSON.stringify(tocForecast)}`);
+  const toToc = calculateGreatCircleDistanceAndInitialCourse(departure.value, toc.value);
+  const toDestination = calculateGreatCircleDistanceAndInitialCourse(toc.value, destination.value);
+  if (!toToc.ok || !toDestination.ok) throw new Error("TOC forecast coordinate was invalid.");
+  expect(toToc.value.distance).toBeGreaterThan(0);
+  expect(toToc.value.distance + toDestination.value.distance).toBeCloseTo(route.value.distance, 1);
 }
 
 describe("pilot intent planner", () => {
-  it("blocks nominal TOC/TOD overlap before fetching any weather", async () => {
-    const repository = new MemoryInputs();
-    repository.profiles.push(profile);
+  it("blocks a nominal TOC/TOD overlap after the placement weather is available", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({ id: "short-profile", title: "Short profile", rawFields: {
       "plan-title": "Short profile", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "departure-metar-icao": "KORD",
@@ -188,9 +201,9 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
 
-    expect(root.querySelector("[role='status']")?.textContent).toMatch(/route is too short.*TOC.*TOD/i);
-    expect(fetchMetar).not.toHaveBeenCalled();
-    expect(fetchPoint).not.toHaveBeenCalled();
+    expect(root.querySelector("[role='status']")?.textContent).toMatch(/Estimated TOC .* TOD .* overlap/i);
+    expect(fetchMetar).toHaveBeenCalledTimes(1);
+    expect(fetchPoint).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a saved past departure from a fetched newer METAR and reuses the same report", async () => {
@@ -625,15 +638,16 @@ describe("pilot intent planner", () => {
     const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
     expect(Math.round(Number(storedMatch[1]))).toBe(Number.parseInt(displayedGroundspeed, 10));
-    expect(inspector.textContent).toContain("departure METAR wind speed");
+    expect(inspector.textContent).toContain("TOC placement uses departure METAR wind as an initial climb approximation; checkpoint forecasts can change subsequent row estimates.");
     expect(inspector.textContent).toContain("KORD");
     expect(inspector.textContent).not.toContain("horizontal weight");
     expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
     expect(inspector.querySelector("details")?.open).toBe(false);
+    await assertCompactNavlogInspector(root, inspector);
 
   });
 
-  it("displays a descent-rate warning from TOD weather", async () => {
+  it("keeps the profile descent rate fixed when destination winds affect the estimate", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     let requestNumber = 0;
     const client = winds({ fetchPoint: async (query) => {
@@ -648,7 +662,7 @@ describe("pilot intent planner", () => {
 
     expect(requestNumber).toBe(2);
     expect(repository.submissions).toHaveLength(1);
-    expect(root.querySelector(".navlog-warnings")?.textContent).toContain("150%");
+    expect(root.querySelector(".navlog-warnings")?.textContent ?? "").not.toContain("150%");
   });
 
   it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
@@ -721,14 +735,15 @@ describe("pilot intent planner", () => {
     edit(root, "plan-title", " Saved draft ");
     edit(root, "checkpoint-name-0", "Farm strip");
     edit(root, "checkpoint-coordinate-0", "N4145 W08730");
-    edit(root, "altitude-0", "not decided");
+    edit(root, "cruise-altitude", "not decided");
     button(root, "Save changes").click();
     await settle();
 
     const saved = repository.plans.at(-1)!;
     expect(saved.rawFields["plan-title"]).toBe(" Saved draft ");
     expect(saved.checkpoints).toEqual([{ name: "Farm strip", coordinateText: "N4145 W08730" }]);
-    expect(saved.cruiseAltitudeTexts).toEqual(["not decided", "4500"]);
+    expect(saved.cruiseAltitudeTexts).toEqual(["4500"]);
+    expect(saved.rawFields["cruise-altitude"]).toBe("not decided");
     expect(repository.submissions).toHaveLength(0);
     expect(fetchMetar).not.toHaveBeenCalled();
     expect(fetchPoint).not.toHaveBeenCalled();
@@ -736,7 +751,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
   });
 
-  it("groups each outbound altitude and TAS control with its source waypoint", async () => {
+  it("shows one cruise altitude outside the checkpoint groups and keeps per-leg TAS controls", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     edit(root, "departure-icao", "KORD");
@@ -751,7 +766,8 @@ describe("pilot intent planner", () => {
     const checkpoint = waypointGroup(root, "checkpoint-0");
     expect(departure.tagName).toBe("FIELDSET");
     expect(departure.querySelector("legend")?.textContent).toContain("Departure");
-    expect(groupInput(departure, "altitude-0")).toBeTruthy();
+    expect(input(root, "cruise-altitude").parentElement?.textContent).toContain("Cruise altitude (feet MSL)");
+    expect(departure.querySelector("input[name^='altitude-']")).toBeNull();
     expect(departure.querySelector("legend")?.textContent).toContain("Checkpoint 1");
     expect(departure.textContent).toContain("Override TAS for leg 1");
 
@@ -759,80 +775,53 @@ describe("pilot intent planner", () => {
     expect(checkpoint.querySelector("legend")?.textContent).toContain("Checkpoint 1");
     expect(groupInput(checkpoint, "checkpoint-name-0").value).toBe("Farm strip");
     expect(groupInput(checkpoint, "checkpoint-coordinate-0")).toBeTruthy();
-    expect(groupInput(checkpoint, "altitude-1")).toBeTruthy();
+    expect(checkpoint.querySelector("input[name^='altitude-']")).toBeNull();
     expect(checkpoint.textContent).toContain("Destination");
     expect(checkpoint.textContent).toContain("Override TAS for leg 2");
   });
 
-  it("inserts a new checkpoint altitude before the final target on a direct plan", async () => {
+  it("keeps the chosen cruise altitude stable when checkpoints are added", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);
-    edit(root, "altitude-0", "6200");
+    edit(root, "cruise-altitude", "6200");
 
     button(root, "Add checkpoint").click();
     await settle();
 
-    expect(input(root, "altitude-0").value).toBe("4500");
-    expect(input(root, "altitude-1").value).toBe("6200");
-    expect(repository.plans.at(-1)?.cruiseAltitudeTexts).toEqual(["4500", "6200"]);
+    expect(input(root, "cruise-altitude").value).toBe("6200");
+    expect(repository.plans.at(-1)?.cruiseAltitudeTexts).toEqual(["4500"]);
+    expect(repository.plans.at(-1)?.rawFields["cruise-altitude"]).toBe("6200");
   });
 
-  it.each([
-    { index: 0, expected: ["6200", "7300", "8400"] },
-    { index: 1, expected: ["5100", "7300", "8400"] },
-    { index: 2, expected: ["5100", "6200", "8400"] },
-  ])("removing checkpoint $index preserves the other altitude targets and final target", async ({ index, expected }) => {
-    const repository = new MemoryInputs();
-    repository.plans.push({
-      id: `remove-checkpoint-${index}`, title: "Altitude preservation", rawFields: { "plan-title": "Altitude preservation" },
-      checkpoints: [
-        { name: "First", coordinateText: "414500N0873000W" },
-        { name: "Middle", coordinateText: "414600N0873100W" },
-        { name: "Last", coordinateText: "414700N0873200W" },
-      ], cruiseAltitudeTexts: ["5100", "6200", "7300", "8400"], overrideReasons: {},
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
-    });
-    const root = await mount(repository);
-
-    button(root, `Remove checkpoint ${index + 1}`).click();
-    await settle();
-
-    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(expected);
-    expected.forEach((altitude, altitudeIndex) => expect(input(root, `altitude-${altitudeIndex}`).value).toBe(altitude));
-  });
-
-  it("labels checkpoint altitude requirements and the final cruise target when route details change", async () => {
+  it("infers a shared legacy altitude but requires an explicit choice for differing legacy values", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
-      id: "stable-waypoint-labels", title: "Stable waypoint labels", rawFields: {
-        "plan-title": "Stable waypoint labels", "departure-icao": "KORD", "destination-icao": "KJVL",
+      id: "shared-legacy-altitude", title: "Shared legacy altitude", rawFields: { "plan-title": "Shared legacy altitude" },
+      checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "4500"],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    repository.plans.push({
+      id: "differing-legacy-altitudes", title: "Differing legacy altitudes", rawFields: {
+        "plan-title": "Differing legacy altitudes", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20",
+        "taxi-fuel": "0.8", "reserve-fuel": "3", "departure-icao": "KORD", "destination-icao": "KJVL", "descent-target": "1800",
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "6200"],
       overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
     });
     const root = await mount(repository);
-
-    edit(root, "checkpoint-name-0", "Renamed strip");
-    edit(root, "destination-icao", "KMSN");
-    button(root, "Override TAS for leg 1").click();
-
-    const departure = waypointGroup(root, "departure");
-    const checkpoint = waypointGroup(root, "checkpoint-0");
-    expect(departure.querySelector("legend")?.textContent).toBe("Departure — outbound to Checkpoint 1");
-    expect(groupInput(departure, "altitude-0").parentElement?.textContent).toContain("Altitude required at Checkpoint 1 (feet MSL)");
-    expect(checkpoint.querySelector("legend")?.textContent).toBe("Checkpoint 1 — outbound to Destination");
-    expect(groupInput(checkpoint, "altitude-1").parentElement?.textContent).toContain("Final cruise target before top of descent (feet MSL)");
-    expect(root.querySelector(".waypoint-list h3")?.textContent).toBe("Waypoint altitudes and final cruise target");
+    expect(input(root, "cruise-altitude").value).toBe("4500");
+    choosePlan(root, "Differing legacy altitudes");
+    await settle();
+    expect(input(root, "cruise-altitude").value).toBe("");
+    expect(root.querySelector("[data-local-error]")?.textContent).toContain("Choose a cruise altitude");
+    edit(root, "cruise-altitude", "6100", true);
+    await settle();
+    expect(repository.plans.find((plan) => plan.id === "differing-legacy-altitudes")?.cruiseAltitudeTexts).toEqual(["4500", "6200"]);
+    expect(repository.plans.find((plan) => plan.id === "differing-legacy-altitudes")?.rawFields["cruise-altitude"]).toBe("6100");
+    expect(repository.plans.find((plan) => plan.id === "differing-legacy-altitudes")?.rawFields["descent-target"]).toBe("1800");
   });
 
-  it("labels the direct-route altitude as the final cruise target before top of descent", async () => {
-    const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const root = await mount(repository);
-
-    expect(input(root, "altitude-0").parentElement?.textContent).toContain("Final cruise target before top of descent (feet MSL)");
-  });
-
-  it("does not mark valid structured waypoint inputs invalid when opening a saved plan", async () => {
+  it("removes the descent-target editor while retaining its legacy raw text", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
       id: "valid-waypoint-plan", title: "Valid waypoint plan", rawFields: {
@@ -844,16 +833,20 @@ describe("pilot intent planner", () => {
     });
     const root = await mount(repository);
 
-    expect(input(root, "altitude-0").value).toBe("4500");
-    expect(input(root, "altitude-0").getAttribute("aria-invalid")).toBe("false");
-    expect(root.querySelector("#altitude-0-error")?.textContent).toBe("");
+    expect(input(root, "cruise-altitude").value).toBe("");
+    expect(root.querySelector("[name='descent-target']")).toBeNull();
+    expect(root.querySelector("[name^='altitude-']")).toBeNull();
     expect(input(root, "checkpoint-name-0").getAttribute("aria-invalid")).toBe("false");
     expect(root.querySelector("#checkpoint-name-0-error")?.textContent).toBe("");
     expect(input(root, "checkpoint-coordinate-0").getAttribute("aria-invalid")).toBe("false");
     expect(root.querySelector("#checkpoint-coordinate-0-error")?.textContent).toBe("");
+    edit(root, "cruise-altitude", "6100", true);
+    await settle();
+    expect(repository.plans[0]?.rawFields["descent-target"]).toBe("1800");
+    expect(repository.plans[0]?.rawFields["cruise-altitude"]).toBe("6100");
   });
 
-  it("preserves outbound altitude indexing and clears TAS overrides when adding or removing a checkpoint", async () => {
+  it("preserves legacy altitude history and indexes TAS overrides by route legs", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({
       id: "waypoint-altitudes", title: "Waypoint altitudes", rawFields: {
@@ -865,17 +858,33 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     button(root, "Add checkpoint").click();
     await settle();
-    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4500", "4100"]);
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100"]);
     expect(repository.plans[0]?.overrideReasons).toEqual({});
     expect(repository.plans[0]?.rawFields).not.toHaveProperty("override-tas-0");
 
-    edit(root, "altitude-1", "6200", true);
+    edit(root, "cruise-altitude", "6200", true);
     await settle();
     button(root, "Remove checkpoint 1").click();
     await settle();
-    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["6200"]);
+    expect(repository.plans[0]?.cruiseAltitudeTexts).toEqual(["4100"]);
     expect(repository.plans[0]?.overrideReasons).toEqual({});
-    expect(input(root, "altitude-0").value).toBe("6200");
+    expect(input(root, "cruise-altitude").value).toBe("6200");
+  });
+
+  it("validates TAS overrides from checkpoint count when legacy altitude history has extra entries", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push({
+      id: "tas-route-index", title: "TAS route index", rawFields: {
+        "plan-title": "TAS route index", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8",
+        "reserve-fuel": "3", "departure-icao": "KORD", "destination-icao": "KJVL", "cruise-altitude": "4500",
+        "override-tas-0": "100", "override-reason-0": "Training comparison",
+      }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4100", "6200", "7300"],
+      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+    });
+    const root = await mount(repository);
+
+    expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
+    expect(groupInput(waypointGroup(root, "departure"), "override-tas-0").value).toBe("100");
   });
 
   it("waits for queued autosaves and keeps the editor text after a failed explicit save and retry", async () => {

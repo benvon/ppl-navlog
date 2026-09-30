@@ -54,6 +54,8 @@ export interface PlanDraftInput {
   readonly descentTargetAltitudeFeetMsl: number;
   /** False only for the explicit destination-elevation plus 1,000-ft default. */
   readonly descentTargetIsManual?: boolean;
+  /** Identifies the current worksheet's airport field-elevation endpoint. */
+  readonly descentTargetSource?: "destination-field-elevation";
   readonly weatherSelection?: PlanWeatherSelection;
 }
 
@@ -138,9 +140,11 @@ export function createPlanDraft(input: PlanDraftInput, ids: UseCaseIds, clock: U
     selectedAircraftProfileId: input.selectedAircraftProfileId,
     fuelInputs: createPlanFuelInputs(input),
     ...(input.weatherSelection === undefined ? {} : { weatherSelection: input.weatherSelection }),
-    descentTargetAltitudeFeetMsl: input.descentTargetIsManual === false
-      ? automaticDescentTargetValue(input.descentTargetAltitudeFeetMsl, createdAt)
-      : pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
+    descentTargetAltitudeFeetMsl: input.descentTargetSource === "destination-field-elevation"
+      ? destinationFieldElevationValue(input.descentTargetAltitudeFeetMsl, createdAt)
+      : input.descentTargetIsManual === false
+        ? automaticDescentTargetValue(input.descentTargetAltitudeFeetMsl, createdAt)
+        : pilotInputValue(input.descentTargetAltitudeFeetMsl, "descent-target", "Pilot-entered descent target", createdAt),
     createdAt,
     updatedAt: createdAt,
   };
@@ -281,6 +285,15 @@ function automaticDescentTargetValue(value: number, recordedAt: string): Plannin
       sourceLabel: "Destination field elevation plus 1,000 ft",
       recordedAt,
     },
+  };
+}
+
+function destinationFieldElevationValue(value: number, recordedAt: string): PlanningValue<number> {
+  return {
+    computedValue: value,
+    effectiveValue: value,
+    origin: "external-data",
+    provenance: { sourceId: "destination-field-elevation", sourceLabel: "Destination airport field elevation", recordedAt },
   };
 }
 
