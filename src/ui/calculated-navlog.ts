@@ -224,8 +224,9 @@ const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: Pla
   const cumulative = nested(row, "cumulative");
   const labels = navlogRowLabels(rows, revision, rowIndex, boundaries, endpoint);
   const phaseLabel = `${labels.from} → ${labels.to} · ${text(subleg?.phase)}`;
+  const altitude = navlogAltitude(subleg);
   tr.append(
-    cell(phaseLabel), inspectionCell("altitude", `${wholeHundredsOfFeet(subleg?.startingAltitude)} → ${wholeHundredsOfFeet(subleg?.endingAltitude)}`, subleg, labels, rowIndex, options), inspectionCell("trueCourse", wholeDegrees(subleg?.trueCourse), subleg, labels, rowIndex, options),
+    cell(phaseLabel), inspectionCell("altitude", altitude, subleg, labels, rowIndex, options), inspectionCell("trueCourse", wholeDegrees(subleg?.trueCourse), subleg, labels, rowIndex, options),
     inspectionCell("wind", `${wholeDegrees(wind?.directionFrom)}° / ${wholeKnots(wind?.speed)} kt`, subleg, labels, rowIndex, options), inspectionCell("windCorrectionAngle", wholeDegrees(row.windCorrectionAngle), subleg, labels, rowIndex, options), inspectionCell("trueHeading", wholeDegrees(row.trueHeading), subleg, labels, rowIndex, options),
     inspectionCell("variation", wholeDegrees(nested(row, "variation")?.effectiveValue), subleg, labels, rowIndex, options), inspectionCell("magneticHeading", wholeDegrees(row.magneticHeading), subleg, labels, rowIndex, options), inspectionCell("compassDeviation", wholeDegrees(row.compassDeviation), subleg, labels, rowIndex, options),
     inspectionCell("compassHeading", wholeDegrees(row.compassHeading), subleg, labels, rowIndex, options), inspectionCell("distance", number(subleg?.distance), subleg, labels, rowIndex, options), inspectionCell("groundspeed", wholeKnots(row.groundspeed), subleg, labels, rowIndex, options), inspectionCell("estimatedTimeEnroute", wholeNumber(row.estimatedTimeEnroute), subleg, labels, rowIndex, options),
@@ -234,6 +235,10 @@ const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: Pla
   );
   return tr;
 };
+
+const navlogAltitude = (subleg: RecordValue | undefined): string => subleg?.altitudePresentation === "cruise-assumption"
+  ? wholeHundredsOfFeet(subleg.selectedCruiseAltitude)
+  : `${wholeHundredsOfFeet(subleg?.startingAltitude)} → ${wholeHundredsOfFeet(subleg?.endingAltitude)}`;
 
 const navlogRowLabels = (
   rows: readonly RecordValue[],

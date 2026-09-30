@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculatedNavlog } from "./calculated-navlog";
+import { renderCalculationInspector } from "./calculation-inspector";
 
 const rowLabels = (rendered: HTMLElement | undefined): string[] => {
   if (rendered === undefined) return [];
@@ -11,6 +12,32 @@ const tableCellText = (rendered: HTMLElement | undefined, cellIndex: number): st
   rendered?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[cellIndex]?.textContent;
 
 describe("calculated visual flight log generated event timing", () => {
+  it("shows cruise-altitude assumption for climb and descent subleg snapshots", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phase: "climb", altitudePresentation: "cruise-assumption", selectedCruiseAltitude: 4523.6, distance: 8 } },
+          { subleg: { sourceLegId: "leg-1", phase: "descent", altitudePresentation: "cruise-assumption", selectedCruiseAltitude: 4523.6, distance: 7 } },
+        ], fuelSummary: { requiredFuel: 1, enrouteFuel: 1 } },
+      },
+    };
+    const rendered = renderCalculatedNavlog(revision, { onInspect: vi.fn() });
+    expect([...rendered!.querySelectorAll<HTMLTableRowElement>("tbody tr")].map((row) => row.cells[1]?.textContent)).toEqual(["4500", "4500"]);
+    for (const rowIndex of [0, 1]) {
+      const cell = rendered!.querySelector<HTMLButtonElement>(`button[data-row-index="${rowIndex}"][data-inspect-field="altitude"]`);
+      expect(cell?.textContent).toBe("4500");
+      const inspector = document.createElement("div");
+      inspector.append(renderCalculationInspector(revision, { rowIndex, field: "altitude" }));
+      expect(inspector.textContent).toContain("4523.6");
+      expect(inspector.textContent).toContain("Result: 4500 ft MSL as shown in the navlog.");
+      expect(inspector.textContent).toContain("fixed cruise-altitude assumption");
+      expect(inspector.textContent).not.toContain("ft to");
+      expect(inspector.textContent).not.toContain("4500 →");
+    }
+  });
+
   it("labels generated TOC and TOD in route order and shows cumulative event time and distance", () => {
     const revision = {
       ...planRevision(),

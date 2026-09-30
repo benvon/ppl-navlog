@@ -212,7 +212,9 @@ function appendSourceValueStep(steps: Array<[string, string]>, row: RecordValue,
 }
 
 function appendRouteSourceStep(steps: Array<[string, string]>, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
-  if (field === "altitude") steps.push(["Altitude", `${stepValue(subleg?.startingAltitude)} ft to ${stepValue(subleg?.endingAltitude)} ft MSL from this row's route/phase allocation.`]);
+  if (field === "altitude" && subleg?.altitudePresentation === "cruise-assumption") {
+    steps.push(["Altitude", `The displayed ${stepValue(subleg.selectedCruiseAltitude)} ft MSL is a fixed cruise-altitude assumption for this ${String(subleg.phase ?? "phase")} row. It does not represent a row altitude transition or a crossing altitude.`]);
+  } else if (field === "altitude") steps.push(["Altitude", `${stepValue(subleg?.startingAltitude)} ft to ${stepValue(subleg?.endingAltitude)} ft MSL from this row's route/phase allocation.`]);
   else if (field === "trueCourse") steps.push(["True course", `${stepValue(subleg?.trueCourse)}° is the course allocated to this route/phase row.`]);
   else if (field === "distance") steps.push(["Distance", `${stepValue(subleg?.distance)} NM is the distance allocated to this route/phase row.`]);
 }
@@ -257,6 +259,7 @@ function worksheetValue(value: unknown, field: NavlogInspectionField, row: Recor
 
 function worksheetAltitude(row: RecordValue): string {
   const subleg = nested(row, "subleg");
+  if (subleg?.altitudePresentation === "cruise-assumption") return worksheetWholeHundredsOfFeet(subleg.selectedCruiseAltitude);
   return `${worksheetWholeHundredsOfFeet(subleg?.startingAltitude)} → ${worksheetWholeHundredsOfFeet(subleg?.endingAltitude)}`;
 }
 
@@ -371,12 +374,17 @@ function appendProvenance(section: HTMLElement, provenance: RecordValue | undefi
 
 function selectedValue(row: RecordValue, field: NavlogInspectionField): unknown {
   const subleg = nested(row, "subleg");
-  if (field === "altitude") return `${displayValue(subleg?.startingAltitude)} → ${displayValue(subleg?.endingAltitude)} ft MSL`;
+  if (field === "altitude") return selectedAltitudeValue(subleg);
   if (field === "trueCourse") return subleg?.trueCourse;
   if (field === "distance") return subleg?.distance;
   if (field === "wind") return nested(nested(row, "effectiveWind")?.wind, "effectiveValue");
   if (field === "variation") return nested(row, "variation")?.effectiveValue;
   return row[field];
+}
+
+function selectedAltitudeValue(subleg: RecordValue | undefined): unknown {
+  if (subleg?.altitudePresentation === "cruise-assumption") return subleg.selectedCruiseAltitude;
+  return `${displayValue(subleg?.startingAltitude)} → ${displayValue(subleg?.endingAltitude)} ft MSL`;
 }
 
 function selectedTrace(row: RecordValue, field: NavlogInspectionField): RecordValue | undefined {

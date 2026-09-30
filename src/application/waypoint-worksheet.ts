@@ -108,6 +108,23 @@ const validateRouteOverrides = (route: PreparedPilotRoute): DomainResult<true> =
   return success(true);
 };
 
+const validateCheckpointsWithinCruise = (route: PreparedPilotRoute, toc: PreparedWaypoint, tod: PreparedWaypoint): DomainResult<true> => {
+  const misplaced = route.pilotPoints.slice(1, -1).flatMap(({ point, routeDistanceNauticalMiles }, index) => {
+    const beforeToc = routeDistanceNauticalMiles < toc.routeDistanceNauticalMiles &&
+      !equalWithinArithmeticRoundoff(routeDistanceNauticalMiles, toc.routeDistanceNauticalMiles);
+    const afterTod = routeDistanceNauticalMiles > tod.routeDistanceNauticalMiles &&
+      !equalWithinArithmeticRoundoff(routeDistanceNauticalMiles, tod.routeDistanceNauticalMiles);
+    const checkpoint = `checkpoint ${index + 1}, "${point.name}"`;
+    if (beforeToc) return [`${checkpoint} is before estimated TOC`];
+    if (afterTod) return [`${checkpoint} is after estimated TOD`];
+    return [];
+  });
+  if (misplaced.length > 0) {
+    return failure("ROUTE_GEOMETRY_ERROR", `Remove or move each authored checkpoint between estimated TOC and TOD: ${misplaced.join("; ")}.`);
+  }
+  return success(true);
+};
+
 const validateRouteInputs = (input: WaypointWorksheetInput): DomainResult<PreparedPilotRoute> => {
   const route = resolveRoute(input.route);
   if (!route.ok) return propagateFailure(route);
@@ -207,6 +224,8 @@ const prepareWorksheet = async (input: WaypointWorksheetInput, route: PreparedPi
     planningWind: destinationWeather.value.wind });
   if (!tod.ok) return propagateFailure(tod);
   if (toc.value.routeDistanceNauticalMiles >= tod.value.routeDistanceNauticalMiles) return failure("ROUTE_GEOMETRY_ERROR", "Estimated TOC is at or after estimated TOD, leaving no positive cruise distance.");
+  const checkpointInterval = validateCheckpointsWithinCruise(route, toc.value, tod.value);
+  if (!checkpointInterval.ok) return propagateFailure(checkpointInterval);
   const ordered = orderPreparedWaypoints(route, [toc.value, tod.value]);
   if (!ordered.ok) return propagateFailure(ordered);
   return success({ route, departure, destination, cruiseAltitude, destinationElevation: destinationPoint.point.elevationFeetMsl,

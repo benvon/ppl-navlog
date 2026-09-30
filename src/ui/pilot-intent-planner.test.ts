@@ -638,13 +638,36 @@ describe("pilot intent planner", () => {
     const storedMatch = /Stored unrounded value: ([0-9]+\.[0-9]+)\./.exec(inspector.textContent);
     if (!storedMatch) throw new Error("Inspector did not include the stored groundspeed value.");
     expect(Math.round(Number(storedMatch[1]))).toBe(Number.parseInt(displayedGroundspeed, 10));
-    expect(inspector.textContent).toContain("TOC placement uses departure METAR wind as an initial climb approximation; checkpoint forecasts can change subsequent row estimates.");
+    expect(inspector.textContent).toContain("TOC placement uses departure METAR wind as an initial climb approximation.");
     expect(inspector.textContent).toContain("KORD");
     expect(inspector.textContent).not.toContain("horizontal weight");
     expect(inspector.querySelector(".calculation-walkthrough")?.textContent).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Wind correction and true heading[\s\S]*Groundspeed/);
     expect(inspector.querySelector("details")?.open).toBe(false);
     await assertCompactNavlogInspector(root, inspector);
 
+  });
+
+  it("asks the pilot to move or remove a pre-TOC checkpoint without deleting it", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    const client = winds();
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const root = await mount(repository, client);
+    await makeLocallyValid(root, true);
+    button(root, "Add checkpoint").click();
+    await settle();
+    edit(root, "checkpoint-name-0", "Departure landmark");
+    edit(root, "checkpoint-coordinate-0", "41.983333, -87.916667");
+    expect(root.querySelector("[data-local-error]")?.textContent).toBe("");
+    button(root, "Update navlog").click();
+    await settle();
+
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Departure landmark");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("before estimated TOC");
+    expect(root.querySelector("[role='status']")?.textContent).toMatch(/remove|move/iu);
+    expect(fetchPoint).toHaveBeenCalledTimes(1);
+    expect(root.querySelector(".calculated-navlog")).toBeNull();
+    expect(input(root, "checkpoint-name-0").value).toBe("Departure landmark");
+    expect(input(root, "checkpoint-coordinate-0").value).toBe("41.983333, -87.916667");
   });
 
   it("keeps the profile descent rate fixed when destination winds affect the estimate", async () => {

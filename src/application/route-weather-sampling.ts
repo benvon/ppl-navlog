@@ -206,8 +206,9 @@ const calculateWorksheetRoute = async (
   const phases = ["climb", "cruise", "descent"].map((phase) => {
     const phaseRows = rows.filter((row) => row.subleg.phase === phase);
     return phaseRows.length === 0 ? undefined : { id: `worksheet-${phase}`, kind: phase, startRouteDistance: phaseRows[0]!.subleg.routeStartDistance,
-      endRouteDistance: phaseRows.at(-1)!.subleg.routeEndDistance, startingAltitude: phaseRows[0]!.subleg.startingAltitude,
-      targetAltitude: phaseRows.at(-1)!.subleg.endingAltitude,
+      endRouteDistance: phaseRows.at(-1)!.subleg.routeEndDistance,
+      startingAltitude: phase === "climb" ? departure.elevationFeetMsl : draft.route.legs[0]!.cruiseAltitudeFeetMsl,
+      targetAltitude: phase === "descent" ? destination.elevationFeetMsl : draft.route.legs[0]!.cruiseAltitudeFeetMsl,
       calculation: { durationMinutes: phaseRows.reduce((sum, row) => sum + row.estimatedTimeEnroute, 0), fuelGallons: phaseRows.reduce((sum, row) => sum + row.fuel, 0),
         distanceNauticalMiles: phaseRows.reduce((sum, row) => sum + row.subleg.distance, 0) }, convergenceIterations: 1 };
   }).filter((phase) => phase !== undefined);
@@ -218,7 +219,7 @@ const calculateWorksheetRoute = async (
         const answer = samples.find((sample) => sample.routeDistanceNauticalMiles === total)?.answer;
         return answer === undefined ? undefined : { requestId: answer.requestId, issuedAt: answer.issuedAt, plannedUtc: answer.query.plannedUtc, altitudeFeetMsl: answer.query.altitudeFeetMsl, method: answer.method, forecastCycle: answer.forecastCycle, validFrom: answer.useFrom, validUntil: answer.useUntil, cache: answer.product.cache };
       })() } },
-    phaseAllocation: { status: "allocated", transitionPolicy: "stable-cruise-altitude", navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: total }, boundaries, phases, sublegs: rows.map((row) => row.subleg), warnings },
+    phaseAllocation: { status: "allocated", transitionPolicy: "stable-cruise-altitude", navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: total, elevationFeetMsl: destination.elevationFeetMsl }, boundaries, phases, sublegs: rows.map((row) => row.subleg), warnings },
     navlog: { schema: "navlog-calculation/v1", rows, fuelSummary, warnings },
   });
   return { samples, snapshot, warnings };
@@ -264,8 +265,7 @@ const worksheetNavlogRow = (
     start: row.startWaypoint.coordinate, end: row.endWaypoint.coordinate, startLabel: row.startWaypoint.label, endLabel: row.endWaypoint.label, distance: row.distanceNauticalMiles,
     trueCourse: row.trueCourseDegrees, routeStartDistance: row.startWaypoint.routeDistanceNauticalMiles,
     routeEndDistance: row.endWaypoint.routeDistanceNauticalMiles,
-    startingAltitude: row.phase === "climb" ? prepared.routeLegs[0]!.start.kind === "airport" ? prepared.routeLegs[0]!.start.elevationFeetMsl : cruiseAltitude : cruiseAltitude,
-    endingAltitude: row.plannedAltitudeFeetMsl, selectedCruiseAltitude: cruiseAltitude,
+    altitudePresentation: "cruise-assumption", selectedCruiseAltitude: cruiseAltitude,
   };
   const performance = row.provenance.performanceInputs;
   return {
@@ -293,9 +293,9 @@ const aircraftPlanningValue = (value: number, label: string, profile: AircraftPr
 });
 
 const worksheetRowAssumptions = (row: WaypointWorksheetRow): readonly string[] => [
-  ...(row.phase === "climb" ? ["TOC placement uses departure METAR wind as an initial climb approximation; checkpoint forecasts can change subsequent row estimates."] : []),
-  "Checkpoint forecasts are sampled at the single cruise altitude even when they fall inside climb or descent.",
-  ...(row.phase === "descent" ? ["A single cruise-altitude forecast above the destination is treated as constant for TOD placement; later checkpoint weather does not move TOD."] : []),
+  ...(row.phase === "climb" ? ["TOC placement uses departure METAR wind as an initial climb approximation."] : []),
+  "The altitude column shows the fixed cruise-altitude assumption, not a row's starting or ending altitude.",
+  ...(row.phase === "descent" ? ["A single cruise-altitude forecast above the destination is treated as constant for TOD placement."] : []),
   ...row.warnings,
 ];
 

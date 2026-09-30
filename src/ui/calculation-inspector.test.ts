@@ -17,6 +17,22 @@ describe("calculation inspector", () => {
     expect(rendered.textContent).toContain("Result: 1800 → 1800 ft MSL as shown in the navlog.");
     expect(rendered.textContent).toContain("1798.3");
   });
+  it("explains marked altitude as the fixed selected cruise-altitude assumption", () => {
+    const revision = teachingRevision();
+    const subleg = revision.calculationSnapshot.navlog.rows[0]!.subleg as Record<string, unknown>;
+    delete subleg.startingAltitude;
+    delete subleg.endingAltitude;
+    subleg.phase = "descent";
+    subleg.altitudePresentation = "cruise-assumption";
+    subleg.selectedCruiseAltitude = 4523.6;
+
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
+    expect(rendered.textContent).toContain("Result: 4500 ft MSL as shown in the navlog.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 4523.6.");
+    expect(rendered.textContent).toContain("fixed cruise-altitude assumption");
+    expect(rendered.textContent).toContain("does not represent a row altitude transition or a crossing altitude");
+    expect(rendered.textContent).not.toContain("unavailable ft to unavailable ft");
+  });
   it("matches whole-degree headings and whole-knot wind and groundspeed in the navlog", () => {
     const revision = teachingRevision();
     const row = revision.calculationSnapshot.navlog.rows[0]!;

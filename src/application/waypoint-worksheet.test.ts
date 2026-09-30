@@ -24,6 +24,16 @@ const makeRoute = (middlePosition = 40.3, secondAltitude = 4500, overrideTas?: n
       ...(overrideTas === undefined ? {} : { performanceOverrides: { cruiseTasKnots: { computedValue: 100, effectiveValue: overrideTas, origin: "pilot-input" as const, provenance: { sourceId: "pilot", sourceLabel: "Pilot TAS", recordedAt: "2026-06-01T00:00:00Z" } } } }) },
   ],
 });
+const routeWithCheckpoints = (checkpoints: readonly { id: string; name: string; latitude: number }[]) => {
+  const points = [
+    { kind: "airport" as const, id: "departure", icao: "KAAA", name: "Departure", coordinate: point(40, -100), elevationFeetMsl: 500 },
+    ...checkpoints.map(({ id, name, latitude }) => ({ kind: "checkpoint" as const, id, name, coordinate: point(latitude, -100) })),
+    { kind: "airport" as const, id: "destination", icao: "KBBB", name: "Destination", coordinate: point(40.6, -100), elevationFeetMsl: 600 },
+  ];
+  return { id: "route", points, legs: points.slice(1).map((to, index) => ({
+    id: `leg-${index}`, fromPointId: points[index]!.id, toPointId: to.id, cruiseAltitudeFeetMsl: 4500,
+  })) };
+};
 const profile = {
   schemaVersion: 1 as const, id: "profile", name: "Trainer", cruiseTasKnots: 100, cruiseFuelFlowGallonsPerHour: 8,
   climbRateFeetPerMinute: 500, climbTasKnots: 80, climbFuelFlowGallonsPerHour: 10,
@@ -39,12 +49,62 @@ const input = (route = makeRoute()) => ({ route, profile, departureEstimatedUtc:
   magneticVariationEastPositiveDegrees: 0, selectWeather: async () => success({ wind: calm.value, provenance: "sample" }) });
 
 describe("calculateWaypointWorksheet", () => {
-  it("fixes TOC and TOD before rows, uses destination field elevation, and keeps TOD before a later checkpoint", async () => {
-    const result = await calculateWaypointWorksheet(input(makeRoute(40.58)));
+  it("rejects a checkpoint after TOD before row weather selection", async () => {
+    const selector = vi.fn(async () => success({ wind: calm.value, provenance: "sample" }));
+    const result = await calculateWaypointWorksheet({ ...input(makeRoute(40.58)), selectWeather: selector });
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (result.ok) return;
+    expect(result.error.message).toContain('checkpoint 1, "Middle" is after estimated TOD');
+    expect(result.error.message).toMatch(/remove or move each authored checkpoint between estimated TOC and TOD/i);
+    expect(result.error.message).not.toContain("middle");
+    expect(selector).toHaveBeenCalledTimes(2);
+  });
+
+  it("aggregates checkpoints before TOC and after TOD in route order", async () => {
+    const selector = vi.fn(async () => success({ wind: calm.value, provenance: "sample" }));
+    const route = routeWithCheckpoints([
+      { id: "early", name: "Early checkpoint", latitude: 40.05 },
+      { id: "middle", name: "Cruise checkpoint", latitude: 40.3 },
+      { id: "late", name: "Late checkpoint", latitude: 40.55 },
+    ]);
+    const result = await calculateWaypointWorksheet({ ...input(route), selectWeather: selector });
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (result.ok) return;
+    expect(result.error.message).toContain('checkpoint 1, "Early checkpoint" is before estimated TOC');
+    expect(result.error.message).toContain('checkpoint 3, "Late checkpoint" is after estimated TOD');
+    expect(result.error.message).not.toContain("early");
+    expect(result.error.message).not.toContain("late");
+    expect(selector).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows authored checkpoints at estimated TOC and TOD", async () => {
+    const baseline = await calculateWaypointWorksheet(input(makeRoute(40.3)));
+    expect(baseline.ok).toBe(true);
+    if (!baseline.ok) return;
+    const toc = baseline.value.waypoints.find(({ kind }) => kind === "estimated-toc");
+    const tod = baseline.value.waypoints.find(({ kind }) => kind === "estimated-tod");
+    if (!toc || !tod) throw new Error("Missing estimated phase boundary fixture.");
+    const route = {
+      ...makeRoute(40.3),
+      points: [
+        { kind: "airport" as const, id: "departure", icao: "KAAA", name: "Departure", coordinate: point(40, -100), elevationFeetMsl: 500 },
+        { kind: "checkpoint" as const, id: "at-toc", name: "At TOC", coordinate: toc.coordinate },
+        { kind: "checkpoint" as const, id: "middle", name: "Middle", coordinate: point(40.3, -100) },
+        { kind: "checkpoint" as const, id: "at-tod", name: "At TOD", coordinate: tod.coordinate },
+        { kind: "airport" as const, id: "destination", icao: "KBBB", name: "Destination", coordinate: point(40.6, -100), elevationFeetMsl: 600 },
+      ],
+    };
+    const legs = route.points.slice(1).map((to, index) => ({ id: `leg-${index}`, fromPointId: route.points[index]!.id, toPointId: to.id, cruiseAltitudeFeetMsl: 4500 }));
+    const result = await calculateWaypointWorksheet(input({ ...route, legs }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.waypoints.map(({ id }) => id)).toEqual(expect.arrayContaining(["at-toc", "at-tod"]));
+  });
+
+  it("uses destination field elevation after a valid cruise checkpoint", async () => {
+    const result = await calculateWaypointWorksheet(input(makeRoute(40.3)));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.waypoints.some(({ id }) => id === "middle")).toBe(true);
-    expect(result.value.rows.some(({ phase, startWaypoint, endWaypoint }) => phase === "descent" && startWaypoint.kind === "estimated-tod" && endWaypoint.id === "middle")).toBe(true);
     expect(result.value.rows.at(-1)?.plannedAltitudeFeetMsl).toBe(600);
     expect(result.value.waypoints.find(({ kind }) => kind === "estimated-tod")?.placement?.altitudeDifferenceFeet).toBe(3900);
   });
@@ -127,7 +187,7 @@ describe("calculateWaypointWorksheet", () => {
     expect(unavailable.ok).toBe(false);
   });
 
-  it("does not snap TOC to an earlier visit at repeated coordinates", async () => {
+  it("rejects an authored checkpoint before TOC even when the route revisits its coordinate later", async () => {
     const departure = point(40, -100);
     const north = trueCourse(0);
     const d10 = nauticalMiles(10);
@@ -147,8 +207,7 @@ describe("calculateWaypointWorksheet", () => {
       { kind: "airport" as const, id: "destination", icao: "KBBB", name: "Destination", coordinate: end.value, elevationFeetMsl: 600 },
     ], legs: ["departure:prior", "prior:turn", "turn:second", "second:destination"].map((pair, index) => { const [fromPointId, toPointId] = pair.split(":"); return { id: `leg-${index}`, fromPointId: fromPointId!, toPointId: toPointId!, cruiseAltitudeFeetMsl: 4500 }; }) };
     const result = await calculateWaypointWorksheet(input(route));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.waypoints.find(({ kind }) => kind === "estimated-toc")?.routeDistanceNauticalMiles).toBeCloseTo(10.67, 1);
+    expect(result).toMatchObject({ ok: false, error: { code: "ROUTE_GEOMETRY_ERROR" } });
+    if (!result.ok) expect(result.error.message).toContain('checkpoint 1, "Prior visit" is before estimated TOC');
   });
 });

@@ -12,14 +12,14 @@ interface TestBoundary {
   readonly placementAssumption: string;
 }
 interface TestRow {
-  readonly subleg: { readonly phase: string; readonly endingAltitude?: number; readonly endLabel?: string };
+  readonly subleg: { readonly phase: string; readonly startingAltitude?: number; readonly endingAltitude?: number; readonly selectedCruiseAltitude?: number; readonly altitudePresentation?: string; readonly endLabel?: string };
   readonly effectiveWind: { readonly wind: { readonly effectiveValue: { readonly directionFrom: number; readonly speed: number } } };
   readonly assumptions: readonly string[];
   readonly traces: Record<string, { readonly formulaId: string }>;
 }
 interface TestSnapshot {
   readonly schema: string;
-  readonly phaseAllocation: { readonly navlogEndpoint: { readonly kind: string; readonly routeDistanceNauticalMiles: number }; readonly boundaries: readonly TestBoundary[] };
+  readonly phaseAllocation: { readonly navlogEndpoint: { readonly kind: string; readonly routeDistanceNauticalMiles: number; readonly elevationFeetMsl?: number }; readonly boundaries: readonly TestBoundary[] };
   readonly weather: { readonly endpointSources: { readonly destinationCruiseAltitudeForecast: { readonly plannedUtc: string } } };
   readonly navlog: { readonly rows: readonly TestRow[]; readonly fuelSummary: { readonly fuelAboard: number; readonly usableFuel?: number; readonly estimatedArrivalFuel: number } };
 }
@@ -88,7 +88,7 @@ describe("route weather sampling for the waypoint worksheet", () => {
     const rows = snapshot.navlog.rows;
     const climbRow = rows.find((row) => row.subleg.phase === "climb")!;
     expect(climbRow.effectiveWind.wind.effectiveValue).toMatchObject({ directionFrom: 270, speed: 10 });
-    expect(climbRow.assumptions).toContain("TOC placement uses departure METAR wind as an initial climb approximation; checkpoint forecasts can change subsequent row estimates.");
+    expect(climbRow.assumptions).toContain("TOC placement uses departure METAR wind as an initial climb approximation.");
     expect(rows.some((row) => row.traces.windTriangle && row.traces.estimatedTimeEnroute && row.traces.fuel)).toBe(true);
   });
 
@@ -104,15 +104,21 @@ describe("route weather sampling for the waypoint worksheet", () => {
     expect(tail.placementAssumption).toContain("constant for descent placement");
     const descent = tailwind.snapshot.navlog.rows.find((row) => row.subleg.phase === "descent")!;
     expect(descent.effectiveWind.wind.effectiveValue.directionFrom).toBe(270);
-    expect(descent.assumptions).toContain("A single cruise-altitude forecast above the destination is treated as constant for TOD placement; later checkpoint weather does not move TOD.");
+    expect(descent.assumptions).toContain("A single cruise-altitude forecast above the destination is treated as constant for TOD placement.");
   });
 
-  it("ends the last row at destination field elevation and preserves inspector traces and fuel", async () => {
+  it("stores cruise altitude as an assumption and retains destination field elevation and row traces", async () => {
     const { draft, snapshot } = await run();
     const lastRow = snapshot.navlog.rows.at(-1);
     const destination = draft.route.points.at(-1)!;
     if (destination.kind !== "airport") throw new Error("Fixture destination must be an airport.");
-    expect(lastRow!.subleg.endingAltitude).toBe(destination.elevationFeetMsl);
+    expect(snapshot.phaseAllocation.navlogEndpoint.elevationFeetMsl).toBe(destination.elevationFeetMsl);
+    for (const row of snapshot.navlog.rows) {
+      expect(row.subleg.altitudePresentation).toBe("cruise-assumption");
+      expect(row.subleg.selectedCruiseAltitude).toBe(draft.route.legs[0]!.cruiseAltitudeFeetMsl);
+      expect(row.subleg).not.toHaveProperty("startingAltitude");
+      expect(row.subleg).not.toHaveProperty("endingAltitude");
+    }
     expect(lastRow!.subleg.endLabel).toBe(destination.name);
     expect(lastRow!.traces).toMatchObject({ windTriangle: { formulaId: expect.any(String) }, magneticVariation: { formulaId: expect.any(String) }, trueToMagnetic: { formulaId: expect.any(String) }, compassDeviation: { formulaId: expect.any(String) }, magneticToCompass: { formulaId: expect.any(String) }, estimatedTimeEnroute: { formulaId: expect.any(String) }, fuel: { formulaId: expect.any(String) } });
     expect(snapshot.navlog.fuelSummary.fuelAboard).toBe(20);

@@ -10,6 +10,10 @@
 
 **Spec:** `docs/navigation-worksheet-teaching-contract.md`
 
+## Approved follow-up: cruise checkpoints and altitude presentation
+
+The subsequent approved change restricts authored checkpoints to the inclusive estimated TOC–TOD interval. Collect and report every checkpoint outside it after placement weather and before row calculations; preserve authored input. Show the single cruise-altitude assumption in compact cells and explain whole-phase altitude changes in the inspector, without fabricated row crossing altitudes. This supersedes the initial plan's allowance for checkpoints during climb/descent.
+
 ## Global Constraints
 
 - One cruise altitude; no intermediate altitude transitions.

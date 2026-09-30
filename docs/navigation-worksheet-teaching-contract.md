@@ -26,9 +26,9 @@ Keep the weather API. Select applicable winds aloft once at each student checkpo
 
 Each positive-length row calculates the course/distance, WCA, true/magnetic/compass heading, groundspeed, ETE, and fuel. Carry unrounded totals forward and round presentation. Apply climb performance before TOC, cruise between TOC and TOD, and descent after TOD.
 
-Select aloft wind at TOC for the outgoing cruise row. Reuse destination cruise-altitude wind at TOD for the outgoing descent row. Student checkpoints use the single cruise altitude for aloft selection, including checkpoints within estimated climb/descent; disclose that altitude assumption without inventing a modeled crossing altitude.
+Select aloft wind at TOC for the outgoing cruise row. Reuse destination cruise-altitude wind at TOD for the outgoing descent row. For this teaching exercise, require every authored pilot checkpoint to fall between estimated TOC and TOD, inclusive; checkpoints equal to either boundary within arithmetic roundoff are allowed. This is a worksheet constraint and does not imply that a checkpoint outside the estimated interval is physically wrong. The estimated interval may change when weather or aircraft performance inputs change. For allowed checkpoints, use the single cruise altitude for aloft selection without inventing a modeled crossing altitude.
 
-Keep checkpoints inside climb/descent visible without altitude changes or simulated crossing-altitude checks. Coincident student/generated labels share time/fuel, suppress the zero-length row, and apply phase changes before the next positive row. Identify points by ordered route position: repeated coordinates must not snap a generated point to an earlier visit. Retain genuinely positive spacing.
+For this teaching exercise, reject all authored checkpoints strictly before estimated TOC or strictly after estimated TOD, except positions equal to a boundary within arithmetic roundoff. After TOC/TOD placement, report every out-of-interval checkpoint by authored checkpoint number and name, with its before-TOC or after-TOD reason, and ask the student to remove or move it between the estimated boundaries. Do not alter the authored route. Do not request row weather or calculate rows after this validation fails. Coincident student/generated labels share time/fuel, suppress the zero-length row, and apply phase changes before the next positive row. Identify points by ordered route position: repeated coordinates must not snap a generated point to an earlier visit. Retain genuinely positive spacing.
 
 ## TOC estimate
 
@@ -60,6 +60,8 @@ Select the destination forecast using a preliminary arrival UTC: departure UTC p
 
 Preserve the existing UI/UX structure. Keep navlog route rows compact, showing the planned inputs and calculated results needed to read the worksheet. Present detailed calculation explanations in the existing **inspector below the route lines**, reached by selecting a value. Do not expand the rows with formulas, derivations, or lengthy teaching text. The single cruise-altitude input replaces the per-waypoint altitude inputs without a broader UI redesign.
 
+The altitude column shows the single cruise-altitude assumption alongside the row's phase label. New worksheet rows do not store or display starting/ending altitude transitions. Explain the whole-phase altitude gain/loss and TOC/TOD placement in the inspector; do not invent checkpoint crossing altitudes. Historical snapshots retain their original altitude presentation.
+
 In the inspector, show inputs, units, formulas, intermediate steps, and assumptions for each calculated value. Retain the existing source → aircraft push → steering correction explanation. Keep technical weather provenance in disclosure. Show estimates and explain comparison with actual checkpoint observations; a live in-flight tracking system is outside scope.
 
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
@@ -70,9 +72,11 @@ Validate required authored inputs before weather requests. Report invalid rates/
 
 - One cruise-altitude control survives adding/removing checkpoints.
 - Navlog rows remain compact; selecting a calculated value presents its explanation in the inspector below the route lines, preserving the existing interaction and page structure.
+- Climb/descent rows show the cruise-altitude assumption without repeating whole-phase altitude endpoints as individual row transitions.
 - Ordinary exercise demonstrates the complete heading/time/fuel chain.
 - Tailwind exercise increases descent distance without changing descent time at fixed profile rate.
-- TOD before the last checkpoint retains that checkpoint and uses descent performance afterward.
+- Every authored checkpoint falls within the estimated TOC-to-TOD interval, with either exact/tolerance-equal boundary allowed.
+- All checkpoints outside the interval are reported together, and row weather selection stops after the placement weather requests.
 - Coincident labels do not duplicate time/fuel; repeated coordinates retain route occurrence.
 - Invalid input fails before weather; unavailable weather and fuel shortfall remain explicit.
 - Saved authored altitude data is preserved through migration.
