@@ -6,11 +6,11 @@ import { nauticalMiles, degreesToRadians } from "../domain/units";
 import type { EffectiveWindResolver } from "../domain/phase-planning";
 import type { PlanDraft, JsonValue } from "../domain/route";
 import type { AircraftProfile } from "../domain/aircraft";
+import { describeAircraftProfileValidation, inspectAircraftProfile } from "../domain/aircraft-profile-validation";
 import { canonicalPointCoordinateDegrees, type Coordinate } from "../domain/coordinates";
 import { trace } from "../domain/calculation-trace";
 import { MAX_CHECKPOINTS_PER_PLAN } from "../services/storage/pilot-input-repository";
 import { calculatePlanningMagneticVariation } from "./magnetic-variation";
-import { deviationTablePoint } from "../domain/deviation";
 import type { CompletePlanRouteLeg, CompletePlanWeather, RouteWeatherSample } from "./complete-plan";
 import { validateNavlogFuelInputs } from "./navlog-calculation";
 import type { PreparedWaypoint } from "./waypoint-preparation";
@@ -44,24 +44,15 @@ export const validateWorksheetPlanningInputs = (draft: PlanDraft, profile: Aircr
   if (destination.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires an airport destination endpoint with field elevation.");
   validateEndpointElevations(departure.elevationFeetMsl, destination.elevationFeetMsl);
   validateSingleCruiseAltitude(routeLegs, departure.elevationFeetMsl, destination.elevationFeetMsl);
-  validateVerticalPerformance(profile, routeLegs);
-  validateDeviationTable(profile);
+  const checkedProfile = inspectAircraftProfile(profile);
+  if (checkedProfile.kind !== "valid") throw new RouteWeatherSamplingError(describeAircraftProfileValidation(checkedProfile));
+  validateRoutePerformanceOverrides(routeLegs);
   const fuel = validateNavlogFuelInputs(draft.fuelInputs, profile);
   if (!fuel.ok) throw new RouteWeatherSamplingError(fuel.error.message);
 };
 
 const validateEndpointElevations = (departureElevation: number, destinationElevation: number): void => {
   if (!Number.isFinite(departureElevation) || !Number.isFinite(destinationElevation)) throw new RouteWeatherSamplingError("Departure and destination field elevations must be finite before weather is requested.");
-};
-
-const validateDeviationTable = (profile: AircraftProfile): void => {
-  const headings = new Set<number>();
-  for (const point of profile.compassDeviationTable) {
-    const validated = deviationTablePoint(point.magneticHeadingDegrees, point.deviationDegrees);
-    if (!validated.ok) throw new RouteWeatherSamplingError(validated.error.message);
-    if (headings.has(validated.value.magneticHeading)) throw new RouteWeatherSamplingError("Compass deviation table has duplicate normalized magnetic headings.");
-    headings.add(validated.value.magneticHeading);
-  }
 };
 
 const validateSingleCruiseAltitude = (routeLegs: readonly CompletePlanRouteLeg[], departureElevation: number, destinationElevation: number): void => {
@@ -71,11 +62,10 @@ const validateSingleCruiseAltitude = (routeLegs: readonly CompletePlanRouteLeg[]
   if (routeLegs.some(({ sourceLeg }) => sourceLeg.cruiseAltitudeFeetMsl !== cruiseAltitude)) throw new RouteWeatherSamplingError("Choose one cruise altitude for the whole route before calculating.");
 };
 
-const validateVerticalPerformance = (profile: AircraftProfile, legs: readonly CompletePlanRouteLeg[]): void => {
-  const values = [["climb rate", profile.climbRateFeetPerMinute], ["climb TAS", profile.climbTasKnots], ["climb fuel flow", profile.climbFuelFlowGallonsPerHour], ["descent rate", profile.descentRateFeetPerMinute], ["descent TAS", profile.descentTasKnots], ["descent fuel flow", profile.descentFuelFlowGallonsPerHour], ["cruise TAS", profile.cruiseTasKnots], ["cruise fuel flow", profile.cruiseFuelFlowGallonsPerHour]] as const;
-  for (const [label, value] of values) if (!Number.isFinite(value) || value <= 0) throw new RouteWeatherSamplingError(`${label} must be finite and positive.`);
+const validateRoutePerformanceOverrides = (legs: readonly CompletePlanRouteLeg[]): void => {
   for (const leg of legs) validatePerformanceOverride(leg.sourceLeg.performanceOverrides?.cruiseTasKnots?.effectiveValue, leg.sourceLeg.performanceOverrides?.cruiseFuelFlowGallonsPerHour?.effectiveValue);
 };
+
 
 const validatePerformanceOverride = (tas: number | undefined, fuelFlow: number | undefined): void => {
   if (tas !== undefined && (!Number.isFinite(tas) || tas <= 0)) throw new RouteWeatherSamplingError("Cruise TAS override must be finite and positive.");
@@ -197,6 +187,7 @@ const calculateWorksheetRoute = async (
     reserveMargin: worksheet.value.estimatedArrivalFuelGallons - reserve,
     reserveShortfall: Math.max(0, reserve - worksheet.value.estimatedArrivalFuelGallons),
     fuelExhausted: worksheet.value.estimatedArrivalFuelGallons <= 0,
+    fuelExhaustionDeficit: Math.max(0, -worksheet.value.estimatedArrivalFuelGallons),
     sufficientAboardFuel: !worksheet.value.fuelShortage, capacityComparisonAvailable: profile.usableFuelGallons !== undefined,
     usableFuelDifference: profile.usableFuelGallons === undefined ? undefined : profile.usableFuelGallons - fuelUsed - reserve,
     sufficientUsableFuel: profile.usableFuelGallons === undefined ? undefined : profile.usableFuelGallons >= fuelUsed + reserve,

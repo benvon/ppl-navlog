@@ -148,7 +148,15 @@ describe("calculateWaypointWorksheet", () => {
     const result = await calculateWaypointWorksheet({ ...input(), profile: { ...profile, compassDeviationTable: [
       { magneticHeadingDegrees: 0, deviationDegrees: 1 }, { magneticHeadingDegrees: 360, deviationDegrees: 2 },
     ] }, selectWeather: selector });
-    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_DEVIATION_TABLE" } });
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_PHASE_PERFORMANCE" } });
+    expect(selector).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty current profile deviation table before weather selection", async () => {
+    const selector = vi.fn(async () => success({ wind: calm.value, provenance: "sample" }));
+    const result = await calculateWaypointWorksheet({ ...input(), profile: { ...profile, compassDeviationTable: [] }, selectWeather: selector });
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_PHASE_PERFORMANCE" } });
+    expect(result.ok ? "" : result.error.message).toMatch(/Aircraft profile is malformed.*Compass deviation table/u);
     expect(selector).not.toHaveBeenCalled();
   });
 

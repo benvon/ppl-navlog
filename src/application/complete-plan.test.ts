@@ -34,6 +34,15 @@ const completeDraft = () => ({
 });
 
 describe("complete plan orchestration", () => {
+  it("blocks malformed aircraft profiles before weather resolution", async () => {
+    const deps = dependencies();
+    const resolve = vi.fn(deps.weather.resolve);
+    const invalidProfile = { ...aircraftProfile(), compassDeviationTable: [] };
+    const result = await calculateCompletePlan(completeDraft(), invalidProfile, dependencies({ weather: { resolve } }));
+    expect(result).toMatchObject({ status: "blocked", reason: "unsupported-plan-input", message: expect.stringContaining("Compass deviation table") });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it("composes route geometry, profile, selected weather, WMM variation, and the phase-calculation seam", async () => {
     const draft = completeDraft();
     const result = await calculateCompletePlan(draft, aircraftProfile(), dependencies());

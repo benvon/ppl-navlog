@@ -1,5 +1,6 @@
 import { failure, propagateFailure, success, type DomainResult } from "../domain/errors";
 import type { AircraftProfile } from "../domain/aircraft";
+import { describeAircraftProfileValidation, inspectAircraftProfile } from "../domain/aircraft-profile-validation";
 import { deviationTablePoint } from "../domain/deviation";
 import { equalWithinArithmeticRoundoff } from "../domain/arithmetic-roundoff";
 import type { RouteDefinition } from "../domain/route";
@@ -63,22 +64,9 @@ const validateFuelAndClock = (input: WaypointWorksheetInput): DomainResult<true>
   return success(true);
 };
 
-const validateProfile = (input: WaypointWorksheetInput): DomainResult<true> => {
-  const p = input.profile;
-  for (const [name, value] of [["cruise TAS", p.cruiseTasKnots], ["cruise fuel flow", p.cruiseFuelFlowGallonsPerHour], ["climb rate", p.climbRateFeetPerMinute], ["climb TAS", p.climbTasKnots], ["climb fuel flow", p.climbFuelFlowGallonsPerHour], ["descent rate", p.descentRateFeetPerMinute], ["descent TAS", p.descentTasKnots], ["descent fuel flow", p.descentFuelFlowGallonsPerHour]] as const) {
-    if (!validPositive(value)) return failure("INVALID_PHASE_PERFORMANCE", `${name} must be finite and greater than zero.`, { field: name, value: String(value) });
-  }
-  if (p.usableFuelGallons !== undefined && (!validPositive(p.usableFuelGallons) || input.fuelAboardGallons > p.usableFuelGallons)) return failure("OUT_OF_RANGE", "Fuel aboard exceeds aircraft usable capacity or profile capacity is invalid.");
-  if (p.compassDeviationTable.length === 0) return failure("INVALID_DEVIATION_TABLE", "Aircraft compass deviation table requires at least one point.");
-  const headings = new Set<number>();
-  for (const point of p.compassDeviationTable) {
-    const checked = deviationTablePoint(point.magneticHeadingDegrees, point.deviationDegrees);
-    if (!checked.ok) return propagateFailure(checked);
-    if (headings.has(checked.value.magneticHeading)) return failure("INVALID_DEVIATION_TABLE", "Deviation table has duplicate magnetic-heading points.", { heading: checked.value.magneticHeading });
-    headings.add(checked.value.magneticHeading);
-  }
-  return success(true);
-};
+const validateProfileCapacity = (input: WaypointWorksheetInput): DomainResult<true> =>
+  input.profile.usableFuelGallons !== undefined && input.fuelAboardGallons > input.profile.usableFuelGallons
+    ? failure("OUT_OF_RANGE", "Fuel aboard exceeds aircraft usable capacity.") : success(true);
 
 const routeCruiseAltitude = (route: PreparedPilotRoute): DomainResult<number> => {
   const first = route.legs[0]?.sourceLeg.cruiseAltitudeFeetMsl;
@@ -140,8 +128,10 @@ const validateRouteInputs = (input: WaypointWorksheetInput): DomainResult<Prepar
 const validateInput = (input: WaypointWorksheetInput): DomainResult<PreparedPilotRoute> => {
   const fuelAndClock = validateFuelAndClock(input);
   if (!fuelAndClock.ok) return propagateFailure(fuelAndClock);
-  const profile = validateProfile(input);
-  if (!profile.ok) return propagateFailure(profile);
+  const profile = inspectAircraftProfile(input.profile);
+  if (profile.kind !== "valid") return failure("INVALID_PHASE_PERFORMANCE", describeAircraftProfileValidation(profile));
+  const capacity = validateProfileCapacity(input);
+  if (!capacity.ok) return propagateFailure(capacity);
   return validateRouteInputs(input);
 };
 

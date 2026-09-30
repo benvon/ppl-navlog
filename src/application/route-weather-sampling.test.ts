@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } from "../domain/distance-course";
 import { nauticalMiles, trueCourse } from "../domain/units";
-import { planDraft, aircraftProfile } from "../services/storage/__tests__/fixtures";
+import { planDraft, aircraftProfile, planRevision } from "../services/storage/__tests__/fixtures";
+import { renderCalculatedNavlog } from "../ui/calculated-navlog";
 import { resolveRouteWeather, validateWorksheetPlanningInputs } from "./route-weather-sampling";
 
 interface TestTraceEntry { readonly name: string; readonly value: number; }
@@ -21,7 +22,7 @@ interface TestSnapshot {
   readonly schema: string;
   readonly phaseAllocation: { readonly navlogEndpoint: { readonly kind: string; readonly routeDistanceNauticalMiles: number; readonly elevationFeetMsl?: number }; readonly boundaries: readonly TestBoundary[] };
   readonly weather: { readonly endpointSources: { readonly destinationCruiseAltitudeForecast: { readonly plannedUtc: string } } };
-  readonly navlog: { readonly rows: readonly TestRow[]; readonly fuelSummary: { readonly fuelAboard: number; readonly usableFuel?: number; readonly estimatedArrivalFuel: number } };
+  readonly navlog: { readonly rows: readonly TestRow[]; readonly fuelSummary: { readonly fuelAboard: number; readonly usableFuel?: number; readonly estimatedArrivalFuel: number; readonly fuelExhaustionDeficit: number; readonly reserveShortfall: number } };
 }
 
 const departure = "2029-09-21T12:00:00.000Z";
@@ -124,6 +125,22 @@ describe("route weather sampling for the waypoint worksheet", () => {
     expect(snapshot.navlog.fuelSummary.fuelAboard).toBe(20);
     expect(snapshot.navlog.fuelSummary.usableFuel).toBe(24);
     expect(snapshot.navlog.fuelSummary.estimatedArrivalFuel).toBeGreaterThan(0);
+    expect(snapshot.navlog.fuelSummary.fuelExhaustionDeficit).toBe(0);
+  });
+
+  it("shows the route exhaustion deficit separately from the entered reserve shortfall", async () => {
+    const original = directEastboundDraft();
+    const draft = { ...original, fuelInputs: { ...original.fuelInputs, fuelAboardGallons: 1, reserveFuelGallons: 3 } };
+    const { solution, snapshot } = await run(draft);
+    const summary = snapshot.navlog.fuelSummary;
+    const deficit = -summary.estimatedArrivalFuel;
+    expect(deficit).toBeGreaterThan(0);
+    expect(summary.fuelExhaustionDeficit).toBeCloseTo(deficit, 10);
+    expect(summary.reserveShortfall).toBeCloseTo(deficit + 3, 10);
+    const rendered = renderCalculatedNavlog({ ...planRevision(), draftSnapshot: draft, calculationSnapshot: solution.weather.progressiveCalculationSnapshot! });
+    expect(rendered?.textContent).toContain(`Estimated fuel exhaustion deficit: ${deficit.toFixed(1)} gal`);
+    expect(rendered?.textContent).toContain(`Estimated reserve shortfall: ${(deficit + 3).toFixed(1)} gal`);
+    expect(rendered?.textContent).not.toContain("estimated balance is zero");
   });
 
   it("rejects differing cruise altitudes before making weather requests", async () => {
@@ -144,16 +161,24 @@ describe("route weather sampling for the waypoint worksheet", () => {
     expect(fetchPoint).not.toHaveBeenCalled();
   });
 
-  it("rejects invalid endpoint elevations and duplicate normalized deviation headings in preflight", () => {
+  it("rejects malformed profiles before any weather request", async () => {
+    const draft = directEastboundDraft();
+    const fetchPoint = vi.fn(async (query: AloftPointQuery) => answer(query, 270, 15));
+    const malformed = { ...aircraftProfile(), compassDeviationTable: [] };
+    expect(() => validateWorksheetPlanningInputs(draft, malformed)).toThrow(/Compass deviation table.*between 1 and 360/u);
+    await expect(resolveRouteWeather(draft, malformed, { fetchPoint }, { departureMetar: metar() })).rejects.toThrow(/Compass deviation table/u);
+    expect(fetchPoint).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid endpoint elevations and structurally invalid deviation points in preflight", () => {
     const draft = directEastboundDraft();
     const destination = draft.route.points.at(-1)!;
     if (destination.kind !== "airport") throw new Error("Fixture destination must be an airport.");
     const invalidEndpoint = { ...draft, route: { ...draft.route, points: draft.route.points.map((point) => point.id === destination.id ? { ...destination, elevationFeetMsl: Number.NaN } : point) } };
     expect(() => validateWorksheetPlanningInputs(invalidEndpoint, aircraftProfile())).toThrow(/field elevations must be finite/u);
     const profile = aircraftProfile();
-    const first = profile.compassDeviationTable[0]!;
-    const duplicateHeading = { ...profile, compassDeviationTable: [...profile.compassDeviationTable, { ...first, magneticHeadingDegrees: first.magneticHeadingDegrees + 360 }] };
-    expect(() => validateWorksheetPlanningInputs(draft, duplicateHeading)).toThrow(/duplicate normalized magnetic headings/u);
+    const invalidHeading = { ...profile, compassDeviationTable: [{ magneticHeadingDegrees: Number.NaN, deviationDegrees: 0 }] };
+    expect(() => validateWorksheetPlanningInputs(draft, invalidHeading)).toThrow(/compass deviation table magnetic heading degrees.*finite/iu);
   });
 
   it("retains the original point-service failure context", async () => {

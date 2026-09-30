@@ -76,13 +76,39 @@ class PilotIntentPlanner {
   async initialize(): Promise<void> {
     try {
       await this.planState.initialize();
-      this.profiles = await this.dependencies.repository.listProfiles();
+      const unsupportedNotice = await this.loadProfilesAndRecoverPlan();
       const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
       this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
       this.activateStage(this.current?.selectedProfileId ? "route" : "aircraft");
       this.showGuidance();
+      if (unsupportedNotice && this.feedback.kind !== "error") this.setStatus(unsupportedNotice);
       this.render();
     } catch (error) { this.fail(error); this.render(); }
+  }
+
+  private async loadProfilesAndRecoverPlan(): Promise<string | undefined> {
+    this.profiles = await this.dependencies.repository.listProfiles();
+    const unsupported = this.dependencies.repository.consumeUnsupportedProfileNotice?.() ?? false;
+    const unsupportedIds = this.dependencies.repository.consumeUnsupportedProfileIds?.() ?? [];
+    const draft = this.current;
+    this.includeAttachedProfile(draft);
+    const missingUnsupported = draft?.selectedProfileId && unsupportedIds.includes(draft.selectedProfileId) && !this.profiles.some(({ id }) => id === draft.selectedProfileId);
+    if (draft && missingUnsupported) await this.clearUnsupportedProfileReference(draft);
+    return unsupported ? "A saved aircraft profile uses an unsupported format and was removed. Recreate the profile and select it again; your route and pilot inputs are preserved." : undefined;
+  }
+
+  private includeAttachedProfile(draft: PilotInputPlan | undefined): void {
+    const attached = draft?.profileSnapshot;
+    if (attached && attached.id === draft?.selectedProfileId && !this.profiles.some(({ id }) => id === attached.id)) this.profiles = [...this.profiles, attached];
+  }
+
+  private async clearUnsupportedProfileReference(draft: PilotInputPlan): Promise<void> {
+    const cleaned = { ...draft };
+    delete (cleaned as { selectedProfileId?: string }).selectedProfileId;
+    delete (cleaned as { profileSnapshot?: AircraftProfile }).profileSnapshot;
+    this.editDraft(cleaned);
+    const saved = await this.planState.save();
+    if (!saved.ok && saved.reason === "failed") throw new Error(`The unsupported profile reference could not be removed from the saved plan: ${saved.error ?? "save failed"}`);
   }
 
   private onPlanState(view: PlannerPlanView): void {
@@ -103,6 +129,7 @@ class PilotIntentPlanner {
   private showActiveDraft(view: PlannerPlanView): void {
     this.openOverrideEditors.clear();
     this.result = undefined; this.inspected = undefined;
+    this.includeAttachedProfile(view.activeDraft);
     const selected = this.profiles.find((profile) => profile.id === view.activeDraft?.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(view.activeDraft?.rawFields ?? {}, selected);
     this.touchedFields.clear();

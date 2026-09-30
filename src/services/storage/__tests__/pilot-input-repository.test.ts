@@ -137,6 +137,73 @@ describe("input-only pilot repository", () => {
     expect(await store.listProfiles()).toEqual([aircraftProfile()]);
   });
 
+  it("removes unsupported profile attachments while preserving saved route inputs and history", async () => {
+    const store = repo(); await store.initialize();
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const unsupported = { ...aircraftProfile(), schemaVersion: 99 };
+    const saved = { ...planWithHistory([historyRecord({})]), profileSnapshot: unsupported, selectedProfileId: unsupported.id };
+    const idOnly = { ...plan(), id: "plan-id-only", profileSnapshot: undefined, selectedProfileId: unsupported.id };
+    const snapshotRecovery = { ...plan(), id: "plan-snapshot", profileSnapshot: aircraftProfile(), selectedProfileId: unsupported.id };
+    const tx = db.transaction(["pilotInputs", "aircraftProfiles"], "readwrite");
+    tx.objectStore("pilotInputs").put(saved);
+    tx.objectStore("pilotInputs").put(idOnly);
+    tx.objectStore("pilotInputs").put(snapshotRecovery);
+    tx.objectStore("aircraftProfiles").put(unsupported);
+    tx.objectStore("aircraftProfiles").put({ ...unsupported, id: 77 });
+    tx.objectStore("aircraftProfiles").put({ ...aircraftProfile(), id: "profile-supported" });
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
+
+    await store.listPlans();
+    expect(await store.listProfiles()).toEqual([{ ...aircraftProfile(), id: "profile-supported" }]);
+    const plans = await store.listPlans();
+    const cleaned = plans.find(({ id }) => id === saved.id);
+    expect(cleaned).toMatchObject({ rawFields: saved.rawFields, checkpoints: saved.checkpoints, submissions: saved.submissions });
+    expect(cleaned).not.toHaveProperty("selectedProfileId");
+    expect(cleaned).not.toHaveProperty("profileSnapshot");
+    expect(plans.find(({ id }) => id === idOnly.id)).not.toHaveProperty("selectedProfileId");
+    expect(plans.find(({ id }) => id === snapshotRecovery.id)).toMatchObject({ selectedProfileId: unsupported.id, profileSnapshot: aircraftProfile() });
+    expect(store.consumeUnsupportedProfileNotice()).toBe(true);
+  });
+
+  it("does not discard a malformed current profile while loading", async () => {
+    const store = repo(); await store.initialize();
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const malformed = { ...aircraftProfile(), compassDeviationTable: [] };
+    const tx = db.transaction("aircraftProfiles", "readwrite");
+    tx.objectStore("aircraftProfiles").put(malformed);
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
+
+    await expect(store.listProfiles()).rejects.toThrow(/compassDeviationTable/u);
+    const read = db.transaction("aircraftProfiles", "readonly");
+    const retained = await new Promise<unknown>((resolve, reject) => { const request = read.objectStore("aircraftProfiles").get(malformed.id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+    expect(retained).toEqual(malformed);
+  });
+
+  it("keeps unsupported embedded attachments intact when another current profile is malformed", async () => {
+    const store = repo(); await store.initialize();
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const unsupported = { ...aircraftProfile(), schemaVersion: 99 };
+    const malformed = { ...aircraftProfile(), id: "malformed-current", compassDeviationTable: [] };
+    const saved = { ...plan(), profileSnapshot: unsupported, selectedProfileId: unsupported.id };
+    const tx = db.transaction(["pilotInputs", "aircraftProfiles"], "readwrite");
+    tx.objectStore("pilotInputs").put(saved);
+    tx.objectStore("aircraftProfiles").put(unsupported);
+    tx.objectStore("aircraftProfiles").put(malformed);
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
+
+    await expect(store.listPlans()).rejects.toThrow(/compassDeviationTable/u);
+    const read = db.transaction(["pilotInputs", "aircraftProfiles"], "readonly");
+    const [storedPlan, storedUnsupported, storedMalformed] = await Promise.all([
+      new Promise<unknown>((resolve, reject) => { const request = read.objectStore("pilotInputs").get(saved.id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }),
+      new Promise<unknown>((resolve, reject) => { const request = read.objectStore("aircraftProfiles").get(unsupported.id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }),
+      new Promise<unknown>((resolve, reject) => { const request = read.objectStore("aircraftProfiles").get(malformed.id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }),
+    ]);
+    expect(storedPlan).toEqual(saved);
+    expect(storedUnsupported).toEqual(unsupported);
+    expect(storedMalformed).toEqual(malformed);
+    expect(store.consumeUnsupportedProfileNotice()).toBe(false);
+  });
+
   it("retains only the latest bounded explicit submissions", async () => {
     const store = repo(); await store.initialize();
     for (let i = 0; i < MAX_SUBMISSIONS_PER_PLAN + 3; i += 1) {

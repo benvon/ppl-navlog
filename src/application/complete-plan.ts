@@ -2,6 +2,7 @@ import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } f
 import type { EffectiveWindResolver } from "../domain/phase-planning";
 import type { PlanDraft, RoutePoint, UserRouteLeg, JsonValue, WeatherReferenceSnapshot } from "../domain/route";
 import type { AircraftProfile } from "../domain/aircraft";
+import { describeAircraftProfileValidation, inspectAircraftProfile } from "../domain/aircraft-profile-validation";
 import type { Coordinate } from "../domain/coordinates";
 import type { LoadedWindsData } from "../services/weather/winds-adapter";
 import type { AloftPointAnswer, MetarSuccessPayload } from "../../worker/api/contracts";
@@ -100,6 +101,8 @@ export const calculateCompletePlan = async (
   aircraftProfile: AircraftProfile,
   dependencies: CompletePlanDependencies,
 ): Promise<CompletePlanResult> => {
+  const checkedProfile = inspectAircraftProfile(aircraftProfile);
+  if (checkedProfile.kind !== "valid") return blocked("unsupported-plan-input", describeAircraftProfileValidation(checkedProfile));
   if (draft.selectedAircraftProfileId !== aircraftProfile.id) {
     return blocked("invalid-route", "The selected aircraft profile does not match the plan draft.");
   }

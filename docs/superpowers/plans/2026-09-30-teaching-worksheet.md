@@ -16,6 +16,8 @@ The subsequent approved change restricts authored checkpoints to the inclusive e
 
 ## Global Constraints
 
+Approved profile/fuel follow-up: use one shared profile validator before weather/calculation, remove duplicate structural validation from calculators, discard unsupported stored profile formats without migration while retaining route inputs and notifying the pilot, and reject malformed current-format profiles. Preserve a distinct fuel exhaustion deficit and reserve shortfall in the snapshot and visible worksheet.
+
 - One cruise altitude; no intermediate altitude transitions.
 - TOC uses departure METAR; TOD uses cruise-altitude aloft wind above destination and field elevation.
 - Profile descent rate is fixed for the estimate; placement occurs once.

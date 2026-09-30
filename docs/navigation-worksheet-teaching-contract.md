@@ -66,6 +66,10 @@ In the inspector, show inputs, units, formulas, intermediate steps, and assumpti
 
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
 
+Show the fuel exhaustion deficit separately from the reserve shortfall. For estimated arrival fuel of −2 gallons and an entered reserve of 3 gallons, show 2 gallons short of completing the route and 5 gallons short of completing it with reserve. Preserve signed balances and the worksheet so the student can inspect fuel consumption.
+
+Validate aircraft profiles through one shared validator before weather retrieval or calculator execution. Reject malformed current-format profiles with actionable errors, including empty or duplicate-heading compass-deviation tables, invalid types, and nonfinite or invalid performance values. Profile format validation belongs at the input boundary; calculators retain arithmetic and cross-input checks. Unsupported stored profile formats are discarded without migration, with a brief notice to recreate or select a valid profile. Preserve route and other authored inputs while clearing unusable profile selections and attachments.
+
 Validate required authored inputs before weather requests. Report invalid rates/coordinates, impossible wind triangles, missing required weather, and TOC/TOD that cannot fit in route order with actionable errors. Do not fabricate fallback weather or impose intermediate-transition/minimum-cruise-time requirements.
 
 ## Acceptance and follow-up

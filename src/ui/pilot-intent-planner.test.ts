@@ -21,6 +21,7 @@ class MemoryInputs implements PilotInputRepository {
   failProfileSave = false;
   profileSaveGate?: Promise<void>;
   failSubmit = false;
+  unsupportedProfileNotice = false;
   failInitialize = false;
   failOpen = false;
   async initialize(): Promise<void> { if (this.failInitialize) throw new Error("storage initialization failed"); }
@@ -46,6 +47,7 @@ class MemoryInputs implements PilotInputRepository {
     this.profiles.push(profile);
   }
   async listProfiles(): Promise<readonly AircraftProfile[]> { return this.profiles; }
+  consumeUnsupportedProfileNotice(): boolean { const value = this.unsupportedProfileNotice; this.unsupportedProfileNotice = false; return value; }
   private replace(collection: PilotInputPlan[], plan: PilotInputPlan): void {
     const index = collection.findIndex((item) => item.id === plan.id);
     if (index < 0) collection.push(plan);
@@ -186,6 +188,13 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
 }
 
 describe("pilot intent planner", () => {
+  it("shows the recreate notice for unsupported stored profile schemas", async () => {
+    const repository = new MemoryInputs();
+    repository.unsupportedProfileNotice = true;
+    const root = await mount(repository);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("uses an unsupported format and was removed");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Recreate the profile");
+  });
   it("blocks a nominal TOC/TOD overlap after the placement weather is available", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     repository.plans.push({ id: "short-profile", title: "Short profile", rawFields: {
