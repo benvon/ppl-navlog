@@ -48,7 +48,7 @@ const calculatedNavlog = (snapshot: RecordValue): RecordValue | undefined => {
   return snapshot.status === "calculated" && Array.isArray(navlog?.rows) && navlog.rows.every(record) ? navlog : undefined;
 };
 
-const navlogEndpoint = (phaseAllocation: RecordValue | undefined): NavlogEndpoint | undefined => {
+export const navlogEndpoint = (phaseAllocation: RecordValue | undefined): NavlogEndpoint | undefined => {
   const endpoint = nested(phaseAllocation, "navlogEndpoint");
   return (endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "pattern-altitude-3nm" || endpoint?.kind === "field-elevation-airport")
     && typeof endpoint.routeDistanceNauticalMiles === "number"
@@ -240,7 +240,7 @@ const navlogAltitude = (subleg: RecordValue | undefined): string => subleg?.alti
   ? wholeHundredsOfFeet(subleg.selectedCruiseAltitude)
   : `${wholeHundredsOfFeet(subleg?.startingAltitude)} → ${wholeHundredsOfFeet(subleg?.endingAltitude)}`;
 
-const navlogRowLabels = (
+export const navlogRowLabels = (
   rows: readonly RecordValue[],
   revision: PlanRevision,
   rowIndex: number,

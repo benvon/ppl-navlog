@@ -1,4 +1,5 @@
 import type { PlanRevision } from "../domain/route";
+import { navlogEndpoint, navlogRowLabels } from "./calculated-navlog";
 import { wholeNumberDisplay } from "./whole-number";
 
 export type NavlogInspectionField = "altitude" | "trueCourse" | "wind" | "windCorrectionAngle" | "trueHeading" | "variation" | "magneticHeading" | "compassDeviation" | "compassHeading" | "distance" | "groundspeed" | "estimatedTimeEnroute" | "fuel";
@@ -343,20 +344,14 @@ function cacheDescription(source: RecordValue): string {
 
 function selectionHeading(revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): string {
   const subleg = nested(row, "subleg");
-  const routeLabel = labelledRoute(subleg);
-  if (routeLabel !== undefined) return `${labels[selection.field]} · ${routeLabel} · ${String(subleg?.phase ?? "phase unknown")}`;
-  return `${labels[selection.field]} · ${authoredRouteLabel(revision, subleg)} · ${String(subleg?.phase ?? "phase unknown")}`;
-}
-
-function labelledRoute(subleg: RecordValue | undefined): string | undefined {
-  return typeof subleg?.startLabel === "string" && typeof subleg.endLabel === "string" ? `${subleg.startLabel} → ${subleg.endLabel}` : undefined;
-}
-
-function authoredRouteLabel(revision: PlanRevision | undefined, subleg: RecordValue | undefined): string {
-  const source = revision?.draftSnapshot.route.legs.find((leg) => leg.id === subleg?.sourceLegId);
-  const from = revision?.draftSnapshot.route.points.find((point) => point.id === source?.fromPointId)?.name ?? "Unknown origin";
-  const to = revision?.draftSnapshot.route.points.find((point) => point.id === source?.toPointId)?.name ?? "unknown destination";
-  return `${from} → ${to}`;
+  const snapshot = revision?.calculationSnapshot;
+  const rows = nested(snapshot, "navlog")?.rows;
+  if (revision !== undefined && Array.isArray(rows) && rows.every(record)) {
+    const phaseAllocation = nested(snapshot, "phaseAllocation");
+    const route = navlogRowLabels(rows, revision, selection.rowIndex, phaseAllocation?.boundaries, navlogEndpoint(phaseAllocation));
+    return `${labels[selection.field]} · ${route.from} → ${route.to} · ${String(subleg?.phase ?? "phase unknown")}`;
+  }
+  return `${labels[selection.field]} · Unknown route · ${String(subleg?.phase ?? "phase unknown")}`;
 }
 
 function appendTrace(section: HTMLElement, trace: RecordValue | undefined): void {

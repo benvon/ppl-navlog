@@ -224,11 +224,14 @@ describe("calculation inspector", () => {
             { name: "estimated distance", value: 13.93, unit: "nautical miles" },
           ] },
         ] },
-        navlog: { rows: [{ subleg: { sourceLegId: "leg-1", startLabel: "TOC", endLabel: "TOD", phase: "cruise", routeStartDistance: 10, routeEndDistance: 20 }, traces: {} }] },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phase: "climb", startLabel: "Departure", endLabel: "TOC", routeStartDistance: 0, routeEndDistance: 10 }, cumulative: { routeDistance: 10 }, traces: {} },
+          { subleg: { sourceLegId: "leg-1", startLabel: "TOC", endLabel: "TOD", phase: "cruise", routeStartDistance: 10, routeEndDistance: 20 }, cumulative: { routeDistance: 20 }, traces: {} },
+        ] },
       },
     };
-    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
-    expect(rendered.querySelector("h3")?.textContent).toContain("TOC → TOD");
+    const rendered = renderCalculationInspector(revision, { rowIndex: 1, field: "distance" });
+    expect(rendered.querySelector("h3")?.textContent).toContain("TOC (estimated) → TOD (estimated)");
     expect(rendered.textContent).toContain("3800 ft ÷ 500 ft/min ≈ 7.6 min");
     expect(rendered.textContent).toContain("100 kt × 7.6 min ÷ 60 ≈ 12.7 NM");
     expect(rendered.textContent).toContain("Departure METAR wind is used as the climb placement approximation.");

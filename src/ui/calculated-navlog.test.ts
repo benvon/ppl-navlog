@@ -166,6 +166,8 @@ describe("generated navlog event labels", () => {
 
     const label = renderCalculatedNavlog(revision)?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[0]?.textContent;
     expect(label).toContain(`${checkpoint.name} / TOC (estimated) / TOD (estimated)`);
+    const heading = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" }).querySelector("h3")!.textContent;
+    expect(heading).toBe(`Distance · ${label}`);
   });
 
   it("preserves an authored waypoint named TOC alongside the estimated generated TOC", () => {
@@ -192,6 +194,8 @@ describe("generated navlog event labels", () => {
     };
 
     expect(rowLabels(renderCalculatedNavlog(revision))[0]).toContain("TOC / TOC (estimated)");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "distance" }).querySelector("h3")!.textContent)
+      .toBe(`Distance · ${rowLabels(renderCalculatedNavlog(revision))[0]}`);
   });
 
   it("keeps legacy calculated snapshots labeled for arrival", () => {
