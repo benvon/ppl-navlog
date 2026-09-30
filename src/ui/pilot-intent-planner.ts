@@ -391,6 +391,10 @@ class PilotIntentPlanner {
     const route = document.createElement("section");
     route.className = "waypoint-list";
     route.append(this.el("h3", "Route checkpoints"));
+    const guidance = document.createElement("p");
+    guidance.textContent = "Add recognizable visual checkpoints from estimated TOC through estimated TOD. Keep departure and destination as the route endpoints.";
+    guidance.className = "route-checkpoint-guidance";
+    route.append(guidance);
     route.append(this.input("cruise-altitude", "Cruise altitude (feet MSL)", this.fields["cruise-altitude"] ?? ""));
     const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
     route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));

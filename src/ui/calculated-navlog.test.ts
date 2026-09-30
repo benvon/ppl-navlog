@@ -60,10 +60,10 @@ describe("calculated visual flight log generated event timing", () => {
 
     const rendered = renderCalculatedNavlog(revision);
     const labels = rowLabels(rendered);
-    expect(labels[0]).toContain("Chicago O'Hare → TOC");
-    expect(labels[1]).toContain("TOC →");
-    expect(labels[2]).toContain("TOD");
-    expect(labels[3]).toContain("TOD → Southern Wisconsin Regional (pattern altitude)");
+    expect(labels[0]).toContain("Chicago O'Hare → TOC (estimated)");
+    expect(labels[1]).toContain("TOC (estimated) →");
+    expect(labels[2]).toContain("TOD (estimated)");
+    expect(labels[3]).toContain("TOD (estimated) → Southern Wisconsin Regional (pattern altitude)");
     expect(labels[3]).toContain("pattern altitude");
     expect(rendered?.textContent).toContain("Cumulative NM");
     expect(rendered?.textContent).toContain("Cumulative ETE min");
@@ -96,10 +96,10 @@ describe("direct route generated event labels", () => {
 
     const rendered = renderCalculatedNavlog(revision, { onInspect: vi.fn() });
     const labels = rowLabels(rendered);
-    expect(labels[0]).toContain("TOC");
-    expect(labels[1]).toContain("TOD");
+    expect(labels[0]).toContain("TOC (estimated)");
+    expect(labels[1]).toContain("TOD (estimated)");
     expect(labels[2]).toContain("Southern Wisconsin Regional (pattern altitude)");
-    expect(rendered?.querySelector<HTMLButtonElement>('button[data-row-index="1"][data-inspect-field="altitude"]')?.getAttribute("aria-label")).toContain("TOC to TOD");
+    expect(rendered?.querySelector<HTMLButtonElement>('button[data-row-index="1"][data-inspect-field="altitude"]')?.getAttribute("aria-label")).toContain("TOC (estimated) to TOD (estimated)");
   });
 });
 
@@ -142,9 +142,9 @@ describe("generated navlog event labels", () => {
     };
 
     const labels = rowLabels(renderCalculatedNavlog(revision));
-    expect(labels[0]).toContain("Chicago O'Hare → TOC");
-    expect(labels[1]).toContain("TOC → Study checkpoint");
-    expect(labels[2]).toContain("Study checkpoint → TOD");
+    expect(labels[0]).toContain("Chicago O'Hare → TOC (estimated)");
+    expect(labels[1]).toContain("TOC (estimated) → Study checkpoint");
+    expect(labels[2]).toContain("Study checkpoint → TOD (estimated)");
   });
 
   it("shows coincident generated events and preserves a pilot checkpoint name", () => {
@@ -165,7 +165,33 @@ describe("generated navlog event labels", () => {
     };
 
     const label = renderCalculatedNavlog(revision)?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[0]?.textContent;
-    expect(label).toContain(`${checkpoint.name} / TOC / TOD`);
+    expect(label).toContain(`${checkpoint.name} / TOC (estimated) / TOD (estimated)`);
+  });
+
+  it("preserves an authored waypoint named TOC alongside the estimated generated TOC", () => {
+    const parent = planRevision();
+    const checkpoint = parent.draftSnapshot.route.points.find((point) => point.id === "checkpoint-1")!;
+    const revision = {
+      ...parent,
+      draftSnapshot: {
+        ...parent.draftSnapshot,
+        route: {
+          ...parent.draftSnapshot.route,
+          points: parent.draftSnapshot.route.points.map((point) => point.id === "checkpoint-1" ? { ...point, name: "TOC" } : point),
+        },
+      },
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [
+          { kind: "top-of-climb", routeDistanceNauticalMiles: 20, coordinate: { latitude: Number(checkpoint.coordinate.latitude), longitude: Number(checkpoint.coordinate.longitude) } },
+        ] },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", distance: 20 }, cumulative: { routeDistance: 20 } },
+        ], fuelSummary: { requiredFuel: 1, enrouteFuel: 1 } },
+      },
+    };
+
+    expect(rowLabels(renderCalculatedNavlog(revision))[0]).toContain("TOC / TOC (estimated)");
   });
 
   it("keeps legacy calculated snapshots labeled for arrival", () => {
@@ -240,7 +266,9 @@ describe("calculated visual flight log", () => {
     };
     const rendered = renderCalculatedNavlog(revision, { currentWeatherValidated: true });
     expect(rendered?.textContent).toContain("TC°");
-    expect(rendered?.textContent).toContain("Current weather validated for this calculation.");
+    expect(rendered?.textContent).toContain("Selected weather inputs were checked for this calculation.");
+    expect(rendered?.textContent).not.toContain("Current weather validated");
+    expect(rendered!.querySelector("caption")!.textContent).toBe("Estimated visual flight log");
     expect([...rendered!.querySelector<HTMLTableRowElement>("tbody tr")!.cells].slice(2, 10).map((heading) => heading.textContent)).toEqual([
       "280", "270° / 12 kt", "2", "282", "-3", "285", "1", "286",
     ]);

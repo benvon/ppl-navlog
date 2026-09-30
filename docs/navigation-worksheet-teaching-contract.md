@@ -64,6 +64,10 @@ The altitude column shows the single cruise-altitude assumption alongside the ro
 
 In the inspector, show inputs, units, formulas, intermediate steps, and assumptions for each calculated value. Retain the existing source → aircraft push → steering correction explanation. Keep technical weather provenance in disclosure. Show estimates and explain comparison with actual checkpoint observations; a live in-flight tracking system is outside scope.
 
+Label generated TOC/TOD points as estimated, including points coincident with authored checkpoints; preserve authored checkpoint names. The normal walkthrough uses rounded intermediate estimates to one decimal and explains that rounded arithmetic may differ slightly from the displayed result. Keep unrounded selected values and complete traces in the collapsed technical disclosure. Weather status describes checks of the selected inputs, rather than implying a complete weather briefing.
+
+Printing is deferred to separate work.
+
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
 
 Show the fuel exhaustion deficit separately from the reserve shortfall. For estimated arrival fuel of −2 gallons and an entered reserve of 3 gallons, show 2 gallons short of completing the route and 5 gallons short of completing it with reserve. Preserve signed balances and the worksheet so the student can inspect fuel consumption.

@@ -83,12 +83,12 @@ const renderCalculatedResult = (
   if (options.currentWeatherValidated) {
     const currentWeather = document.createElement("p");
     currentWeather.className = "current-weather-status";
-    currentWeather.textContent = "Current weather validated for this calculation.";
+    currentWeather.textContent = "Selected weather inputs were checked for this calculation.";
     section.append(currentWeather);
   }
   const table = document.createElement("table");
   const caption = document.createElement("caption");
-  caption.textContent = "Calculated visual flight log";
+  caption.textContent = "Estimated visual flight log";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
   rows.forEach((row, index) => body.append(navlogRow(row, rows, revision, index, options, boundaries, endpoint)));
@@ -337,8 +337,8 @@ const boundaryMatchesDistance = (candidate: unknown, routeDistance: number): boo
 
 const boundaryName = (candidate: unknown): string | undefined => {
   if (!record(candidate)) return undefined;
-  if (candidate.kind === "top-of-climb") return "TOC";
-  return candidate.kind === "top-of-descent" ? "TOD" : undefined;
+  if (candidate.kind === "top-of-climb") return "TOC (estimated)";
+  return candidate.kind === "top-of-descent" ? "TOD (estimated)" : undefined;
 };
 
 const patternEndpointLabel = (phase: unknown, routeDistance: unknown, endpoint: NavlogEndpoint | undefined, rowIndex: number, rowCount: number, routeEndpoint: string): string | undefined => {

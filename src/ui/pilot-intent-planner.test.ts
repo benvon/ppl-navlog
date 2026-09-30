@@ -188,6 +188,12 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
 }
 
 describe("pilot intent planner", () => {
+  it("guides pilots to add recognizable visual checkpoints along the route", async () => {
+    const root = await mount(new MemoryInputs());
+    const route = root.querySelector('[data-stage="route"]');
+    expect(route?.textContent).toMatch(/visual checkpoints from estimated TOC through estimated TOD/i);
+  });
+
   it("shows the recreate notice for unsupported stored profile schemas", async () => {
     const repository = new MemoryInputs();
     repository.unsupportedProfileNotice = true;
@@ -634,7 +640,7 @@ describe("pilot intent planner", () => {
     assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
     expect(discovery).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
-    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Selected weather inputs were checked");
     expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
     expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("SYNTHETIC TAF");
     const groundspeed = root.querySelector<HTMLButtonElement>('button[data-inspect-field="groundspeed"]');
@@ -720,7 +726,7 @@ describe("pilot intent planner", () => {
       "departure-metar-icao": "KORD",
       "taxi-fuel": "0.8",
     });
-    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Current weather validated");
+    expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Selected weather inputs were checked");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
   });
 

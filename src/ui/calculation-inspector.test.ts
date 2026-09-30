@@ -3,6 +3,17 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("keeps raw precision in a closed disclosure while teaching with rounded estimates", () => {
+    const rendered = renderCalculationInspector(teachingRevision(), { rowIndex: 0, field: "estimatedTimeEnroute" });
+    const technical = rendered.querySelector("details")!;
+    expect(technical.open).toBe(false);
+    expect(technical.textContent).toContain("Stored unrounded value: 5.922");
+    const visible = rendered.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll("details").forEach((detail) => detail.remove());
+    expect(visible.textContent).not.toContain("Stored unrounded value");
+    expect(visible.textContent).not.toContain("101.307");
+    expect(visible.textContent).toContain("101.3 kt");
+  });
   it("matches whole-minute navlog ETE while retaining its unrounded value", () => {
     const rendered = renderCalculationInspector(teachingRevision(), { rowIndex: 0, field: "estimatedTimeEnroute" });
     expect(rendered.textContent).toContain("Result: 6 min as shown in the navlog.");
@@ -81,29 +92,29 @@ describe("calculation inspector", () => {
     row.trueHeading = 95.216;
     row.groundspeed = Math.sqrt(110 ** 2 - 10 ** 2);
     const walkthrough = renderCalculationInspector(revision, { rowIndex: 0, field: "windCorrectionAngle" }).querySelector(".calculation-walkthrough")?.textContent;
-    expect(walkthrough).toContain("10 kt crosswind from the right pushes left; steer 5.216° right into the wind");
+    expect(walkthrough).toContain("10 kt crosswind from the right pushes left; steer 5.2° right into the wind");
   });
   it("teaches the full fuel and compass chains from stored row evidence", () => {
     const revision = teachingRevision();
     const fuel = renderCalculationInspector(revision, { rowIndex: 0, field: "fuel" });
     const walkthrough = fuel.querySelector(".calculation-walkthrough")?.textContent ?? "";
     expect(walkthrough).toMatch(/True course and airspeed[\s\S]*Effective wind[\s\S]*Wind components[\s\S]*Groundspeed[\s\S]*Time enroute[\s\S]*Fuel consumed/);
-    expect(walkthrough).toContain("-8.572 kt wind along track + 109.879 kt airspeed along track ≈ 101.307 kt");
-    expect(walkthrough).toContain("5.15 kt crosswind from the left pushes right; steer 2.68° left into the wind");
-    expect(walkthrough).toContain("10 NM ÷ 101.307 kt");
+    expect(walkthrough).toContain("-8.6 kt wind along track + 109.9 kt airspeed along track ≈ 101.3 kt");
+    expect(walkthrough).toContain("5.2 kt crosswind from the left pushes right; steer 2.7° left into the wind");
+    expect(walkthrough).toContain("10 NM ÷ 101.3 kt");
     expect(walkthrough).toContain("8 gal/hr");
     expect(fuel.querySelector("details")?.open).toBe(false);
     expect(fuel.querySelector("details")?.textContent).toContain("wind-1");
     const compass = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector(".calculation-walkthrough")?.textContent ?? "";
     expect(compass).toMatch(/Wind correction[\s\S]*True heading[\s\S]*Magnetic heading[\s\S]*Compass heading/);
-    expect(compass).toContain("5.15 kt crosswind from the left pushes right; steer 2.68° left into the wind");
+    expect(compass).toContain("5.2 kt crosswind from the left pushes right; steer 2.7° left into the wind");
     expect(compass).toContain("subtract 7° for east variation");
     expect(compass).toContain("add 2° for west deviation");
     const headingDetails = renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector("details")?.textContent ?? "";
     expect(headingDetails).toContain("Effective wind source");
     expect(headingDetails).toContain("Formula: point-wind");
     expect(compass).not.toContain("- -2°");
-    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).textContent).toContain("Result: 23° as shown in the navlog. Stored unrounded value: 23.32.");
+    expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassHeading" }).querySelector("details")?.textContent).toContain("Stored unrounded value: 23.32.");
     expect(renderCalculationInspector(revision, { rowIndex: 0, field: "variation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("east-positive variation input");
     expect(renderCalculationInspector(revision, { rowIndex: 0, field: "compassDeviation" }).querySelector(".calculation-walkthrough")?.textContent).toContain("aircraft deviation table");
   });
@@ -112,7 +123,7 @@ describe("calculation inspector", () => {
     const revision = teachingRevisionWithLongDecimals();
     const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "groundspeed" });
     const walkthrough = rendered.querySelector(".calculation-walkthrough")?.textContent ?? "";
-    expect(walkthrough).toContain("Course 31.123° true; true airspeed 110.123 kt");
+    expect(walkthrough).toContain("Course 31.1° true; true airspeed 110.1 kt");
     expect(walkthrough).toContain("≈");
     expect(walkthrough).not.toContain("31.123456");
     expect(rendered.textContent).toContain("Stored unrounded value: 101.");
@@ -218,10 +229,10 @@ describe("calculation inspector", () => {
     };
     const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "distance" });
     expect(rendered.querySelector("h3")?.textContent).toContain("TOC → TOD");
-    expect(rendered.textContent).toContain("3800 ft ÷ 500 ft/min = 7.6 min");
-    expect(rendered.textContent).toContain("100 kt × 7.6 min ÷ 60 = 12.67 NM");
+    expect(rendered.textContent).toContain("3800 ft ÷ 500 ft/min ≈ 7.6 min");
+    expect(rendered.textContent).toContain("100 kt × 7.6 min ÷ 60 ≈ 12.7 NM");
     expect(rendered.textContent).toContain("Departure METAR wind is used as the climb placement approximation.");
-    expect(rendered.textContent).toContain("110 kt × 7.6 min ÷ 60 = 13.93 NM");
+    expect(rendered.textContent).toContain("110 kt × 7.6 min ÷ 60 ≈ 13.9 NM");
     expect(rendered.textContent).toContain("The cruise-altitude wind forecast is fixed for TOD placement.");
   });
 

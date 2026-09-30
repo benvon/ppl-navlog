@@ -44,7 +44,7 @@ function selectedRow(revision: PlanRevision | undefined, selection: NavlogInspec
 function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): void {
   heading.textContent = selectionHeading(revision, selection, row);
   const value = selectedValue(row, selection.field);
-  section.append(paragraph(`Result: ${worksheetResult(value, selection.field, row)} as shown in the navlog. Stored unrounded value: ${displayValue(value)}.`));
+  section.append(paragraph(`Result: ${worksheetResult(value, selection.field, row)} as shown in the navlog.`));
   const walkthrough = document.createElement("section");
   walkthrough.className = "calculation-walkthrough";
   const walkthroughHeading = document.createElement("h4");
@@ -57,7 +57,7 @@ function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, r
   const technical = document.createElement("details");
   const summary = document.createElement("summary");
   summary.textContent = "Data sources and technical details";
-  technical.append(summary);
+  technical.append(summary, paragraph(`Stored unrounded value: ${displayValue(value)}.`));
   appendSupportingHeadingTraces(technical, row, selection.field);
   if (["groundspeed", "estimatedTimeEnroute", "fuel"].includes(selection.field)) {
     technical.append(paragraph("Effective wind used for this row"));
@@ -116,7 +116,7 @@ function appendWalkthrough(section: HTMLElement, row: RecordValue, field: Navlog
     item.append(label, document.createTextNode(explanation));
     list.append(item);
   }
-  section.append(list, paragraph("Navlog table angles, speeds, and elapsed times use whole units; altitude is rounded to the nearest 100 ft, and distance and fuel to 0.1. Calculation traces retain stored unrounded values."));
+  section.append(list, paragraph("Navlog table angles, speeds, and elapsed times use whole units; altitude is rounded to the nearest 100 ft, and distance and fuel to 0.1. Walkthrough arithmetic uses rounded estimates (intermediate values to 0.1); small differences from the displayed result are expected. Calculations use unrounded inputs, retained in technical details."));
 }
 
 function appendPlacementStep(steps: Array<[string, string]>, revision: PlanRevision | undefined, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
@@ -150,8 +150,8 @@ function placementCalculationChain(boundary: RecordValue): string {
   };
   const altitude = value("altitude difference"), rate = value("vertical rate"), duration = value("estimated duration");
   const groundspeed = value("planning groundspeed"), distance = value("estimated distance");
-  const vertical = altitude === undefined || rate === undefined || duration === undefined ? "" : `${displayValue(altitude)} ft ÷ ${displayValue(rate)} ft/min = ${displayValue(duration)} min`;
-  const horizontal = groundspeed === undefined || duration === undefined || distance === undefined ? "" : `${displayValue(groundspeed)} kt × ${displayValue(duration)} min ÷ 60 = ${displayValue(distance)} NM`;
+  const vertical = altitude === undefined || rate === undefined || duration === undefined ? "" : `${stepValue(altitude)} ft ÷ ${stepValue(rate)} ft/min ≈ ${stepValue(duration)} min`;
+  const horizontal = groundspeed === undefined || duration === undefined || distance === undefined ? "" : `${stepValue(groundspeed)} kt × ${stepValue(duration)} min ÷ 60 ≈ ${stepValue(distance)} NM`;
   return [vertical, horizontal].filter(Boolean).join("; ");
 }
 
@@ -213,7 +213,7 @@ function appendSourceValueStep(steps: Array<[string, string]>, row: RecordValue,
 
 function appendRouteSourceStep(steps: Array<[string, string]>, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
   if (field === "altitude" && subleg?.altitudePresentation === "cruise-assumption") {
-    steps.push(["Altitude", `The displayed ${stepValue(subleg.selectedCruiseAltitude)} ft MSL is a fixed cruise-altitude assumption for this ${String(subleg.phase ?? "phase")} row. It does not represent a row altitude transition or a crossing altitude.`]);
+    steps.push(["Altitude", `The displayed ${worksheetWholeHundredsOfFeet(subleg.selectedCruiseAltitude)} ft MSL is a fixed cruise-altitude assumption for this ${String(subleg.phase ?? "phase")} row. It does not represent a row altitude transition or a crossing altitude.`]);
   } else if (field === "altitude") steps.push(["Altitude", `${stepValue(subleg?.startingAltitude)} ft to ${stepValue(subleg?.endingAltitude)} ft MSL from this row's route/phase allocation.`]);
   else if (field === "trueCourse") steps.push(["True course", `${stepValue(subleg?.trueCourse)}° is the course allocated to this route/phase row.`]);
   else if (field === "distance") steps.push(["Distance", `${stepValue(subleg?.distance)} NM is the distance allocated to this route/phase row.`]);
@@ -243,7 +243,7 @@ function signedStepCompassEffect(value: unknown): string {
 }
 
 function stepValue(value: unknown): string {
-  if (typeof value === "number" && Number.isFinite(value)) return String(Number(value.toFixed(3)));
+  if (typeof value === "number" && Number.isFinite(value)) return String(Number(value.toFixed(1)));
   if (record(value) && typeof value.directionFrom === "number" && typeof value.speed === "number") {
     return `${stepValue(value.directionFrom)}° from at ${stepValue(value.speed)} kt`;
   }
