@@ -4,6 +4,7 @@ import { WorkerWindsClient } from './services/weather/winds-client';
 import { createBrowserUseCaseIds, createSystemClock } from './application/plan-use-cases';
 import { IndexedDbPilotInputRepository } from './services/storage/pilot-input-repository';
 import { renderPilotIntentPlanner } from './ui/pilot-intent-planner';
+import { createLearningSources } from './ui/learning-sources';
 import './ui/styles.css';
 
 const root = document.querySelector<HTMLElement>('#app');
@@ -26,5 +27,5 @@ const footer = document.createElement('footer');
 const identity = document.createElement('p'); identity.className = 'build-identity'; void showBuildIdentity(identity, import.meta.env.VITE_APP_VERSION ?? 'local', import.meta.env.VITE_APP_COMMIT_SHA ?? 'local');
 footer.append(identity);
 const workspace = document.createElement('div'); workspace.className = 'planning-workspace';
-main.append(heading, description, disclaimer, workspace, footer); root.replaceChildren(main);
+main.append(heading, description, disclaimer, workspace, createLearningSources(), footer); root.replaceChildren(main);
 renderPilotIntentPlanner(workspace, { repository, airportLookup: new WorkerAirportLookup(), winds, ids, clock });
