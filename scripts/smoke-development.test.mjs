@@ -10,7 +10,7 @@ globalThis.fetch = async (url) => {
   const path = new URL(url).pathname;
   if (path === '/') return new Response('<div id="app"></div>', { headers: { 'Content-Security-Policy': "default-src 'self'" } });
   if (path === '/version.json') return Response.json({ version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA });
-  if (path === '/api/health') return Response.json({ status: 'ok', version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA, requestId: 'smoke-test-request' });
+  if (path === '/api/health') return Response.json({ status: 'ok', version: process.env.API_VERSION ?? process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA, requestId: 'smoke-test-request' });
   if (path === '/api/airports/1C8') {
     if (process.env.AIRPORT_SCENARIO === 'unavailable') return Response.json({ error: 'Upstream unavailable' }, { status: 503 });
     return Response.json({
@@ -46,7 +46,7 @@ function runSmoke(airportScenario) {
     encoding: 'utf8',
     timeout: 10_000,
     env: {
-      RELEASE_VERSION: 'v0.1.0-rc.100',
+      RELEASE_VERSION: 'dev-100',
       GITHUB_SHA: 'a'.repeat(40),
       AIRPORT_SCENARIO: airportScenario,
     },
@@ -87,5 +87,14 @@ describe('development deployment smoke', () => {
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Development smoke passed');
+  });
+
+  it('requires the deployed API runtime version to match the development artifact', () => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { RELEASE_VERSION: 'dev-100', GITHUB_SHA: 'a'.repeat(40), API_VERSION: 'v1.0.0' },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('static and API build identity do not match');
   });
 });

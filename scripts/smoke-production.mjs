@@ -1,8 +1,9 @@
 const hosts = ['https://navlog.benvon.net', 'https://navlog.pplstudyguide.com'];
-const version = process.env.RELEASE_VERSION;
+const buildVersion = process.env.BUILD_VERSION;
+const releaseVersion = process.env.RELEASE_VERSION;
 const sha = process.env.GITHUB_SHA;
-if (!/^v\d+\.\d+\.\d+-rc\.[1-9]\d*$/.test(version ?? '') || !/^[0-9a-f]{40}$/.test(sha ?? '')) {
-  throw new Error('Production smoke requires an RC version and full commit SHA.');
+if (!/^dev-[1-9]\d*$/.test(buildVersion ?? '') || !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(releaseVersion ?? '') || !/^[0-9a-f]{40}$/.test(sha ?? '')) {
+  throw new Error('Production smoke requires the development build identifier, stable release version, and full commit SHA.');
 }
 
 async function get(host, path) {
@@ -16,8 +17,8 @@ async function checkHost(host) {
   const [html, build, api] = await Promise.all([index.text(), manifest.json(), health.json()]);
   if (!html.includes('<div id="app"></div>')) throw new Error(`${host}: app root missing.`);
   if (!index.headers.get('Content-Security-Policy')?.includes("default-src 'self'")) throw new Error(`${host}: static CSP missing.`);
-  if (build.version !== version || build.commitSha !== sha || api.version !== version || api.commitSha !== sha) {
-    throw new Error(`${host}: static and API build identity differ from the promoted artifact.`);
+  if (build.version !== buildVersion || build.commitSha !== sha || api.version !== releaseVersion || api.commitSha !== sha) {
+    throw new Error(`${host}: static development build and stable API release identity differ from the promoted artifact.`);
   }
   if (api.status !== 'ok' || !api.requestId) throw new Error(`${host}: API health payload invalid.`);
   const airportResponse = await get(host, '/api/airports/1C8');
@@ -40,7 +41,7 @@ for (const host of hosts) {
     try {
       await checkHost(host);
       lastError = undefined;
-      console.log(`Production smoke passed for ${host}: ${version} ${sha}`);
+      console.log(`Production smoke passed for ${host}: ${buildVersion} artifact, ${releaseVersion} release, ${sha}`);
       break;
     } catch (error) {
       lastError = error;

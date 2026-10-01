@@ -1,3 +1,4 @@
+import { showBuildIdentity } from './ui/build-identity';
 import { WorkerAirportLookup } from './services/airport/worker-airport-lookup';
 import { WorkerWindsClient } from './services/weather/winds-client';
 import { createBrowserUseCaseIds, createSystemClock } from './application/plan-use-cases';
@@ -22,7 +23,7 @@ const heading = document.createElement('h1'); heading.textContent = 'PPL Navlog'
 const description = document.createElement('p'); description.textContent = 'A VFR navigation planning study tool with inspectable calculations.';
 const disclaimer = document.createElement('p'); disclaimer.className = 'teaching-disclaimer'; disclaimer.textContent = 'For teaching purposes only. Not for actual flight planning or a complete preflight briefing.';
 const footer = document.createElement('footer');
-const identity = document.createElement('p'); identity.className = 'build-identity'; identity.textContent = `Build ${import.meta.env.VITE_APP_VERSION ?? 'v0.0.0-dev'} (${import.meta.env.VITE_APP_COMMIT_SHA ?? 'local'})`;
+const identity = document.createElement('p'); identity.className = 'build-identity'; void showBuildIdentity(identity, import.meta.env.VITE_APP_VERSION ?? 'local', import.meta.env.VITE_APP_COMMIT_SHA ?? 'local');
 footer.append(identity);
 const workspace = document.createElement('div'); workspace.className = 'planning-workspace';
 main.append(heading, description, disclaimer, workspace, footer); root.replaceChildren(main);

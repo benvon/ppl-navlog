@@ -1,6 +1,5 @@
 {
   "name": "ppl-navlog",
-  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "A VFR flight-planning log that makes each calculation visible.",
