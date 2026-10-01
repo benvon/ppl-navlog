@@ -58,7 +58,7 @@ jobs:
         env:
           ARTIFACT_NAME: ${{ steps.candidate.outputs.artifact_name }}
           CI_RUN_ID: ${{ steps.candidate.outputs.ci_run_id }}
-          RELEASE_VERSION: ${{ steps.candidate.outputs.rc_tag }}
+          RELEASE_VERSION: ${{ steps.candidate.outputs.dev_tag }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
         run: |
           set -euo pipefail
@@ -67,13 +67,14 @@ jobs:
 
       - name: Deploy to production
         env:
-          RELEASE_VERSION: ${{ steps.candidate.outputs.rc_tag }}
+          RELEASE_VERSION: ${{ steps.candidate.outputs.stable_tag }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
         run: npx wrangler deploy --env production --var "APP_ENV:production" --var "APP_VERSION:$RELEASE_VERSION" --var "APP_COMMIT_SHA:$CANDIDATE_SHA"
 
       - name: Smoke deployed application
         env:
-          RELEASE_VERSION: ${{ steps.candidate.outputs.rc_tag }}
+          BUILD_VERSION: ${{ steps.candidate.outputs.dev_tag }}
+          RELEASE_VERSION: ${{ steps.candidate.outputs.stable_tag }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
         run: GITHUB_SHA="$CANDIDATE_SHA" node scripts/smoke-production.mjs
 

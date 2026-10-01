@@ -1,8 +1,8 @@
 const base = 'https://navlog.benvon.dev';
 const version = process.env.RELEASE_VERSION;
 const sha = process.env.GITHUB_SHA;
-if (!/^v\d+\.\d+\.\d+-rc\.\d+$/.test(version ?? '') || !/^[0-9a-f]{40}$/.test(sha ?? '')) {
-  throw new Error('Smoke test requires an RC version and full commit SHA.');
+if (!/^dev-[1-9]\d*$/.test(version ?? '') || !/^[0-9a-f]{40}$/.test(sha ?? '')) {
+  throw new Error('Smoke test requires a development build identifier and full commit SHA.');
 }
 
 async function get(path) {

@@ -12,8 +12,8 @@ globalThis.fetch = async (url) => {
     return Response.json({ status: 'ok', version: 'wrong', commitSha: process.env.GITHUB_SHA, requestId: 'fixture' });
   }
   if (pathname === '/') return new Response('<div id="app"></div>', { headers: { 'Content-Security-Policy': "default-src 'self'" } });
-  if (pathname === '/version.json') return Response.json({ version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA });
-  if (pathname === '/api/health') return Response.json({ status: 'ok', version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA, requestId: 'fixture' });
+  if (pathname === '/version.json') return Response.json({ version: process.env.BUILD_VERSION, commitSha: process.env.GITHUB_SHA });
+  if (pathname === '/api/health') return Response.json({ status: 'ok', version: process.env.API_VERSION ?? process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA, requestId: 'fixture' });
   if (pathname === '/api/airports/1C8') return Response.json({ airport: { requestedIcao: '1C8', icao: '1C8', name: 'Fixture airport', coordinates: { latitudeDeg: 41.5, longitudeDeg: -88.5 }, elevationFt: 600 }, provenance: { adapter: 'runway-picker' } });
   return new Response('Unexpected request', { status: 404 });
 };
@@ -23,7 +23,7 @@ await import(${JSON.stringify(smokeUrl)});
 function runSmoke(secondHostBad) {
   return spawnSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
     encoding: 'utf8', timeout: 10_000,
-    env: { RELEASE_VERSION: 'v0.1.0-rc.42', GITHUB_SHA: 'a'.repeat(40), SECOND_HOST_BAD: secondHostBad ? 'yes' : 'no' },
+    env: { BUILD_VERSION: 'dev-42', RELEASE_VERSION: 'v0.1.0', GITHUB_SHA: 'a'.repeat(40), SECOND_HOST_BAD: secondHostBad ? 'yes' : 'no' },
   });
 }
 
@@ -40,6 +40,15 @@ describe('production deployment smoke', () => {
     const result = runSmoke(true);
     expect(result.error).toBeUndefined();
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('navlog.pplstudyguide.com: static and API build identity differ');
+    expect(result.stderr).toContain('navlog.pplstudyguide.com: static development build and stable API release identity differ');
+  });
+
+  it('requires the manifest to retain the development artifact ID while API reports the stable tag', () => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { BUILD_VERSION: 'dev-42', RELEASE_VERSION: 'v0.1.0', API_VERSION: 'dev-42', GITHUB_SHA: 'a'.repeat(40) },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('static development build and stable API release identity differ');
   });
 });

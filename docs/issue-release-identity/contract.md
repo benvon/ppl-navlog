@@ -1,0 +1,5 @@
+# Tag-owned release identity
+
+Approved contract: GitHub stable tags (`vX.Y.Z`) define application releases. Package metadata must not select or constrain releases. Each main CI run receives a unique `dev-<run-number>` build tag. Development deploys and publishes that build after validation and smoke checks. Production stable tags select a successful, published development build on exactly the same commit, preserving artifact/run/repository/configuration verification. Static assets are promoted unchanged; their manifest retains the development build ID and SHA. Production API reports the stable tag. The footer displays that runtime release only when the runtime SHA matches the compiled artifact, otherwise displaying build identity. Failures do not invent a release version.
+
+Implementation: replace package-based candidate generation and promotion checks, separate release/build identities in production deployment and smoke checks, remove package version metadata, update footer identity and release docs, run targeted negative tests and full CI. No stable tags or production promotion are created by this change.

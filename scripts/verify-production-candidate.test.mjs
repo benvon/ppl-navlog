@@ -4,7 +4,7 @@ import { validateProductionCandidate } from './verify-production-candidate.mjs';
 const sha = 'a'.repeat(40);
 const input = {
   stableTag: 'v0.1.0',
-  rcTag: 'v0.1.0-rc.42',
+  devTag: 'dev-42',
   repository: 'benvon/ppl-navlog',
   run: {
     id: 12345,
@@ -18,10 +18,9 @@ const input = {
     path: '.github/workflows/ci.yml',
     head_sha: sha,
   },
-  release: { tag_name: 'v0.1.0-rc.42', draft: false, prerelease: true },
+  release: { tag_name: 'dev-42', draft: false, prerelease: true },
   artifacts: [{ name: 'static-assets-12345-1', expired: false, workflow_run: { head_sha: sha } }],
   tagSha: sha,
-  packageVersion: '0.1.0',
   productionConfig: {
     name: 'ppl-navlog',
     env: { production: {
@@ -37,22 +36,27 @@ const input = {
 };
 
 describe('production promotion candidate', () => {
-  it('accepts a stable tag on a published RC commit built by successful main CI', () => {
+  it('accepts a stable tag on a published development build from successful main CI', () => {
     expect(validateProductionCandidate(input)).toEqual({
-      stableTag: 'v0.1.0', rcTag: 'v0.1.0-rc.42', commitSha: sha, ciRunId: 12345, artifactName: 'static-assets-12345-1',
+      stableTag: 'v0.1.0', devTag: 'dev-42', commitSha: sha, ciRunId: 12345, artifactName: 'static-assets-12345-1',
     });
+  });
+
+  it('keeps stable release SemVer independent of the development build ID', () => {
+    const result = validateProductionCandidate({ ...input, stableTag: 'v7.8.9' });
+    expect(result.stableTag).toBe('v7.8.9');
+    expect(result.devTag).toBe('dev-42');
   });
 
   it.each([
     [{ stableTag: 'v0.1.0-rc.42' }, /stable/],
-    [{ rcTag: 'v0.1.0-rc.43' }, /run number/],
+    [{ devTag: 'dev-43' }, /run number/],
     [{ run: { ...input.run, event: 'pull_request' } }, /successful main/],
     [{ run: { ...input.run, conclusion: 'failure' } }, /successful main/],
     [{ run: { ...input.run, head_sha: 'b'.repeat(40) } }, /same commit/],
     [{ release: { ...input.release, prerelease: false } }, /prerelease/],
     [{ artifacts: [{ ...input.artifacts[0], name: 'static-assets-12345-3' }] }, /artifact/],
     [{ artifacts: [{ ...input.artifacts[0], expired: true }] }, /artifact/],
-    [{ packageVersion: '0.2.0' }, /package version/],
     [{ productionConfig: { name: 'ppl-navlog', env: { production: { routes: [] } } } }, /two-domain/],
   ])('rejects an invalid stable-tag promotion source', (change, error) => {
     expect(() => validateProductionCandidate({ ...input, ...change })).toThrow(error);
