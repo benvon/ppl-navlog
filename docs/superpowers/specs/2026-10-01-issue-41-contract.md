@@ -54,4 +54,3 @@ Removing field-exit persistence means recent textbox edits can be lost if the us
 ## Implementation reference
 
 Start with `src/ui/pilot-intent-planner.ts`, `src/ui/planner-plan-state.ts`, their tests, and the planner layout/focus styles. The serialized save/switch plan in `docs/superpowers/plans/2026-09-29-serialized-planner-save-switch.md` describes earlier invariants: this issue supersedes its requirement to keep blur autosave while preserving applicable single-flight and failure protections.
-
