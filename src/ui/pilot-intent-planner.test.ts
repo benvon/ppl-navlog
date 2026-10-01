@@ -110,11 +110,10 @@ function choosePlan(root: HTMLElement, title: string): void {
   select.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-function edit(root: HTMLElement, name: string, value: string, blur = false): void {
+function edit(root: HTMLElement, name: string, value: string): void {
   const element = input(root, name);
   element.value = value;
   element.dispatchEvent(new Event("input", { bubbles: true }));
-  if (blur) element.dispatchEvent(new Event("blur", { bubbles: true }));
 }
 
 async function mount(repository: MemoryInputs, client = winds(), airportLookup: AirportLookup = createLocalStudyAirportLookup()): Promise<HTMLElement> {
@@ -245,8 +244,11 @@ describe("pilot intent planner", () => {
     button(root, "Use current UTC").click();
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-21T21:30");
+    expect(input(root, "departure-time").dataset.unsaved).toBe("true");
+    button(root, "Save changes").click();
+    await settle();
     expect(repository.plans.find((plan) => plan.id === "past-weather-plan")?.rawFields["departure-time"]).toBe("2026-09-21T21:30");
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved");
+    expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
     expect(root.querySelector("[role='status']")?.textContent).not.toContain("observed after the planned departure UTC");
     expect(fetchMetar).toHaveBeenCalledTimes(1);
     expect(fetchPoint).not.toHaveBeenCalled();
@@ -291,7 +293,7 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="navlog"]')?.open).toBe(true);
-    edit(root, "fuel-aboard", "19", true);
+    edit(root, "fuel-aboard", "19");
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(input(root, "fuel-aboard").value).toBe("19");
@@ -306,7 +308,7 @@ describe("pilot intent planner", () => {
     } });
     const root = await mount(repository, client);
     await makeLocallyValid(root);
-    edit(root, "plan-title", "Latest route inputs", true);
+    edit(root, "plan-title", "Latest route inputs");
     await settle();
 
     button(root, "Update navlog").click();
@@ -459,11 +461,13 @@ describe("pilot intent planner", () => {
   it("preserves invalid UTC text and leaves the local picker unset", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);
-    edit(root, "departure-time", "2026-09-27T01:", true);
+    edit(root, "departure-time", "2026-09-27T01:");
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-27T01:");
     expect(root.querySelector<HTMLInputElement>('[name="departure-local"]')?.value).toBe("");
     expect(root.querySelector("#departure-time-error")?.textContent).toContain("YYYY-MM-DDTHH:mm");
+    button(root, "Save changes").click();
+    await settle();
     expect(repository.plans.at(-1)?.rawFields["departure-time"]).toBe("2026-09-27T01:");
   });
 
@@ -473,18 +477,123 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("storage initialization failed");
   });
 
-  it("persists literal invalid field text on blur, including distinct departure LID and METAR ICAO, and reports failed writes", async () => {
+  it("keeps ordinary blur out of persistence and tracks literal textbox changes", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);
-    edit(root, "plan-title", "  literal title text  ", true);
-    edit(root, "departure-icao", "1C8", true);
-    edit(root, "departure-metar-icao", "KORD", true);
+    const title = input(root, "plan-title");
+    title.dispatchEvent(new Event("blur", { bubbles: true }));
+    await settle();
+    expect(repository.saveAttempts).toBe(0);
+    expect(title.hasAttribute("data-unsaved")).toBe(false);
+
+    edit(root, "plan-title", "New study route ");
+    expect(title.dataset.unsaved).toBe("true");
+    expect(title.getAttribute("aria-describedby")).toContain("textbox-unsaved-description");
+    expect(root.querySelector("#textbox-unsaved-description")?.textContent).toBe("Unsaved changes.");
+    expect(title.getAttribute("aria-invalid")).not.toBe("true");
+    title.dispatchEvent(new Event("blur", { bubbles: true }));
+    await settle();
+    expect(repository.saveAttempts).toBe(0);
+
+    edit(root, "plan-title", "New study route");
+    expect(title.hasAttribute("data-unsaved")).toBe(false);
+    expect(title.getAttribute("aria-describedby")).not.toContain("textbox-unsaved-description");
+    edit(root, "plan-title", "");
+    expect(title.dataset.unsaved).toBe("true");
+    edit(root, "plan-title", "New study route");
+    expect(title.hasAttribute("data-unsaved")).toBe(false);
+    edit(root, "taxi-fuel", "1");
+    button(root, "Save changes").click();
+    await settle();
+    const attemptsBeforeProfileBlur = repository.saveAttempts;
+    edit(root, "taxi-fuel", "1.0");
+    expect(input(root, "taxi-fuel").dataset.unsaved).toBe("true");
+    edit(root, "taxi-fuel", "1");
+    expect(input(root, "taxi-fuel").hasAttribute("data-unsaved")).toBe(false);
+
+    const profileName = input(root, "profile-name");
+    edit(root, "profile-name", "Uncommitted profile text");
+    expect(profileName.dataset.unsaved).toBe("true");
+    profileName.dispatchEvent(new Event("blur", { bubbles: true }));
+    await settle();
+    expect(repository.saveAttempts).toBe(attemptsBeforeProfileBlur);
+    edit(root, "profile-name", "");
+    expect(profileName.hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("preserves changed markers through a failed structural rerender and advances them after retry", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    repository.failSave = true;
+    edit(root, "plan-title", "Retained across rerender");
+    button(root, "Add checkpoint").click();
+    await settle();
+
+    expect(input(root, "plan-title").value).toBe("Retained across rerender");
+    expect(input(root, "plan-title").dataset.unsaved).toBe("true");
+    expect(input(root, "checkpoint-name-0").hasAttribute("data-unsaved")).toBe(false);
+    expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
+
+    repository.failSave = false;
+    button(root, "Retry save").click();
+    await settle();
+    expect(input(root, "plan-title").hasAttribute("data-unsaved")).toBe(false);
+    expect(input(root, "plan-title").getAttribute("aria-describedby")).not.toContain("textbox-unsaved-description");
+    edit(root, "plan-title", "Changed after acknowledgement");
+    expect(input(root, "plan-title").dataset.unsaved).toBe("true");
+    edit(root, "plan-title", "Retained across rerender");
+    expect(input(root, "plan-title").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("starts a newly added checkpoint textbox clean when its field name is reused", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    button(root, "Add checkpoint").click();
+    await settle();
+    edit(root, "checkpoint-name-0", "Removed checkpoint");
+    edit(root, "checkpoint-coordinate-0", "N4145 W08730");
+    button(root, "Save changes").click();
+    await settle();
+
+    button(root, "Remove checkpoint 1").click();
+    await settle();
+    button(root, "Add checkpoint").click();
+    await settle();
+    expect(input(root, "checkpoint-name-0").value).toBe("");
+    expect(input(root, "checkpoint-name-0").hasAttribute("data-unsaved")).toBe(false);
+    expect(input(root, "checkpoint-coordinate-0").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("marks the derived local departure control against its matching baseline", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    const local = root.querySelector<HTMLInputElement>("[name='departure-local']")!;
+    local.value = "2026-09-21T17:30";
+    local.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(local.dataset.unsaved).toBe("true");
+    expect(input(root, "departure-time").value).toBe("2026-09-21T22:30");
+    expect(input(root, "departure-time").dataset.unsaved).toBe("true");
+    button(root, "Save changes").click();
+    await settle();
+    expect(local.hasAttribute("data-unsaved")).toBe(false);
+    expect(input(root, "departure-time").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("persists literal invalid field text only on explicit save and reports failed writes", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "plan-title", "  literal title text  ");
+    edit(root, "departure-icao", "1C8");
+    edit(root, "departure-metar-icao", "KORD");
+    expect(repository.saveAttempts).toBe(0);
+    button(root, "Save changes").click();
     await settle();
     expect(repository.plans.at(-1)?.rawFields).toMatchObject({ "plan-title": "  literal title text  ", "departure-icao": "1C8", "departure-metar-icao": "KORD" });
     expect(root.querySelector<HTMLInputElement>("[name='departure-metar-icao']")?.value).toBe("KORD");
 
     repository.failSave = true;
-    edit(root, "departure-icao", "1C8", true);
+    edit(root, "departure-icao", "1C8X");
+    button(root, "Save changes").click();
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(button(root, "Update navlog").disabled).toBe(true);
@@ -494,7 +603,8 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
-    edit(root, "fuel-aboard", "", true);
+    edit(root, "fuel-aboard", "");
+    button(root, "Save changes").click();
     await settle();
     expect(button(root, "Update navlog").disabled).toBe(true);
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("");
@@ -508,7 +618,8 @@ describe("pilot intent planner", () => {
     edit(root, "fuel-aboard", "not-a-number");
     expect(button(root, "Update navlog").disabled).toBe(true);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("finite, nonnegative");
-    edit(root, "fuel-aboard", "not-a-number", true);
+    edit(root, "fuel-aboard", "not-a-number");
+    button(root, "Save changes").click();
     await settle();
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("not-a-number");
     edit(root, "fuel-aboard", "-0.1");
@@ -662,7 +773,7 @@ describe("pilot intent planner", () => {
     const root = await mount(repository);
     await makeLocallyValid(root);
     edit(root, "fuel-aboard", "020.00");
-    edit(root, "departure-metar-icao", "KORD", true);
+    edit(root, "departure-metar-icao", "KORD");
     await settle();
 
     expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
@@ -682,7 +793,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
   });
 
-  it("reopens the latest plan snapshot after blur autosave without losing fields on a later save", async () => {
+  it("reopens the latest plan snapshot across explicit save-before-open", async () => {
     const repository = new MemoryInputs();
     const first: PilotInputPlan = { schemaVersion: 1,
       id: "first-plan", title: "First plan", rawFields: { "cruise-altitude": "4500", "plan-title": "First plan", "departure-time": "2026-09-21T22:00" },
@@ -695,7 +806,7 @@ describe("pilot intent planner", () => {
     repository.plans.push(first, second);
     const root = await mount(repository);
 
-    edit(root, "departure-time", "2026-09-21T23:15", true);
+    edit(root, "departure-time", "2026-09-21T23:15");
     await settle();
     choosePlan(root, "First plan");
     await settle();
@@ -706,7 +817,8 @@ describe("pilot intent planner", () => {
     choosePlan(root, "First plan");
     await settle();
     expect(input(root, "departure-time").value).toBe("2026-09-21T23:15");
-    edit(root, "taxi-fuel", "1.2", true);
+    edit(root, "taxi-fuel", "1.2");
+    button(root, "Save changes").click();
     await settle();
 
     expect(repository.plans.find((plan) => plan.id === first.id)?.rawFields).toMatchObject({
@@ -800,7 +912,7 @@ describe("pilot intent planner", () => {
     expect(repository.plans[0]?.overrideReasons).toEqual({});
     expect(repository.plans[0]?.rawFields).not.toHaveProperty("override-tas-0");
 
-    edit(root, "cruise-altitude", "6200", true);
+    edit(root, "cruise-altitude", "6200");
     await settle();
     button(root, "Remove checkpoint 1").click();
     await settle();
@@ -816,7 +928,7 @@ describe("pilot intent planner", () => {
     edit(root, "plan-title", "typed without blur");
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    edit(root, "taxi-fuel", "1.25", true);
+    edit(root, "taxi-fuel", "1.25");
     button(root, "Save changes").click();
     await Promise.resolve();
     expect(repository.plans).toHaveLength(0);
@@ -876,7 +988,7 @@ describe("pilot intent planner", () => {
     repository.failSave = true;
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    edit(root, "plan-title", "Failed write", true);
+    edit(root, "plan-title", "Failed write");
     button(root, "New plan").click();
     release();
     await settle();
@@ -897,12 +1009,13 @@ describe("pilot intent planner", () => {
   it("restores incomplete profile text and ordered checkpoint text after reopening a saved plan", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);
-    edit(root, "cruiseTasKnots", "not a number yet", true);
+    edit(root, "cruiseTasKnots", "not a number yet");
     await settle();
     button(root, "Add checkpoint").click();
     await settle();
-    edit(root, "checkpoint-name-0", "Farm strip", true);
-    edit(root, "checkpoint-coordinate-0", "N4145 W08730", true);
+    edit(root, "checkpoint-name-0", "Farm strip");
+    edit(root, "checkpoint-coordinate-0", "N4145 W08730");
+    button(root, "Save changes").click();
     await settle();
     const stored = repository.plans.at(-1)!;
     expect(stored.rawFields["profile-cruiseTasKnots"]).toBe("not a number yet");
@@ -923,13 +1036,14 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
-  it("autosaves malformed airport codes but blocks update before airport lookup", async () => {
+  it("keeps malformed airport codes in the draft and blocks update before airport lookup", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const lookup = createLocalStudyAirportLookup();
     const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
     const root = await mount(repository, winds(), lookup);
     await makeLocallyValid(root, true);
-    edit(root, "departure-icao", "K-ORD", true);
+    edit(root, "departure-icao", "K-ORD");
+    button(root, "Save changes").click();
     await settle();
 
     expect(repository.plans.at(-1)?.rawFields["departure-icao"]).toBe("K-ORD");
@@ -1203,9 +1317,9 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[name='override-tas-0']")).toBeNull();
     expect(root.querySelector("input[type='checkbox']")).toBeNull();
     button(root, "Override TAS for leg 1").click();
-    edit(root, "override-tas-0", "100", true);
+    edit(root, "override-tas-0", "100");
     expect(button(root, "Update navlog").disabled).toBe(true);
-    edit(root, "override-reason-0", "Training comparison", true);
+    edit(root, "override-reason-0", "Training comparison");
     await settle();
     expect(button(root, "Update navlog").disabled).toBe(false);
     choosePlan(root, "Second plan");
@@ -1313,7 +1427,7 @@ describe("pilot intent planner", () => {
       overrideReasons: { "tas-1": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
-    edit(root, "plan-title", "Second leg revised", true);
+    edit(root, "plan-title", "Second leg revised");
     await settle();
     expect(repository.plans[0]?.overrideReasons).toEqual({ "tas-1": "Training comparison" });
   });
@@ -1410,7 +1524,7 @@ describe("pilot intent planner", () => {
     expect(root.querySelector(".calculated-navlog")).toBeNull();
   });
 
-  it("captures an immediate New click during blur save and locks editing until the destination opens", async () => {
+  it("captures an immediate New action after typing and locks editing until the destination opens", async () => {
     const repository = new MemoryInputs();
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
@@ -1418,7 +1532,6 @@ describe("pilot intent planner", () => {
     const title = input(root, "plan-title");
     title.value = "Pending draft";
     title.dispatchEvent(new Event("input", { bubbles: true }));
-    title.dispatchEvent(new Event("blur", { bubbles: true }));
     button(root, "New plan").click();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Saving");
     expect(button(root, "New plan").disabled).toBe(true);
@@ -1470,16 +1583,12 @@ describe("pilot intent planner", () => {
       : [{ name: "", coordinateText: "" }]);
   });
 
-  it.each(["Override TAS for leg 1", "Remove checkpoint 1", "Restore aircraft default for leg 1", "Save changes", "Continue to Calculate", "Use current UTC", "Update navlog", "Save aircraft profile"])("accepts the first pointer click after input focus: %s", async (action) => {
+  it.each(["Override TAS for leg 1", "Remove checkpoint 1", "Restore aircraft default for leg 1", "Save changes", "Continue to Calculate", "Update navlog", "Save aircraft profile"])("accepts the first pointer click after input focus: %s", async (action) => {
     const repository = new MemoryInputs();
     repository.profiles.push(profile);
     const root = await mount(repository);
     document.body.append(root);
     if (action === "Update navlog") await makeLocallyValid(root);
-    if (action === "Use current UTC") {
-      edit(root, "departure-time", "2026-09-21T20:00", true);
-      await settle();
-    }
     if (action === "Save aircraft profile") {
       const values = { "profile-name": "Pointer test aircraft", cruiseTasKnots: "95", cruiseFuelFlowGallonsPerHour: "6", climbRateFeetPerMinute: "500", climbTasKnots: "70", climbFuelFlowGallonsPerHour: "8", descentRateFeetPerMinute: "500", descentTasKnots: "90", descentFuelFlowGallonsPerHour: "4" };
       for (const [name, value] of Object.entries(values)) edit(root, name, value);
@@ -1523,7 +1632,6 @@ describe("pilot intent planner", () => {
       "Restore aircraft default for leg 1": () => expect(repository.plans[0]?.rawFields["override-tas-0"]).toBeUndefined(),
       "Save changes": () => expect(root.querySelector('[role="status"]')?.textContent).toContain("Changes saved."),
       "Continue to Calculate": () => expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true),
-      "Use current UTC": () => expect(repository.plans[0]?.rawFields["departure-time"]).toBe("2026-09-21T21:30"),
       "Update navlog": () => expect(root.querySelector(".calculated-navlog")).not.toBeNull(),
       "Save aircraft profile": () => expect(repository.profiles.some(({ name }) => name === "Pointer test aircraft")).toBe(true),
     };
@@ -1559,7 +1667,7 @@ describe("pilot intent planner", () => {
     expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Focused save");
   });
 
-  it("keeps blur autosave available when a pointer press is canceled without a click", async () => {
+  it("keeps a draft unchanged when a pointer press is canceled without a click", async () => {
     const repository = new MemoryInputs();
     const root = await mount(repository);
     document.body.append(root);
@@ -1573,25 +1681,29 @@ describe("pilot intent planner", () => {
     await settle();
     root.remove();
     expect(focusedAfterPress).toBe(title);
-    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Canceled button press");
+    expect(repository.plans).toHaveLength(0);
+    expect(title.dataset.unsaved).toBe("true");
   });
 
-  it("coalesces rapid blur events into one write containing the latest literal fields", async () => {
+  it("keeps rapid focus movement write-free and saves the latest literal fields on command", async () => {
     const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "plan-title", "First title");
+    edit(root, "departure-icao", "KORD");
+    edit(root, "destination-icao", "KJVL");
+    await settle();
+    expect(repository.saveAttempts).toBe(0);
+    expect(button(root, "Save changes").disabled).toBe(false);
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    const root = await mount(repository);
-    const editorBeforeSave = input(root, "plan-title");
-    edit(root, "plan-title", "First title", true);
-    edit(root, "departure-icao", "KORD", true);
-    edit(root, "destination-icao", "KJVL", true);
-    await settle();
+    button(root, "Save changes").click();
+    await Promise.resolve();
     expect(repository.saveAttempts).toBe(1);
+    expect(input(root, "plan-title").disabled).toBe(true);
     release();
     await settle();
     expect(repository.plans[0]?.rawFields).toMatchObject({ "plan-title": "First title", "departure-icao": "KORD", "destination-icao": "KJVL" });
-    expect(input(root, "plan-title")).toBe(editorBeforeSave);
-    expect([...planSelector(root).options].some((option) => option.textContent === "First title")).toBe(true);
+    expect(input(root, "plan-title").hasAttribute("data-unsaved")).toBe(false);
   });
 
   it("moves keyboard focus to the new editor after the accepted switch", async () => {
@@ -1605,7 +1717,6 @@ describe("pilot intent planner", () => {
     title.value = "Focused draft";
     title.dispatchEvent(new Event("input", { bubbles: true }));
     const create = button(root, "New plan");
-    title.dispatchEvent(new Event("blur", { bubbles: true }));
     create.focus();
     create.click();
     expect(create.disabled).toBe(true);
@@ -1615,7 +1726,7 @@ describe("pilot intent planner", () => {
     root.remove();
   });
 
-  it("disables Update navlog during autosave and keeps it blocked after save failure", async () => {
+  it("disables Update navlog during an explicit save and keeps it blocked after failure", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const client = winds();
     const fetchMetar = vi.spyOn(client, "fetchMetar");
@@ -1625,7 +1736,8 @@ describe("pilot intent planner", () => {
     repository.failSave = true;
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    edit(root, "plan-title", "Pending update draft", true);
+    edit(root, "plan-title", "Pending update draft");
+    button(root, "Save changes").click();
     await Promise.resolve();
     expect(button(root, "Update navlog").disabled).toBe(true);
     button(root, "Update navlog").click();
@@ -1648,7 +1760,7 @@ describe("pilot intent planner", () => {
     expect(button(root, "New plan").disabled).toBe(false);
   });
 
-  it("blocks Update during autosave, then persists the profile before weather", async () => {
+  it("blocks Update during an explicit save, then persists the profile before weather", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const client = winds();
     const fetchMetar = vi.spyOn(client, "fetchMetar");
@@ -1656,7 +1768,8 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root);
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    edit(root, "plan-title", "Pending profile snapshot", true);
+    edit(root, "plan-title", "Pending profile snapshot");
+    button(root, "Save changes").click();
     await Promise.resolve();
     const update = button(root, "Update navlog");
     expect(update.disabled).toBe(true);
@@ -1692,13 +1805,14 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).not.toContain("write failed");
   });
 
-  it("locks Update navlog once a destination is accepted during saving", async () => {
+  it("locks Update navlog once a destination is accepted during an explicit save", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const root = await mount(repository);
     await makeLocallyValid(root);
     let release!: () => void;
     repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
-    edit(root, "plan-title", "Switching draft", true);
+    edit(root, "plan-title", "Switching draft");
+    button(root, "Save changes").click();
     await Promise.resolve();
     expect(button(root, "Update navlog").disabled).toBe(true);
     button(root, "New plan").click();
@@ -1709,17 +1823,19 @@ describe("pilot intent planner", () => {
     expect(input(root, "plan-title").value).toBe("New study route");
   });
 
-  it("offers retry after failed blur save and does not retry on another blur", async () => {
+  it("offers retry after failed explicit save and does not retry on another blur", async () => {
     const repository = new MemoryInputs(); repository.failSave = true;
     const root = await mount(repository);
-    edit(root, "plan-title", "Failed draft", true);
+    edit(root, "plan-title", "Failed draft");
+    button(root, "Save changes").click();
     await settle();
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(button(root, "Retry save")).toBeTruthy();
     const attempts = repository.saveAttempts;
-    edit(root, "departure-icao", "KORD", true);
+    edit(root, "departure-icao", "KORD");
     await settle();
     expect(repository.saveAttempts).toBe(attempts);
     expect(input(root, "departure-icao").value).toBe("KORD");
+    expect(input(root, "plan-title").dataset.unsaved).toBe("true");
   });
 });

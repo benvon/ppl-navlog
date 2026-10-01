@@ -1,5 +1,7 @@
 # Serialized Planner Save and Switch Implementation Plan
 
+> Superseded in part by issue #41: ordinary textbox blur no longer saves. The single-flight write, accepted destination, failure recovery, and save-before-New/Open safeguards below remain current.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make planner saves and plan switches single-flight operations with one owner for editable pilot inputs and visible save state.

@@ -1,5 +1,7 @@
 # Issue #15: fuel aboard and running fuel balance
 
+> Historical note: issue #41 supersedes this document's blur-autosave behavior. Literal text remains in the active draft until an explicit save boundary; the fuel validation and calculation requirements below remain unchanged.
+
 Authority: GitHub issue #15 and the user's clarification on 2026-09-26. This is a fuel-model correction in its own PR. The active path is `renderPilotIntentPlanner`; the older revision planner is outside scope except for type compatibility. Do not incorporate the guided planner UI redesign.
 
 ## Product contract

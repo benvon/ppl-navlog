@@ -94,6 +94,23 @@ body {
 .aboard-fuel-summary > p { margin-block: var(--space-2); }
 .route-form .field-error { color: #8b1e00; font-size: 0.9rem; font-weight: 600; }
 input[aria-invalid="true"] { border-color: #8b1e00; outline-color: #8b1e00; }
+.planner-shell input[data-unsaved="true"] { border: 2px solid #b42318; }
+.planner-shell input[data-unsaved="true"]:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.unsaved-explanation { margin-block: var(--space-2); color: var(--color-ink); font-size: 0.9rem; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 .profile-form label,
 .route-form label {
