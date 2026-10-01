@@ -54,6 +54,7 @@ class PilotIntentPlanner {
   private readonly touchedFields = new Set<string>();
   private updating = false;
   private savingProfile = false;
+  private replacingEditor = false;
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
   private clockTimer?: number;
@@ -64,6 +65,12 @@ class PilotIntentPlanner {
     this.planState = new PlannerPlanState(dependencies.repository, { ids: dependencies.ids, clock: dependencies.clock });
     this.status.setAttribute("role", "status");
     this.status.className = "planner-feedback";
+    this.content.addEventListener("pointerdown", (event) => {
+      const button = event.target instanceof Element ? event.target.closest("button") : null;
+      // Let enabled buttons act before blur autosave can lock them between
+      // pointer press and release. Shared state still owns disabled controls.
+      if (event.button === 0 && button instanceof HTMLButtonElement && !button.disabled) event.preventDefault();
+    });
     this.planState.subscribe((view) => this.onPlanState(view));
   }
 
@@ -234,7 +241,11 @@ class PilotIntentPlanner {
       const stage = details.dataset.stage as keyof typeof this.stageOpen;
       if (stage in this.stageOpen) this.stageOpen[stage] = details.open;
     });
-    this.content.replaceChildren();
+    // Removing a focused input can synchronously fire blur. Its old form must
+    // not overwrite the draft that the accepted button action just changed.
+    this.replacingEditor = true;
+    try { this.content.replaceChildren(); }
+    finally { this.replacingEditor = false; }
     const shell = document.createElement("section");
     shell.className = "planner-shell";
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
@@ -285,7 +296,10 @@ class PilotIntentPlanner {
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
       input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => { this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist(); });
+      input.addEventListener("blur", () => {
+        if (this.replacingEditor || !this.content.contains(input)) return;
+        this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist();
+      });
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
@@ -294,7 +308,7 @@ class PilotIntentPlanner {
     const saveChanges = document.createElement("button"); saveChanges.type = "button"; saveChanges.dataset.saveChanges = "true"; saveChanges.textContent = "Save changes"; saveChanges.addEventListener("click", this.handleSaveChanges);
     routeStage.append(saveChanges);
     const continueButton = document.createElement("button"); continueButton.type = "button"; continueButton.textContent = "Continue to Calculate";
-    continueButton.addEventListener("click", () => { this.activateStage("calculate"); this.content.querySelector<HTMLElement>('[data-stage="calculate"] summary')?.focus(); });
+    continueButton.addEventListener("click", () => { this.activateStage("calculate"); this.content.querySelector<HTMLElement>('[data-stage="calculate"] summary')?.focus(); void this.persist(); });
     routeStage.append(continueButton);
     const calculateStage = this.stage("calculate", "Calculate", update, feedback);
     const navlogStage = this.stage("navlog", "Calculated navlog");
@@ -488,7 +502,7 @@ class PilotIntentPlanner {
       group.append(restore);
     } else {
       const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = `Override TAS for leg ${legIndex + 1}`;
-      reveal.addEventListener("click", () => { this.openOverrideEditors.add(legIndex); this.render(); });
+      reveal.addEventListener("click", () => { this.openOverrideEditors.add(legIndex); this.render(); void this.persist(); });
       group.append(reveal);
     }
   }
@@ -500,7 +514,10 @@ class PilotIntentPlanner {
     values.forEach(([id, label]) => form.append(this.input(id, label, this.fields[`profile-${id}`] ?? "")));
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
       input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.setField(`profile-${input.name}`, input.value); this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => { this.setField(`profile-${input.name}`, input.value); void this.persist(); });
+      input.addEventListener("blur", () => {
+        if (this.replacingEditor || !this.content.contains(input)) return;
+        this.setField(`profile-${input.name}`, input.value); void this.persist();
+      });
     });
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; form.append(save); section.append(form); return section;
   }
