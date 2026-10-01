@@ -12,7 +12,7 @@ The active worksheet follows Chapter 16 course, wind, heading, groundspeed, time
 
 The [pilot input and calculation workflow](docs/revisions-and-weather-refresh.md) documents v2 input-only persistence, one saved input set per plan, ephemeral calculation results, and guarded overrides. Plan and profile import/export are out of scope before 1.0.
 
-The browser stores pilot inputs and aircraft profiles locally. Airport and weather responses and calculated navlog output are session-only; reload or reopening a plan requires a new successful **Update plan**. Issue #7's v2 store does not load or migrate v1 browser data.
+The browser stores pilot inputs and aircraft profiles locally. Textbox edits remain in the active draft until **Save changes**, a save-before-New/Open transition, or **Update navlog**; moving focus does not write. Red textbox outlines mark literal values that differ from the latest successful save. Airport and weather responses and calculated navlog output are session-only; reload or reopening a plan requires a new successful **Update navlog**. Issue #7's v2 store does not load or migrate v1 browser data.
 
 The [UI architecture](docs/ui-architecture.md) explains the layout/theme boundary and the worksheet-to-inspector interaction.
 

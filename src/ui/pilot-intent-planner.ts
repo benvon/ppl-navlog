@@ -52,10 +52,9 @@ class PilotIntentPlanner {
   private profileDraftDirty = false;
   private readonly openOverrideEditors = new Set<number>();
   private readonly touchedFields = new Set<string>();
+  private readonly textboxBaseline = new Map<string, string>();
   private updating = false;
   private savingProfile = false;
-  private replacingEditor = false;
-  private transferringButtonFocus = false;
   private disabledButtonFocus?: HTMLButtonElement;
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
@@ -69,19 +68,14 @@ class PilotIntentPlanner {
     this.status.className = "planner-feedback";
     this.content.addEventListener("pointerdown", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button") : null;
-      // Let enabled buttons act before blur autosave can lock them between
-      // pointer press and release. Shared state still owns disabled controls.
+      // Keep pointer activation predictable when an editor has focus.
       if (event.button !== 0 || !(button instanceof HTMLButtonElement) || button.disabled) return;
       event.preventDefault();
     });
-    // Transfer focus only when a click is accepted. A canceled press must leave
-    // the input focused so its next ordinary blur still autosaves the edits.
     this.content.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button") : null;
       if (!(button instanceof HTMLButtonElement) || button.disabled) return;
-      this.transferringButtonFocus = true;
-      try { button.focus(); }
-      finally { this.transferringButtonFocus = false; }
+      button.focus();
     }, { capture: true });
     this.planState.subscribe((view) => this.onPlanState(view));
   }
@@ -134,6 +128,7 @@ class PilotIntentPlanner {
     const draftId = view.activeDraft?.id;
     const destinationCompleted = this.lastPlanPhase === "switching" && view.phase === "editing";
     const draftChanged = this.renderedDraftId !== undefined && draftId !== this.renderedDraftId;
+    if (this.lastPlanPhase === "saving" && view.phase === "switching") this.acknowledgeTextboxValues();
     if (draftChanged || (destinationCompleted && !view.error)) {
       this.showActiveDraft(view);
       return;
@@ -152,6 +147,7 @@ class PilotIntentPlanner {
     const selected = this.profiles.find((profile) => profile.id === view.activeDraft?.selectedProfileId);
     this.profileDraftDirty = profileDraftDiffersFromSaved(view.activeDraft?.rawFields ?? {}, selected);
     this.touchedFields.clear();
+    this.textboxBaseline.clear();
     this.activateStage(view.activeDraft?.selectedProfileId ? "route" : "aircraft");
     this.renderedDraftId = view.activeDraft?.id;
     this.lastPlanPhase = view.phase;
@@ -266,15 +262,20 @@ class PilotIntentPlanner {
       const stage = details.dataset.stage as keyof typeof this.stageOpen;
       if (stage in this.stageOpen) this.stageOpen[stage] = details.open;
     });
-    // Removing a focused input can synchronously fire blur. Its old form must
-    // not overwrite the draft that the accepted button action just changed.
-    this.replacingEditor = true;
-    try { this.content.replaceChildren(); }
-    finally { this.replacingEditor = false; }
+    this.content.replaceChildren();
     const shell = document.createElement("section");
     shell.className = "planner-shell";
     const heading = document.createElement("h2"); heading.textContent = "Flight plan";
-    shell.append(heading, this.status);
+    const unsavedDescription = document.createElement("p");
+    unsavedDescription.id = "unsaved-explanation";
+    unsavedDescription.className = "unsaved-explanation";
+    unsavedDescription.textContent = "Red outlines mark textbox edits not yet saved to this plan's draft. Saving an aircraft profile is a separate action.";
+    const unsavedAccessibleDescription = document.createElement("span");
+    unsavedAccessibleDescription.id = "textbox-unsaved-description";
+    unsavedAccessibleDescription.className = "visually-hidden";
+    unsavedAccessibleDescription.hidden = true;
+    unsavedAccessibleDescription.textContent = "Unsaved changes.";
+    shell.append(heading, this.status, unsavedDescription, unsavedAccessibleDescription);
     const plans = document.createElement("section"); plans.className = "plan-picker"; plans.append(this.el("h3", "Saved pilot inputs"));
     const planSelect = document.createElement("select"); planSelect.setAttribute("aria-label", "Saved plan"); planSelect.append(new Option("Choose saved plan", ""));
     this.plans.forEach((plan) => planSelect.append(new Option(plan.title, plan.id, false, plan.id === this.current?.id)));
@@ -320,11 +321,7 @@ class PilotIntentPlanner {
     profileLabel.append(profile);
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => {
-        if (this.replacingEditor || this.transferringButtonFocus || !this.content.contains(input)) return;
-        this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist();
-      });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.updateTextboxMarker(input); this.invalidate(); this.refreshUpdateGate(); });
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
@@ -349,10 +346,15 @@ class PilotIntentPlanner {
     const utcInput = group.querySelector<HTMLInputElement>('[name="departure-time"]')!;
     const hint = document.createElement("p"); hint.dataset.utcFormat = "true"; hint.id = "departure-utc-format";
     hint.textContent = "UTC format: YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-26T18:30.";
-    utcInput.setAttribute("aria-describedby", `departure-time-error ${hint.id}`);
+    const describedBy = new Set((utcInput.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean));
+    describedBy.add("departure-time-error");
+    describedBy.add(hint.id);
+    utcInput.setAttribute("aria-describedby", [...describedBy].join(" "));
     const localLabel = document.createElement("label"); localLabel.textContent = "Choose local departure date and time ";
     const picker = document.createElement("input"); picker.type = "datetime-local"; picker.name = "departure-local";
     picker.value = utcTextToLocalDateTime(this.fields["departure-time"] ?? "") ?? "";
+    if (!this.textboxBaseline.has(picker.name)) this.textboxBaseline.set(picker.name, picker.value);
+    this.updateTextboxMarker(picker);
     const localError = document.createElement("span"); localError.className = "field-error"; localError.setAttribute("aria-live", "polite");
     picker.addEventListener("change", () => {
       const converted = localDateTimeToUtcText(picker.value);
@@ -360,9 +362,9 @@ class PilotIntentPlanner {
       if (!converted.ok) return;
       utcInput.value = converted.utcText;
       utcInput.dispatchEvent(new Event("input", { bubbles: true }));
-      utcInput.dispatchEvent(new Event("blur", { bubbles: true }));
+      this.updateTextboxMarker(picker);
     });
-    utcInput.addEventListener("input", () => { picker.value = utcTextToLocalDateTime(utcInput.value) ?? ""; localError.textContent = ""; });
+    utcInput.addEventListener("input", () => { picker.value = utcTextToLocalDateTime(utcInput.value) ?? ""; this.updateTextboxMarker(picker); localError.textContent = ""; });
     localLabel.append(picker, localError);
     const clock = document.createElement("div"); clock.dataset.currentClock = "true"; clock.className = "current-clock";
     const useCurrentUtc = document.createElement("button");
@@ -373,7 +375,6 @@ class PilotIntentPlanner {
       if (!this.shouldOfferCurrentUtc()) return;
       utcInput.value = this.dependencies.clock.now().toISOString().slice(0, 16);
       utcInput.dispatchEvent(new Event("input", { bubbles: true }));
-      utcInput.dispatchEvent(new Event("blur", { bubbles: true }));
     });
     useCurrentUtc.hidden = !this.shouldOfferCurrentUtc();
     group.append(hint, localLabel, useCurrentUtc, clock);
@@ -424,8 +425,32 @@ class PilotIntentPlanner {
   private input(name: string, labelText: string, value: string): HTMLLabelElement {
     const label = document.createElement("label"); label.append(document.createTextNode(`${labelText} `));
     const input = document.createElement("input"); input.type = "text"; input.name = name; input.value = value;
+    if (!this.textboxBaseline.has(name)) this.textboxBaseline.set(name, value);
     const error = document.createElement("span"); error.id = `${name}-error`; error.className = "field-error"; input.setAttribute("aria-describedby", error.id);
+    this.updateTextboxMarker(input);
     label.append(input, error); return label;
+  }
+  private updateTextboxMarker(input: HTMLInputElement): void {
+    const baseline = this.textboxBaseline.get(input.name);
+    const isUnsaved = baseline !== undefined && input.value !== baseline;
+    const descriptionId = "textbox-unsaved-description";
+    const describedBy = (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    if (isUnsaved) {
+      input.dataset.unsaved = "true";
+      if (!describedBy.includes(descriptionId)) describedBy.push(descriptionId);
+    } else {
+      input.removeAttribute("data-unsaved");
+      const index = describedBy.indexOf(descriptionId);
+      if (index >= 0) describedBy.splice(index, 1);
+    }
+    if (describedBy.length > 0) input.setAttribute("aria-describedby", describedBy.join(" "));
+    else input.removeAttribute("aria-describedby");
+  }
+  private acknowledgeTextboxValues(): void {
+    this.content.querySelectorAll<HTMLInputElement>("input[type='text'], input[type='datetime-local']").forEach((input) => {
+      this.textboxBaseline.set(input.name, input.value);
+      this.updateTextboxMarker(input);
+    });
   }
   private renderRouteCollections(): HTMLElement {
     const wrapper = document.createElement("div");
@@ -501,6 +526,7 @@ class PilotIntentPlanner {
     const hadOverrides = this.clearRouteOverrides();
     const current = this.current;
     if (!current) return;
+    this.shiftCheckpointBaselines(current.checkpoints.length, index);
     const nextCheckpoints = [...current.checkpoints];
     nextCheckpoints.splice(index, 1);
     this.editDraft(this.withIdentity({ ...current, checkpoints: nextCheckpoints, overrideReasons: {} }));
@@ -510,17 +536,38 @@ class PilotIntentPlanner {
       if (hadOverrides) this.setStatus("Route changed; existing TAS overrides and reasons were cleared.");
     });
   }
+  private shiftCheckpointBaselines(checkpointCount: number, removedIndex: number): void {
+    const shifted = Array.from({ length: checkpointCount - removedIndex - 1 }, (_, offset) => {
+      const oldIndex = removedIndex + offset + 1;
+      return [
+        this.textboxBaseline.get(`checkpoint-name-${oldIndex}`),
+        this.textboxBaseline.get(`checkpoint-coordinate-${oldIndex}`),
+      ] as const;
+    });
+    for (let index = removedIndex; index < checkpointCount; index++) {
+      this.textboxBaseline.delete(`checkpoint-name-${index}`);
+      this.textboxBaseline.delete(`checkpoint-coordinate-${index}`);
+    }
+    shifted.forEach(([name, coordinate], offset) => {
+      const nextIndex = removedIndex + offset;
+      if (name !== undefined) this.textboxBaseline.set(`checkpoint-name-${nextIndex}`, name);
+      if (coordinate !== undefined) this.textboxBaseline.set(`checkpoint-coordinate-${nextIndex}`, coordinate);
+    });
+  }
   private appendTasControls(group: HTMLFieldSetElement, legIndex: number): void {
-    const override = this.fields[`override-tas-${legIndex}`]?.trim() ?? "";
+    const override = this.fields[`override-tas-${legIndex}`] ?? "";
+    const hasOverride = override.trim() !== "";
     const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
     const summary = document.createElement("p");
-    summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
+    summary.textContent = hasOverride ? `Overridden TAS: ${override.trim()} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
     group.append(summary);
-    if (override || this.openOverrideEditors.has(legIndex)) {
+    if (hasOverride || this.openOverrideEditors.has(legIndex)) {
       group.append(this.input(`override-tas-${legIndex}`, `Leg ${legIndex + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${legIndex}`, `Leg ${legIndex + 1} override reason`, this.current?.overrideReasons[`tas-${legIndex}`] ?? ""));
       const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${legIndex + 1}`;
       restore.addEventListener("click", () => {
         const fields = this.fields; delete fields[`override-tas-${legIndex}`]; delete fields[`override-reason-${legIndex}`];
+        this.textboxBaseline.delete(`override-tas-${legIndex}`);
+        this.textboxBaseline.delete(`override-reason-${legIndex}`);
         if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.editDraft({ ...this.current, rawFields: fields, overrideReasons: reasons }); }
         this.openOverrideEditors.delete(legIndex); this.invalidate(); this.render(); void this.persist();
       });
@@ -538,11 +585,7 @@ class PilotIntentPlanner {
     const values: readonly [string, string][] = [["profile-name", "Profile name"], ["cruiseTasKnots", "Cruise TAS (kt)"], ["cruiseFuelFlowGallonsPerHour", "Cruise fuel flow (gal/hr)"], ["climbRateFeetPerMinute", "Climb rate (ft/min)"], ["climbTasKnots", "Climb TAS (kt)"], ["climbFuelFlowGallonsPerHour", "Climb fuel flow (gal/hr)"], ["descentRateFeetPerMinute", "Descent rate (ft/min)"], ["descentTasKnots", "Descent TAS (kt)"], ["descentFuelFlowGallonsPerHour", "Descent fuel flow (gal/hr)"], ["usableFuelGallons", "Usable fuel (gal, optional)"], ["compass-deviation-card", "Compass deviation entries (e.g. 000:+1, 090:-1)"]];
     values.forEach(([id, label]) => form.append(this.input(id, label, this.fields[`profile-${id}`] ?? "")));
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.setField(`profile-${input.name}`, input.value); this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
-      input.addEventListener("blur", () => {
-        if (this.replacingEditor || this.transferringButtonFocus || !this.content.contains(input)) return;
-        this.setField(`profile-${input.name}`, input.value); void this.persist();
-      });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.setField(`profile-${input.name}`, input.value); this.profileDraftDirty = true; this.updateTextboxMarker(input); this.invalidate(); this.refreshUpdateGate(); });
     });
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save aircraft profile"; form.append(save); section.append(form); return section;
   }
@@ -644,6 +687,7 @@ class PilotIntentPlanner {
       /^override-(?:tas|reason)-\d+$/.test(key) && value.trim() !== "",
     ) || Object.values(this.current?.overrideReasons ?? {}).some((reason) => reason.trim() !== "");
     this.openOverrideEditors.clear();
+    [...this.textboxBaseline.keys()].filter((key) => /^override-(?:tas|reason)-\d+$/.test(key)).forEach((key) => this.textboxBaseline.delete(key));
     const fields = Object.fromEntries(Object.entries(this.fields).filter(([key]) => !/^override-(?:tas|reason)-\d+$/.test(key)));
     if (this.current) this.editDraft({ ...this.current, rawFields: fields, overrideReasons: {} });
     return hadOverrides;
@@ -652,12 +696,12 @@ class PilotIntentPlanner {
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
     const result = this.planState.view.phase === "save-failed" ? await this.planState.retry() : await this.planState.save();
-    if (result.ok) { this.refreshUpdateGate(); this.setStatus("Changes saved."); }
+    if (result.ok) { this.acknowledgeTextboxValues(); this.refreshUpdateGate(); this.setStatus("Changes saved."); }
     else if (result.reason === "failed") this.refreshUpdateGate();
   }
   private async retrySave(): Promise<void> {
     const result = await this.planState.retry();
-    if (result.ok) this.setStatus("Pilot inputs saved.");
+    if (result.ok) { this.acknowledgeTextboxValues(); this.setStatus("Pilot inputs saved."); }
   }
   private async persist(successMessage = "Pilot inputs saved."): Promise<void> {
     if (!this.current) return;
@@ -666,7 +710,7 @@ class PilotIntentPlanner {
     await Promise.resolve();
     if (this.planState.view.phase !== "editing") return;
     const result = await this.planState.save();
-    if (result.ok) { this.refreshUpdateGate(); this.setStatus(successMessage); }
+    if (result.ok) { this.acknowledgeTextboxValues(); this.refreshUpdateGate(); this.setStatus(successMessage); }
     else if (result.reason === "failed") this.refreshUpdateGate();
   }
   private localError(): string | undefined {
@@ -689,6 +733,7 @@ class PilotIntentPlanner {
       this.editDraft({ ...current, profileSnapshot: selectedProfile });
       const saveResult = await this.planState.save();
       if (!saveResult.ok) throw new Error(saveResult.error ?? "Pilot inputs could not be saved; update stopped.");
+      this.acknowledgeTextboxValues();
       const invalid = this.localError();
       if (invalid) throw new Error(invalid);
       this.setStatus("Updating navlog…");
