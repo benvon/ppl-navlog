@@ -1,15 +1,13 @@
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
 import type { AirportLookup } from "../application/airport-lookup";
 import { applyCruiseTasOverride, createAircraftProfile, createPlanDraft, createRouteDefinition, type UseCaseClock, type UseCaseIds } from "../application/plan-use-cases";
-import { calculateCompletePlan, type CompletePlanWeather } from "../application/complete-plan";
 import { resolveRouteWeather, validateWorksheetPlanningInputs } from "../application/route-weather-sampling";
-import { createFullNavlogCalculationEngine } from "../application/full-navlog-engine";
 import { coordinate } from "../domain/coordinates";
 import { parseCompactCoordinate } from "../domain/coordinate-input";
 import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
-import type { PlanDraft, PlanRevision } from "../domain/route";
-import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
+import type { PlanDraft, WorksheetResult } from "../domain/route";
+import { WindsClientError, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { PILOT_INPUT_PLAN_SCHEMA_VERSION, MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 import { localDateTimeToUtcText, utcTextToLocalDateTime } from "./departure-time";
 import { PlannerPlanState, type PlannerPlanView } from "./planner-plan-state";
@@ -17,7 +15,7 @@ import { PlannerPlanState, type PlannerPlanView } from "./planner-plan-state";
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
   readonly airportLookup: AirportLookup;
-  readonly winds: WindsTransportClient & MetarTransportClient & AloftPointTransportClient;
+  readonly winds: MetarTransportClient & AloftPointTransportClient;
   readonly ids: UseCaseIds;
   readonly clock: UseCaseClock;
 }
@@ -48,7 +46,7 @@ class PilotIntentPlanner {
   private readonly planState: PlannerPlanState;
   private renderedDraftId?: string;
   private lastPlanPhase: PlannerPlanView["phase"] = "editing";
-  private result?: PlanRevision;
+  private result?: WorksheetResult;
   private inspected?: NavlogInspectionSelection;
   private feedback: { readonly kind: "message" | "error"; readonly text: string } = { kind: "message", text: "" };
   private profileDraftDirty = false;
@@ -745,27 +743,21 @@ class PilotIntentPlanner {
     const departureMetar = await fetchRequiredMetar(this.dependencies.winds, departure.icao, draft.weatherSelection?.departureMetarIcao);
     return { departureMetar };
   }
-  private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<PlanRevision> {
+  private async calculateDraft(draft: PlanDraft, profile: AircraftProfile): Promise<WorksheetResult> {
     validateWorksheetPlanningInputs(draft, profile);
     const { departureMetar } = await this.fetchEndpointWeather(draft);
     const solution = await resolveRouteWeather(draft, profile, {
       fetchPoint: (query) => this.dependencies.winds.fetchPoint(query),
     }, { departureMetar });
-    const calc = await calculateCompletePlan(draft, profile, {
-      weather: { resolve: async (): Promise<CompletePlanWeather> => solution.weather },
-      calculations: createFullNavlogCalculationEngine(),
-    });
-    if (calc.status === "blocked") throw new Error(calc.message);
-    const snapshot = calc.calculationSnapshot as Record<string, unknown>;
+    const snapshot = solution.calculationSnapshot as Record<string, unknown>;
     if (snapshot.schema !== "complete-navlog/v1" || snapshot.status !== "calculated") throw new Error("The route cannot produce a complete flyable navlog.");
     const now = this.dependencies.clock.now().toISOString();
     const current = this.current;
     if (!current) throw new Error("The active plan changed during calculation.");
     return {
-      schemaVersion: 1, id: this.dependencies.ids.next(), planId: current.id, revisionNumber: 1,
-      reason: "initial-save", createdAt: now, draftSnapshot: draft,
-      aircraftProfileSnapshot: { profile, snapshottedAt: now }, weatherSnapshotIds: calc.weather.snapshotIds,
-      calculationSnapshot: calc.calculationSnapshot, warnings: calc.warnings,
+      schemaVersion: 1, id: this.dependencies.ids.next(), planId: current.id, createdAt: now, draftSnapshot: draft,
+      aircraftProfileSnapshot: { profile, snapshottedAt: now }, weatherSnapshotIds: solution.weatherSnapshotIds,
+      calculationSnapshot: solution.calculationSnapshot, warnings: solution.warnings,
     };
   }
   private fail(error: unknown): void {

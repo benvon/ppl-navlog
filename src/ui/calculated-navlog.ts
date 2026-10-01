@@ -1,4 +1,4 @@
-import type { PlanRevision } from "../domain/route";
+import type { WorksheetResult } from "../domain/route";
 import type { NavlogInspectionSelection, NavlogInspectionField } from "./calculation-inspector";
 import { isCurrentWorksheetSnapshot } from "./current-worksheet-snapshot";
 import { wholeNumberDisplay } from "./whole-number";
@@ -26,7 +26,7 @@ export interface CalculatedNavlogViewOptions {
   readonly currentWeatherValidated?: boolean;
 }
 
-export const renderCalculatedNavlog = (revision: PlanRevision, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
+export const renderCalculatedNavlog = (revision: WorksheetResult, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
   const snapshot = completeNavlogSnapshot(revision.calculationSnapshot);
   if (revision.calculationSnapshot === undefined) return undefined;
   const section = document.createElement("section");
@@ -65,7 +65,7 @@ const renderUnsupportedNavlog = (section: HTMLElement): HTMLElement => {
 const renderCalculatedResult = (
   section: HTMLElement,
   navlog: RecordValue,
-  revision: PlanRevision,
+  revision: WorksheetResult,
   options: CalculatedNavlogViewOptions,
   boundaries: unknown,
   endpoint: NavlogEndpoint | undefined,
@@ -176,7 +176,7 @@ const usableFuelNotice = (summary: RecordValue | undefined): HTMLElement | undef
   return notice;
 };
 
-const revisionWarnings = (revision: PlanRevision): HTMLElement | undefined => {
+const revisionWarnings = (revision: WorksheetResult): HTMLElement | undefined => {
   if (revision.warnings.length === 0) return undefined;
   const section = document.createElement("section");
   section.className = "navlog-warnings";
@@ -205,7 +205,7 @@ const navlogHeader = (): HTMLTableSectionElement => {
   return head;
 };
 
-const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: PlanRevision, rowIndex: number, options: CalculatedNavlogViewOptions, boundaries: unknown, endpoint: NavlogEndpoint | undefined): HTMLTableRowElement => {
+const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: WorksheetResult, rowIndex: number, options: CalculatedNavlogViewOptions, boundaries: unknown, endpoint: NavlogEndpoint | undefined): HTMLTableRowElement => {
   const tr = document.createElement("tr");
   const subleg = nested(row, "subleg");
   const wind = navlogWind(row);
@@ -231,7 +231,7 @@ const navlogAltitude = (subleg: RecordValue | undefined): string =>
 
 export const navlogRowLabels = (
   rows: readonly RecordValue[],
-  revision: PlanRevision,
+  revision: WorksheetResult,
   rowIndex: number,
   boundaries: unknown,
   endpoint: NavlogEndpoint | undefined,
@@ -329,7 +329,7 @@ const fieldElevationEndpointLabel = (phase: unknown, routeDistance: unknown, end
   return `${routeEndpoint} (field elevation)`;
 };
 
-const sourceLabels = (revision: PlanRevision, subleg: RecordValue | undefined): { from: string; to: string; toCoordinate: unknown } => {
+const sourceLabels = (revision: WorksheetResult, subleg: RecordValue | undefined): { from: string; to: string; toCoordinate: unknown } => {
   const source = revision.draftSnapshot.route.legs.find((leg) => leg.id === subleg?.sourceLegId);
   const from = revision.draftSnapshot.route.points.find((point) => point.id === source?.fromPointId)?.name ?? text(subleg?.sourceLegId);
   const destination = revision.draftSnapshot.route.points.find((point) => point.id === source?.toPointId);

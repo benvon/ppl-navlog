@@ -1,13 +1,5 @@
-# Route Phase Allocation
+# Phase allocation: retired implementation
 
-Historical model: the active worksheet uses the [navigation teaching contract](navigation-worksheet-teaching-contract.md) and its one-time TOC/TOD estimates. The convergence, crossing-altitude, and intermediate-transition behavior described below remains only for legacy fixture callers pending issue #30 retirement.
+Issue #30 removes this superseded implementation and its callers/tests. It is not an alternate calculation path or a current requirement.
 
-`allocateRoutePhases` turns the user route's selected per-leg cruise altitudes into an explicit vertical profile before any navigation-log rows are calculated. It accepts airport departure and destination altitudes as `FeetMsl`; callers must pass the actual field elevation when that is the intended starting or ending altitude. It does not assume sea level.
-
-The transition policy is `begin-at-checkpoint-and-consume-following-route-space`. Departure climb begins at the route origin. When the selected altitude changes between two user legs, the climb or descent begins at their shared checkpoint and occupies distance on the following route. Arrival descent begins at a generated TOD measured backwards from the destination. Thus an altitude chosen for a later leg is never represented as an instantaneous jump at its checkpoint.
-
-Every feasible allocation includes generated TOC, TOD, and altitude-transition boundaries with unrounded route distances, source-leg IDs, and coordinates. The route is split at every user checkpoint and phase boundary. Each generated subleg retains its source user-leg ID, true course, start/end coordinate, absolute unrounded route distances, phase kind, phase ID, selected source-leg altitude, and continuous start/end altitude. Presentation rounding must not be fed back into allocation.
-
-Each climb, descent, and transition uses bounded wind/geometry convergence. Arrival-descent convergence repositions the weather sample to each candidate TOD and uses that candidate route segment's true course. Resolver-provided weather warnings, including any documented METAR-to-winds-aloft interpolation assumptions and field-elevation treatment, must be carried through to the plan result for display; allocation neither hides nor creates such an assumption.
-
-If a phase extends outside the route or overlaps another required phase, allocation returns `status: "infeasible"` with structured violations and no partial sublegs. It does not shorten a climb/descent, invent a cruise segment, or silently apply a changed altitude. The pilot must revise the route, altitude selections, or performance assumptions before calculated navlog rows may be produced.
+Use the [current worksheet calculation path](worksheet-calculation.md), [teaching contract](navigation-worksheet-teaching-contract.md), and [weather model](weather-model.md). The worksheet uses one cruise altitude, one-time estimated TOC/TOD placement, the entered aircraft performance, and sequential outgoing-row weather. There is no intermediate altitude model, convergence, checkpoint altitude tolerance, or automatic descent-rate adjustment.

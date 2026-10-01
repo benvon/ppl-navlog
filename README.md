@@ -8,7 +8,7 @@ The [navigation worksheet teaching contract](docs/navigation-worksheet-teaching-
 
 See the [magnetic-model record](docs/magnetic-model.md) for the WMM2025 source, license, validation vectors, and calculation assumptions.
 
-The active worksheet follows Chapter 16 course, wind, heading, groundspeed, time, and fuel arithmetic. TOC uses departure METAR wind as a disclosed climb approximation; TOD uses cruise-altitude wind above destination and descent to field elevation. Both positions are estimated once. Profile rates remain the entered assumptions. The [complete navlog engine](docs/full-navlog-engine.md), [phase-allocation model](docs/phase-allocation.md), and [weather model](docs/weather-model.md) include historical implementation details; the teaching contract takes precedence. The earlier [vertical-profile slice](docs/vertical-profile-slice.md) is a separate precursor.
+The active worksheet follows Chapter 16 course, wind, heading, groundspeed, time, and fuel arithmetic. TOC uses departure METAR wind as a disclosed climb approximation; TOD uses cruise-altitude wind above destination and descent to field elevation. Both positions are estimated once. Profile rates remain the entered assumptions. The [current calculation path](docs/worksheet-calculation.md) is the sole sequential waypoint worksheet, with [selected weather](docs/weather-model.md) and compact rows explained in the inspector below them. Competing phase-allocation and revision engines are removed.
 
 The [pilot input and calculation workflow](docs/revisions-and-weather-refresh.md) documents v2 input-only persistence, one saved input set per plan, ephemeral calculation results, and guarded overrides. Plan and profile import/export are out of scope before 1.0.
 

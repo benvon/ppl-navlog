@@ -73,9 +73,9 @@ PR #33 implements the issue #28 worksheet direction: stable cruise altitude, est
 
 Add authoritative learning-source references at the bottom of the page. Keep sources distinct from the per-value calculation inspector. Acceptance: the source list is visible at the page bottom, links to authoritative materials, and does not expand worksheet rows or alter calculations.
 
-### Issue #30: retire legacy calculation engines
+### Calculator retirement
 
-Complete the broader removal of obsolete calculation engines and their unsupported callers/fixtures. First establish which legacy engines and compatibility paths remain reachable, then remove them without changing the approved worksheet behavior or the current plan-input schema. Keep tests for active worksheet behavior and remove tests that only assert retired behavior. Acceptance: production calculation uses the approved worksheet path, retired engines cannot be selected by active callers, and active behavior remains covered.
+Issue #30 completes the removal of competing engines, old weather resolvers, phase models, and journal/forecast-selector types. The planner consumes the finalized sequential worksheet and its in-memory evidence directly. See [the sole calculation path](worksheet-calculation.md) and [issue #30 implementation plan](issue-30/implementation-plan.md). Shared wind interpolation, course, headings, time/fuel, magnetic variation, and current input validation remain covered.
 
 ### Release and operations
 

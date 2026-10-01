@@ -1,18 +1,15 @@
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
-import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle, MEAN_EARTH_RADIUS_NAUTICAL_MILES } from "../domain/distance-course";
+import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
 import { failure, success } from "../domain/errors";
 import { wind, type Wind } from "../domain/wind";
-import { nauticalMiles, degreesToRadians } from "../domain/units";
-import type { EffectiveWindResolver } from "../domain/phase-planning";
-import type { PlanDraft, JsonValue } from "../domain/route";
+import type { PlanDraft, JsonValue, RoutePoint, UserRouteLeg } from "../domain/route";
 import type { AircraftProfile } from "../domain/aircraft";
 import { describeAircraftProfileValidation, inspectAircraftProfile } from "../domain/aircraft-profile-validation";
 import { canonicalPointCoordinateDegrees, type Coordinate } from "../domain/coordinates";
 import { trace } from "../domain/calculation-trace";
 import { MAX_CHECKPOINTS_PER_PLAN } from "../services/storage/pilot-input-repository";
 import { calculatePlanningMagneticVariation } from "./magnetic-variation";
-import type { CompletePlanRouteLeg, CompletePlanWeather, RouteWeatherSample } from "./complete-plan";
-import { validateNavlogFuelInputs } from "./navlog-calculation";
+import { validateNavlogFuelInputs } from "./worksheet-input-validation";
 import type { PreparedWaypoint } from "./waypoint-preparation";
 import { calculateWaypointWorksheet } from "./waypoint-worksheet";
 import type { WaypointWorksheetWeather } from "./waypoint-worksheet";
@@ -25,10 +22,28 @@ export interface RouteWeatherPointClient {
   fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer>;
 }
 
+export interface RouteWeatherSample {
+  readonly routeDistanceNauticalMiles: number;
+  readonly plannedUtc: string;
+  readonly altitudeFeetMsl: number;
+  readonly answer: AloftPointAnswer;
+}
 export interface RouteWeatherSolution {
-  readonly weather: CompletePlanWeather;
+  readonly calculationSnapshot: JsonValue;
+  readonly weatherSnapshotIds: readonly string[];
+  readonly warnings: readonly string[];
+  readonly departureMetarPayload: MetarSuccessPayload;
+  readonly routeWeatherSamples: readonly RouteWeatherSample[];
+  readonly weatherProvenance: JsonValue;
   readonly sampledPoints: readonly AloftPointAnswer[];
   readonly iterations: 1;
+}
+interface RouteLegEvidence {
+  readonly sourceLeg: UserRouteLeg;
+  readonly start: RoutePoint;
+  readonly end: RoutePoint;
+  readonly distance: number;
+  readonly trueCourse: number;
 }
 
 /** Validates authored route and performance inputs before any weather is fetched. */
@@ -44,6 +59,7 @@ export const validateWorksheetPlanningInputs = (draft: PlanDraft, profile: Aircr
   if (destination.kind !== "airport") throw new RouteWeatherSamplingError("Route weather requires an airport destination endpoint with field elevation.");
   validateEndpointElevations(departure.elevationFeetMsl, destination.elevationFeetMsl);
   validateSingleCruiseAltitude(routeLegs, departure.elevationFeetMsl, destination.elevationFeetMsl);
+  if (draft.selectedAircraftProfileId !== profile.id) throw new RouteWeatherSamplingError("The selected aircraft profile does not match the plan draft.");
   const checkedProfile = inspectAircraftProfile(profile);
   if (checkedProfile.kind !== "valid") throw new RouteWeatherSamplingError(describeAircraftProfileValidation(checkedProfile));
   validateRoutePerformanceOverrides(routeLegs);
@@ -55,14 +71,14 @@ const validateEndpointElevations = (departureElevation: number, destinationEleva
   if (!Number.isFinite(departureElevation) || !Number.isFinite(destinationElevation)) throw new RouteWeatherSamplingError("Departure and destination field elevations must be finite before weather is requested.");
 };
 
-const validateSingleCruiseAltitude = (routeLegs: readonly CompletePlanRouteLeg[], departureElevation: number, destinationElevation: number): void => {
+const validateSingleCruiseAltitude = (routeLegs: readonly RouteLegEvidence[], departureElevation: number, destinationElevation: number): void => {
   const cruiseAltitude = routeLegs[0]!.sourceLeg.cruiseAltitudeFeetMsl;
   if (!Number.isFinite(cruiseAltitude) || cruiseAltitude <= departureElevation || cruiseAltitude <= destinationElevation) throw new RouteWeatherSamplingError("Choose a valid cruise altitude above departure and destination field elevations.");
   if (cruiseAltitude < 3_000 || cruiseAltitude > 53_000) throw new RouteWeatherSamplingError("Choose a cruise altitude from 3,000 through 53,000 ft MSL for winds-aloft data.");
   if (routeLegs.some(({ sourceLeg }) => sourceLeg.cruiseAltitudeFeetMsl !== cruiseAltitude)) throw new RouteWeatherSamplingError("Choose one cruise altitude for the whole route before calculating.");
 };
 
-const validateRoutePerformanceOverrides = (legs: readonly CompletePlanRouteLeg[]): void => {
+const validateRoutePerformanceOverrides = (legs: readonly RouteLegEvidence[]): void => {
   for (const leg of legs) validatePerformanceOverride(leg.sourceLeg.performanceOverrides?.cruiseTasKnots?.effectiveValue, leg.sourceLeg.performanceOverrides?.cruiseFuelFlowGallonsPerHour?.effectiveValue);
 };
 
@@ -73,7 +89,7 @@ const validatePerformanceOverride = (tas: number | undefined, fuelFlow: number |
 };
 
 interface RouteLine {
-  readonly leg: CompletePlanRouteLeg;
+  readonly leg: RouteLegEvidence;
   readonly startDistance: number;
   readonly endDistance: number;
 }
@@ -91,15 +107,19 @@ export const resolveRouteWeather = async (
   validateWorksheetPlanningInputs(draft, profile);
   const prepared = prepareRouteWeatherInputs(draft, endpoints);
   const worksheet = await calculateWorksheetRoute(draft, profile, pointClient, prepared, endpoints);
-  const weather = {
-    ...weatherFor(prepared.routeLegs, worksheet.samples, endpoints.departureMetar, worksheet.warnings),
-    progressiveCalculationSnapshot: worksheet.snapshot,
+  return {
+    calculationSnapshot: worksheet.snapshot,
+    weatherSnapshotIds: [...new Set(worksheet.samples.map((sample) => sample.answer.requestId))],
+    warnings: worksheet.warnings,
+    departureMetarPayload: endpoints.departureMetar,
+    routeWeatherSamples: worksheet.samples,
+    weatherProvenance: jsonValue({ source: "sequential-waypoint-worksheet-winds", eventCount: worksheet.samples.length, altitudeRule: "single route cruise altitude for TOC and checkpoint selections; destination cruise-altitude forecast for TOD placement" }),
+    sampledPoints: worksheet.samples.map((sample) => sample.answer), iterations: 1,
   };
-  return { weather, sampledPoints: worksheet.samples.map((sample) => sample.answer), iterations: 1 };
 };
 
 interface PreparedRouteWeatherInputs {
-  readonly routeLegs: readonly CompletePlanRouteLeg[];
+  readonly routeLegs: readonly RouteLegEvidence[];
   readonly lines: readonly RouteLine[];
   readonly totalDistance: number;
 }
@@ -327,28 +347,20 @@ export class RouteWeatherSamplingError extends Error {
   public constructor(message: string) { super(message); this.name = "RouteWeatherSamplingError"; }
 }
 
-const buildRouteLegs = (draft: PlanDraft): CompletePlanRouteLeg[] => {
+const buildRouteLegs = (draft: PlanDraft): RouteLegEvidence[] => {
   const points = new Map(draft.route.points.map((point) => [point.id, point]));
-  const result: CompletePlanRouteLeg[] = [];
+  const result: RouteLegEvidence[] = [];
   for (const sourceLeg of draft.route.legs) {
     const start = points.get(sourceLeg.fromPointId), end = points.get(sourceLeg.toPointId);
     if (start === undefined || end === undefined) throw new RouteWeatherSamplingError(`Route leg ${sourceLeg.id} references a missing point.`);
     const geometry = calculateGreatCircleDistanceAndInitialCourse(start.coordinate, end.coordinate);
     if (!geometry.ok) throw new RouteWeatherSamplingError(geometry.error.message);
-    const midpointDistance = nauticalMiles(geometry.value.distance / 2);
-    if (!midpointDistance.ok) throw new RouteWeatherSamplingError(midpointDistance.error.message);
-    const midpoint = pointAlongGreatCircle(start.coordinate, geometry.value.initialTrueCourse, midpointDistance.value);
-    if (!midpoint.ok) throw new RouteWeatherSamplingError(midpoint.error.message);
-    result.push({
-      sourceLeg, start, end, distance: geometry.value.distance, trueCourse: geometry.value.initialTrueCourse,
-      magneticCoordinate: midpoint.value,
-      magneticVariation: calculatePlanningMagneticVariation({ coordinate: midpoint.value, date: new Date(draft.departureTimeUtc), altitudeFeetMsl: sourceLeg.cruiseAltitudeFeetMsl }),
-    });
+    result.push({ sourceLeg, start, end, distance: geometry.value.distance, trueCourse: geometry.value.initialTrueCourse });
   }
   return result;
 };
 
-const routeLines = (routeLegs: readonly CompletePlanRouteLeg[]): RouteLine[] => {
+const routeLines = (routeLegs: readonly RouteLegEvidence[]): RouteLine[] => {
   let distance = 0;
   return routeLegs.map((leg) => {
     const startDistance = distance;
@@ -370,8 +382,8 @@ const pointAnswerCoversQuery = (query: AloftPointQuery, answer: AloftPointAnswer
   return [at, issued, from, until].every(Number.isFinite) && issued <= at && at >= from && at < until;
 };
 
-const validateDepartureMetar = (draft: PlanDraft, departure: Extract<CompletePlanRouteLeg["start"], { kind: "airport" }>, metar: MetarSuccessPayload): void => {
-  const allowedIcaos = new Set([departure.icao, draft.weatherSelection?.departureMetarIcao, draft.weatherSelection?.surfaceWeatherIcao].filter((icao): icao is string => icao !== undefined));
+const validateDepartureMetar = (draft: PlanDraft, departure: Extract<RoutePoint, { kind: "airport" }>, metar: MetarSuccessPayload): void => {
+  const allowedIcaos = new Set([departure.icao, draft.weatherSelection?.departureMetarIcao].filter((icao): icao is string => icao !== undefined));
   const failure = departureMetarFailure(metar, allowedIcaos, Date.parse(draft.departureTimeUtc));
   if (failure !== undefined) throw new RouteWeatherSamplingError(failure);
 };
@@ -387,29 +399,6 @@ const departureMetarFailure = (metar: MetarSuccessPayload, allowedIcaos: Readonl
   if (metarWind(metar) === null) return "The fetched departure METAR has no usable fixed or calm wind. Check the selected station's report or departure METAR ICAO alternate.";
   return undefined;
 };
-
-const weatherFor = (
-  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar: MetarSuccessPayload, warnings: readonly string[],
-): CompletePlanWeather => ({
-  snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))],
-  routeWeatherSamples: samples,
-  departureMetarPayload: metar,
-  phaseWindResolver: createWaypointPhaseResolver(routeLegs, samples, metar),
-  warnings,
-  provenance: jsonValue({ source: "sequential-waypoint-worksheet-winds", eventCount: samples.length, altitudeRule: "single route cruise altitude for TOC and checkpoint selections; destination cruise-altitude forecast for TOD placement" }),
-});
-
-export const createWaypointPhaseResolver = (
-  routeLegs: readonly CompletePlanRouteLeg[], samples: readonly RouteWeatherSample[], metar?: MetarSuccessPayload,
-): EffectiveWindResolver => ({
-  resolveEffectiveWind: (request) => {
-    const distance = projectRouteDistance(routeLegs, request.start);
-    const sample = [...samples].reverse().find((candidate) => candidate.routeDistanceNauticalMiles <= distance + 1e-8);
-    if (sample === undefined && metar !== undefined) return success(requiredMetarWind(metar));
-    if (sample === undefined) return failure("INVALID_WIND_SAMPLING", "No preceding progressive weather event is available.");
-    return success(pointWind(sample.answer));
-  },
-});
 
 const requiredMetarWind = (metar: MetarSuccessPayload): Wind => {
   const value = metarWind(metar);
@@ -429,40 +418,16 @@ const metarWind = (metar: MetarSuccessPayload): Wind | null => {
   return result.ok ? result.value : null;
 };
 
-const projectRouteDistance = (routeLegs: readonly CompletePlanRouteLeg[], target: Coordinate): number => {
-  const candidates = routeLines(routeLegs).map((line) => projectOntoRouteLine(line, target));
-  return candidates.reduce((nearest, candidate) => candidate.distance < nearest.distance ? candidate : nearest).routeDistance;
-};
-const projectOntoRouteLine = (line: RouteLine, target: Coordinate): { readonly distance: number; readonly routeDistance: number } => {
-  if (sameCoordinate(line.leg.start.coordinate, target)) return { distance: 0, routeDistance: line.startDistance };
-  if (sameCoordinate(line.leg.end.coordinate, target)) return { distance: 0, routeDistance: line.endDistance };
-  const fromStart = calculateGreatCircleDistanceAndInitialCourse(line.leg.start.coordinate, target);
-  if (!fromStart.ok) throw new RouteWeatherSamplingError(fromStart.error.message);
-  const delta13 = fromStart.value.distance / MEAN_EARTH_RADIUS_NAUTICAL_MILES;
-  const deltaTheta = degreesToRadians(fromStart.value.initialTrueCourse - line.leg.trueCourse);
-  const crossTrack = Math.asin(Math.sin(delta13) * Math.sin(deltaTheta)) * MEAN_EARTH_RADIUS_NAUTICAL_MILES;
-  const alongTrack = Math.atan2(Math.sin(delta13) * Math.cos(deltaTheta), Math.cos(delta13)) * MEAN_EARTH_RADIUS_NAUTICAL_MILES;
-  if (alongTrack < 0) return { distance: fromStart.value.distance, routeDistance: line.startDistance };
-  if (alongTrack > line.leg.distance) {
-    const toEnd = calculateGreatCircleDistanceAndInitialCourse(line.leg.end.coordinate, target);
-    if (!toEnd.ok) throw new RouteWeatherSamplingError(toEnd.error.message);
-    return { distance: toEnd.value.distance, routeDistance: line.endDistance };
-  }
-  return { distance: Math.abs(crossTrack), routeDistance: line.startDistance + alongTrack };
-};
-
-const sameCoordinate = (left: Coordinate, right: Coordinate): boolean => Math.abs(left.latitude - right.latitude) < 1e-8 && Math.abs((((left.longitude - right.longitude) + 540) % 360) - 180) < 1e-8;
-
 const jsonValue = (value: unknown): JsonValue => {
   assertFiniteJsonInput(value, "snapshot", new WeakSet<object>());
   const serialized = JSON.stringify(value);
-  if (serialized === undefined) throw new RouteWeatherSamplingError("Progressive calculation snapshot is not serializable.");
+  if (serialized === undefined) throw new RouteWeatherSamplingError("Worksheet calculation snapshot is not serializable.");
   return JSON.parse(serialized) as JsonValue;
 };
 const assertFiniteJsonInput = (value: unknown, path: string, seen: WeakSet<object>): void => {
-  if (typeof value === "number" && !Number.isFinite(value)) throw new RouteWeatherSamplingError(`Progressive calculation snapshot contains a non-finite number at ${path}.`);
+  if (typeof value === "number" && !Number.isFinite(value)) throw new RouteWeatherSamplingError(`Worksheet calculation snapshot contains a non-finite number at ${path}.`);
   if (typeof value !== "object" || value === null) return;
-  if (seen.has(value)) throw new RouteWeatherSamplingError(`Progressive calculation snapshot contains a cycle at ${path}.`);
+  if (seen.has(value)) throw new RouteWeatherSamplingError(`Worksheet calculation snapshot contains a cycle at ${path}.`);
   seen.add(value);
   if (Array.isArray(value)) value.forEach((item, index) => assertFiniteJsonInput(item, `${path}[${index}]`, seen));
   else Object.entries(value).forEach(([key, item]) => assertFiniteJsonInput(item, `${path}.${key}`, seen));

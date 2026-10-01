@@ -1,4 +1,4 @@
-import type { PlanRevision } from "../domain/route";
+import type { WorksheetResult } from "../domain/route";
 import { navlogEndpoint, navlogRowLabels } from "./calculated-navlog";
 import { isCurrentWorksheetSnapshot } from "./current-worksheet-snapshot";
 import { wholeNumberDisplay } from "./whole-number";
@@ -22,7 +22,7 @@ const record = (value: unknown): value is RecordValue => typeof value === "objec
 const nested = (value: unknown, key: string): RecordValue | undefined => record(value) && record(value[key]) ? value[key] : undefined;
 
 /** Renders saved evidence as text nodes, never as executable weather or user markup. */
-export function renderCalculationInspector(revision: PlanRevision | undefined, selection: NavlogInspectionSelection | undefined): HTMLElement {
+export function renderCalculationInspector(revision: WorksheetResult | undefined, selection: NavlogInspectionSelection | undefined): HTMLElement {
   const section = document.createElement("section");
   section.className = "calculation-inspector";
   const heading = document.createElement("h3");
@@ -43,12 +43,12 @@ export function renderCalculationInspector(revision: PlanRevision | undefined, s
   return section;
 }
 
-function selectedRow(revision: PlanRevision | undefined, selection: NavlogInspectionSelection | undefined): RecordValue | undefined {
+function selectedRow(revision: WorksheetResult | undefined, selection: NavlogInspectionSelection | undefined): RecordValue | undefined {
   const rows = nested(revision?.calculationSnapshot, "navlog")?.rows;
   return selection !== undefined && Array.isArray(rows) && record(rows[selection.rowIndex]) ? rows[selection.rowIndex] : undefined;
 }
 
-function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): void {
+function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, revision: WorksheetResult | undefined, selection: NavlogInspectionSelection, row: RecordValue): void {
   heading.textContent = selectionHeading(revision, selection, row);
   const value = selectedValue(row, selection.field);
   section.append(paragraph(`Result: ${worksheetResult(value, selection.field, row)} as shown in the navlog.`));
@@ -102,7 +102,7 @@ function appendSupportingHeadingTraces(section: HTMLElement, row: RecordValue, f
   }
 }
 
-function appendWalkthrough(section: HTMLElement, row: RecordValue, field: NavlogInspectionField, revision: PlanRevision | undefined): void {
+function appendWalkthrough(section: HTMLElement, row: RecordValue, field: NavlogInspectionField, revision: WorksheetResult | undefined): void {
   const subleg = nested(row, "subleg");
   const traces = nested(row, "traces");
   const steps: Array<[string, string]> = [];
@@ -126,7 +126,7 @@ function appendWalkthrough(section: HTMLElement, row: RecordValue, field: Navlog
   section.append(list, paragraph("Navlog table angles, speeds, and elapsed times use whole units; altitude is rounded to the nearest 100 ft, and distance and fuel to 0.1. Walkthrough arithmetic uses rounded estimates (intermediate values to 0.1); small differences from the displayed result are expected. Calculations use unrounded inputs, retained in technical details."));
 }
 
-function appendPlacementStep(steps: Array<[string, string]>, revision: PlanRevision | undefined, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
+function appendPlacementStep(steps: Array<[string, string]>, revision: WorksheetResult | undefined, subleg: RecordValue | undefined, field: NavlogInspectionField): void {
   if (field !== "altitude" && field !== "distance") return;
   for (const boundary of matchingPlacementBoundaries(revision, subleg)) {
     const kind = boundaryKind(boundary);
@@ -137,7 +137,7 @@ function appendPlacementStep(steps: Array<[string, string]>, revision: PlanRevis
   }
 }
 
-function matchingPlacementBoundaries(revision: PlanRevision | undefined, subleg: RecordValue | undefined): RecordValue[] {
+function matchingPlacementBoundaries(revision: WorksheetResult | undefined, subleg: RecordValue | undefined): RecordValue[] {
   const boundaries = nested(revision?.calculationSnapshot, "phaseAllocation")?.boundaries;
   if (!Array.isArray(boundaries)) return [];
   return boundaries.filter((value): value is RecordValue => record(value) && typeof value.routeDistanceNauticalMiles === "number" &&
@@ -312,7 +312,7 @@ function worksheetResult(value: unknown, field: NavlogInspectionField, row: Reco
   return unit === "" ? displayed : `${displayed} ${unit}`;
 }
 
-function appendEndpointSources(section: HTMLElement, revision: PlanRevision | undefined): void {
+function appendEndpointSources(section: HTMLElement, revision: WorksheetResult | undefined): void {
   const sources = nested(nested(revision?.calculationSnapshot, "weather"), "endpointSources");
   if (sources === undefined) return;
   const heading = document.createElement("h4");
@@ -345,7 +345,7 @@ function cacheDescription(source: RecordValue): string {
   return `cache ${String(cache.status ?? "unknown")} from ${String(cache.source ?? "unknown")}; fetched ${String(cache.fetchedAt ?? "unknown")}; expires ${String(cache.expiresAt ?? "unknown")}; freshness ${String(cache.freshnessRemainingSeconds ?? "unknown")} seconds`;
 }
 
-function selectionHeading(revision: PlanRevision | undefined, selection: NavlogInspectionSelection, row: RecordValue): string {
+function selectionHeading(revision: WorksheetResult | undefined, selection: NavlogInspectionSelection, row: RecordValue): string {
   const subleg = nested(row, "subleg");
   const snapshot = revision?.calculationSnapshot;
   const rows = nested(snapshot, "navlog")?.rows;
