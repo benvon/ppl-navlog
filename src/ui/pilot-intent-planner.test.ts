@@ -490,6 +490,7 @@ describe("pilot intent planner", () => {
     expect(title.dataset.unsaved).toBe("true");
     expect(title.getAttribute("aria-describedby")).toContain("textbox-unsaved-description");
     expect(root.querySelector("#textbox-unsaved-description")?.textContent).toBe("Unsaved changes.");
+    expect(root.querySelector("#textbox-unsaved-description")?.hasAttribute("hidden")).toBe(true);
     expect(title.getAttribute("aria-invalid")).not.toBe("true");
     title.dispatchEvent(new Event("blur", { bubbles: true }));
     await settle();
@@ -577,6 +578,85 @@ describe("pilot intent planner", () => {
     await settle();
     expect(local.hasAttribute("data-unsaved")).toBe(false);
     expect(input(root, "departure-time").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("acknowledges a saved draft when the following Open read fails", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "plan-title", "First");
+    button(root, "Save changes").click();
+    await settle();
+    button(root, "New plan").click();
+    await settle();
+    edit(root, "plan-title", "Second");
+    button(root, "Save changes").click();
+    await settle();
+
+    edit(root, "plan-title", "Saved before failed open");
+    repository.failOpen = true;
+    choosePlan(root, "First");
+    await settle();
+
+    expect(repository.plans.some((plan) => plan.rawFields["plan-title"] === "Saved before failed open")).toBe(true);
+    expect(input(root, "plan-title").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("starts restored TAS and reason textboxes clean when the editor is revealed again", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    button(root, "Override TAS for leg 1").click();
+    await settle();
+    edit(root, "override-tas-0", "100");
+    edit(root, "override-reason-0", "Training");
+    button(root, "Save changes").click();
+    await settle();
+
+    button(root, "Restore aircraft default for leg 1").click();
+    await settle();
+    repository.failSave = true;
+    button(root, "Override TAS for leg 1").click();
+    await settle();
+
+    expect(input(root, "override-tas-0").value).toBe("");
+    expect(input(root, "override-tas-0").hasAttribute("data-unsaved")).toBe(false);
+    expect(input(root, "override-reason-0").value).toBe("");
+    expect(input(root, "override-reason-0").hasAttribute("data-unsaved")).toBe(false);
+  });
+
+  it("retains the UTC unsaved description after a failed structural rerender", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    edit(root, "departure-time", "2026-09-21T22:30");
+    repository.failSave = true;
+    button(root, "Add checkpoint").click();
+    await settle();
+
+    expect(input(root, "departure-time").dataset.unsaved).toBe("true");
+    expect(input(root, "departure-time").getAttribute("aria-describedby")).toContain("departure-time-error");
+    expect(input(root, "departure-time").getAttribute("aria-describedby")).toContain("departure-utc-format");
+    expect(input(root, "departure-time").getAttribute("aria-describedby")).toContain("textbox-unsaved-description");
+    expect(root.querySelector("#textbox-unsaved-description")?.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("preserves literal TAS text and a clean outline across another override rerender", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    button(root, "Add checkpoint").click();
+    await settle();
+    button(root, "Override TAS for leg 1").click();
+    await settle();
+    edit(root, "override-tas-0", " 100 ");
+    edit(root, "override-reason-0", "Training");
+    button(root, "Save changes").click();
+    await settle();
+    expect(input(root, "override-tas-0").hasAttribute("data-unsaved")).toBe(false);
+
+    repository.failSave = true;
+    button(root, "Override TAS for leg 2").click();
+    await settle();
+
+    expect(input(root, "override-tas-0").value).toBe(" 100 ");
+    expect(input(root, "override-tas-0").hasAttribute("data-unsaved")).toBe(false);
   });
 
   it("persists literal invalid field text only on explicit save and reports failed writes", async () => {

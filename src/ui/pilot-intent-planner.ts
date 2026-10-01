@@ -128,6 +128,7 @@ class PilotIntentPlanner {
     const draftId = view.activeDraft?.id;
     const destinationCompleted = this.lastPlanPhase === "switching" && view.phase === "editing";
     const draftChanged = this.renderedDraftId !== undefined && draftId !== this.renderedDraftId;
+    if (this.lastPlanPhase === "saving" && view.phase === "switching") this.acknowledgeTextboxValues();
     if (draftChanged || (destinationCompleted && !view.error)) {
       this.showActiveDraft(view);
       return;
@@ -272,6 +273,7 @@ class PilotIntentPlanner {
     const unsavedAccessibleDescription = document.createElement("span");
     unsavedAccessibleDescription.id = "textbox-unsaved-description";
     unsavedAccessibleDescription.className = "visually-hidden";
+    unsavedAccessibleDescription.hidden = true;
     unsavedAccessibleDescription.textContent = "Unsaved changes.";
     shell.append(heading, this.status, unsavedDescription, unsavedAccessibleDescription);
     const plans = document.createElement("section"); plans.className = "plan-picker"; plans.append(this.el("h3", "Saved pilot inputs"));
@@ -344,7 +346,10 @@ class PilotIntentPlanner {
     const utcInput = group.querySelector<HTMLInputElement>('[name="departure-time"]')!;
     const hint = document.createElement("p"); hint.dataset.utcFormat = "true"; hint.id = "departure-utc-format";
     hint.textContent = "UTC format: YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-26T18:30.";
-    utcInput.setAttribute("aria-describedby", `departure-time-error ${hint.id}`);
+    const describedBy = new Set((utcInput.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean));
+    describedBy.add("departure-time-error");
+    describedBy.add(hint.id);
+    utcInput.setAttribute("aria-describedby", [...describedBy].join(" "));
     const localLabel = document.createElement("label"); localLabel.textContent = "Choose local departure date and time ";
     const picker = document.createElement("input"); picker.type = "datetime-local"; picker.name = "departure-local";
     picker.value = utcTextToLocalDateTime(this.fields["departure-time"] ?? "") ?? "";
@@ -550,16 +555,19 @@ class PilotIntentPlanner {
     });
   }
   private appendTasControls(group: HTMLFieldSetElement, legIndex: number): void {
-    const override = this.fields[`override-tas-${legIndex}`]?.trim() ?? "";
+    const override = this.fields[`override-tas-${legIndex}`] ?? "";
+    const hasOverride = override.trim() !== "";
     const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
     const summary = document.createElement("p");
-    summary.textContent = override ? `Overridden TAS: ${override} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
+    summary.textContent = hasOverride ? `Overridden TAS: ${override.trim()} kt; aircraft default: ${selected?.cruiseTasKnots ?? "—"} kt.` : `Aircraft default TAS: ${selected?.cruiseTasKnots ?? "—"} kt.`;
     group.append(summary);
-    if (override || this.openOverrideEditors.has(legIndex)) {
+    if (hasOverride || this.openOverrideEditors.has(legIndex)) {
       group.append(this.input(`override-tas-${legIndex}`, `Leg ${legIndex + 1} TAS override (kt, optional)`, override), this.input(`override-reason-${legIndex}`, `Leg ${legIndex + 1} override reason`, this.current?.overrideReasons[`tas-${legIndex}`] ?? ""));
       const restore = document.createElement("button"); restore.type = "button"; restore.textContent = `Restore aircraft default for leg ${legIndex + 1}`;
       restore.addEventListener("click", () => {
         const fields = this.fields; delete fields[`override-tas-${legIndex}`]; delete fields[`override-reason-${legIndex}`];
+        this.textboxBaseline.delete(`override-tas-${legIndex}`);
+        this.textboxBaseline.delete(`override-reason-${legIndex}`);
         if (this.current) { const reasons = { ...this.current.overrideReasons }; delete reasons[`tas-${legIndex}`]; this.editDraft({ ...this.current, rawFields: fields, overrideReasons: reasons }); }
         this.openOverrideEditors.delete(legIndex); this.invalidate(); this.render(); void this.persist();
       });
