@@ -10,7 +10,7 @@ See the [magnetic-model record](docs/magnetic-model.md) for the WMM2025 source, 
 
 The active worksheet follows Chapter 16 course, wind, heading, groundspeed, time, and fuel arithmetic. TOC uses departure METAR wind as a disclosed climb approximation; TOD uses cruise-altitude wind above destination and descent to field elevation. Both positions are estimated once. Profile rates remain the entered assumptions. The [complete navlog engine](docs/full-navlog-engine.md), [phase-allocation model](docs/phase-allocation.md), and [weather model](docs/weather-model.md) include historical implementation details; the teaching contract takes precedence. The earlier [vertical-profile slice](docs/vertical-profile-slice.md) is a separate precursor.
 
-The [pilot input and calculation workflow](docs/revisions-and-weather-refresh.md) documents v2 input-only persistence, explicit update submissions, ephemeral calculation results, and guarded overrides. Plan and profile import/export are out of scope before 1.0.
+The [pilot input and calculation workflow](docs/revisions-and-weather-refresh.md) documents v2 input-only persistence, one saved input set per plan, ephemeral calculation results, and guarded overrides. Plan and profile import/export are out of scope before 1.0.
 
 The browser stores pilot inputs and aircraft profiles locally. Airport and weather responses and calculated navlog output are session-only; reload or reopening a plan requires a new successful **Update plan**. Issue #7's v2 store does not load or migrate v1 browser data.
 

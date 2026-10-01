@@ -13,14 +13,12 @@ import { renderPilotIntentPlanner } from "./pilot-intent-planner";
 
 class MemoryInputs implements PilotInputRepository {
   readonly plans: PilotInputPlan[] = [];
-  readonly submissions: PilotInputPlan[] = [];
   readonly profiles: AircraftProfile[] = [];
   failSave = false;
   saveAttempts = 0;
   saveGate?: Promise<void>;
   failProfileSave = false;
   profileSaveGate?: Promise<void>;
-  failSubmit = false;
   unsupportedProfileNotice = false;
   failInitialize = false;
   failOpen = false;
@@ -34,11 +32,6 @@ class MemoryInputs implements PilotInputRepository {
     this.saveAttempts += 1;
     if (this.saveGate) await this.saveGate;
     if (this.failSave) throw new Error("write failed");
-    this.replace(this.plans, plan);
-  }
-  async submitInputs(plan: PilotInputPlan): Promise<void> {
-    if (this.failSubmit) throw new Error("submission write failed");
-    this.submissions.push(plan);
     this.replace(this.plans, plan);
   }
   async saveProfile(profile: AircraftProfile): Promise<void> {
@@ -206,7 +199,7 @@ describe("pilot intent planner", () => {
     repository.plans.push({ id: "short-profile", title: "Short profile", rawFields: {
       "plan-title": "Short profile", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
       "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "departure-metar-icao": "KORD",
-    }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["16000"], overrideReasons: {}, updatedAt: "2026-09-21T20:00:00.000Z", submissions: [] });
+    }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["16000"], overrideReasons: {}, updatedAt: "2026-09-21T20:00:00.000Z" });
     const client = winds();
     const fetchMetar = vi.spyOn(client, "fetchMetar");
     const fetchPoint = vi.spyOn(client, "fetchPoint");
@@ -228,7 +221,7 @@ describe("pilot intent planner", () => {
         "plan-title": "Past weather route", "departure-time": "2026-09-21T20:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
-      updatedAt: "2026-09-21T20:00:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T20:00:00.000Z",
     });
     const returnedReports: MetarSuccessPayload[] = [];
     const client = winds({ fetchMetar: async (icao) => {
@@ -279,7 +272,7 @@ describe("pilot intent planner", () => {
   it("opens a saved plan at route information and keeps other user-opened stages open on rerender", async () => {
     const repository = new MemoryInputs();
     repository.profiles.push(profile);
-    repository.plans.push({ id: "saved", title: "Saved", rawFields: { "plan-title": "Saved" }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    repository.plans.push({ id: "saved", title: "Saved", rawFields: { "plan-title": "Saved" }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z" });
     const root = await mount(repository);
     expect(root.querySelector<HTMLDetailsElement>('[data-stage="route"]')?.open).toBe(true);
     expect(root.querySelector('[data-stage="aircraft"] summary')?.textContent).toContain(profile.name);
@@ -303,17 +296,25 @@ describe("pilot intent planner", () => {
     expect(input(root, "fuel-aboard").value).toBe("19");
   });
 
-  it("opens Calculate after a failed update without dropping route input", async () => {
-    const repository = new MemoryInputs(); repository.profiles.push(profile); repository.failSubmit = true;
-    const root = await mount(repository);
-    document.body.append(root);
+  it("saves the latest inputs and selected profile snapshot before requesting weather", async () => {
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    let planAtWeatherRequest: PilotInputPlan | undefined;
+    const client = winds({ fetchMetar: async (icao) => {
+      planAtWeatherRequest = structuredClone(repository.plans.at(-1));
+      return winds().fetchMetar(icao);
+    } });
+    const root = await mount(repository, client);
     await makeLocallyValid(root);
+    edit(root, "plan-title", "Latest route inputs", true);
+    await settle();
+
     button(root, "Update navlog").click();
     await settle();
-    expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true);
-    expect(input(root, "fuel-aboard").value).toBe("20");
-    expect(document.activeElement).toBe(root.querySelector('[data-stage="calculate"] summary'));
-    root.remove();
+
+    expect(planAtWeatherRequest?.rawFields["plan-title"]).toBe("Latest route inputs");
+    expect(planAtWeatherRequest?.selectedProfileId).toBe(profile.id);
+    expect(planAtWeatherRequest?.profileSnapshot).toEqual(profile);
+    expect(root.querySelector("[data-current-result]")).not.toBeNull();
   });
 
   it("uses native disclosure summaries and groups all starting fuel inputs", async () => {
@@ -378,7 +379,7 @@ describe("pilot intent planner", () => {
         "plan-title": "Future route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
     let tick: (() => void) | undefined;
     const setInterval = vi.spyOn(window, "setInterval").mockImplementation((handler) => {
@@ -413,7 +414,7 @@ describe("pilot intent planner", () => {
         "plan-title": "Past route", "departure-time": "2026-09-21T22:00", "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3",
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const client = winds();
     const fetchMetar = vi.spyOn(client, "fetchMetar");
@@ -439,7 +440,6 @@ describe("pilot intent planner", () => {
 
       expect(input(root, "departure-time").value).toBe("2026-09-21T23:04");
       expect(repository.plans.find((plan) => plan.id === "past-plan")?.rawFields["departure-time"]).toBe("2026-09-21T23:04");
-      expect(repository.submissions).toHaveLength(1);
       expect(fetchMetar).toHaveBeenCalledTimes(requestCounts.metar);
       expect(fetchPoint).toHaveBeenCalledTimes(requestCounts.points);
       expect(root.querySelector("[data-current-result]")).toBeNull();
@@ -497,7 +497,6 @@ describe("pilot intent planner", () => {
     await settle();
     expect(button(root, "Update navlog").disabled).toBe(true);
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("");
-    expect(repository.submissions).toHaveLength(0);
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toContain("Enter a finite, nonnegative");
 
     edit(root, "fuel-aboard", "24");
@@ -511,7 +510,6 @@ describe("pilot intent planner", () => {
     edit(root, "fuel-aboard", "not-a-number", true);
     await settle();
     expect(repository.plans.at(-1)?.rawFields["fuel-aboard"]).toBe("not-a-number");
-    expect(repository.submissions).toHaveLength(0);
     edit(root, "fuel-aboard", "-0.1");
     expect(button(root, "Update navlog").disabled).toBe(true);
     edit(root, "fuel-aboard", "0");
@@ -520,7 +518,7 @@ describe("pilot intent planner", () => {
 
   it("restores a legacy plan without fuel aboard as blank and preserves its other literal inputs", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    repository.plans.push({ id: "legacy-fuel", title: "Legacy", rawFields: { "plan-title": "Legacy", "departure-icao": "1C8", "taxi-fuel": "1.25" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    repository.plans.push({ id: "legacy-fuel", title: "Legacy", rawFields: { "plan-title": "Legacy", "departure-icao": "1C8", "taxi-fuel": "1.25" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z" });
     const root = await mount(repository);
     expect(input(root, "fuel-aboard").value).toBe("");
     expect(input(root, "departure-icao").value).toBe("1C8");
@@ -537,7 +535,6 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("#fuel-aboard-error")?.textContent).toBe("");
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector(".calculated-navlog")?.textContent).toContain("capacity comparison unavailable");
   });
 
@@ -547,7 +544,7 @@ describe("pilot intent planner", () => {
       id: "legacy-weather", title: "Legacy route", rawFields: {
         "plan-title": "Legacy route", "destination-taf-icao": "KJVL", "destination-metar-icao": "KMSN",
       }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     expect(root.querySelector("[name='destination-taf-icao']")).toBeNull();
@@ -563,7 +560,7 @@ describe("pilot intent planner", () => {
       id: "legacy-weather", title: "Legacy route", rawFields: {
         "plan-title": "Legacy route", "surface-weather-icao": "KORD", "departure-icao": "1C8",
       }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
 
     const root = await mount(repository);
@@ -610,7 +607,6 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
 
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[role='status']")?.textContent).toContain("exact four-character departure METAR ICAO alternate");
     expect(root.querySelector(".calculated-navlog")).toBeNull();
   });
@@ -632,7 +628,6 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
 
-    expect(repository.submissions).toHaveLength(1);
     expect(fetchMetar).toHaveBeenCalledTimes(1);
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
     expect(fetchTaf).not.toHaveBeenCalled();
@@ -699,11 +694,10 @@ describe("pilot intent planner", () => {
     await settle();
 
     expect(requestNumber).toBe(2);
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector(".navlog-warnings")?.textContent ?? "").not.toContain("150%");
   });
 
-  it("allows input submission without a pilot-selected forecast period and preserves unrelated raw fields", async () => {
+  it("saves current inputs without a pilot-selected forecast period before weather calculation", async () => {
     const repository = new MemoryInputs();
     repository.profiles.push(profile);
     const root = await mount(repository);
@@ -719,8 +713,7 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
 
-    expect(repository.submissions).toHaveLength(1);
-    expect(repository.submissions[0]?.rawFields).toMatchObject({
+    expect(repository.plans.at(-1)?.rawFields).toMatchObject({
       "plan-title": "Synthetic route",
       "fuel-aboard": "020.00",
       "departure-metar-icao": "KORD",
@@ -734,11 +727,11 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs();
     const first: PilotInputPlan = {
       id: "first-plan", title: "First plan", rawFields: { "plan-title": "First plan", "departure-time": "2026-09-21T22:00" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     const second: PilotInputPlan = {
       id: "second-plan", title: "Second plan", rawFields: { "plan-title": "Second plan" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     repository.plans.push(first, second);
     const root = await mount(repository);
@@ -763,7 +756,7 @@ describe("pilot intent planner", () => {
     });
   });
 
-  it("saves incomplete literal and structured inputs without submitting or requesting weather", async () => {
+  it("saves incomplete literal and structured inputs without requesting weather", async () => {
     const repository = new MemoryInputs();
     const fetchMetar = vi.fn(winds().fetchMetar);
     const fetchPoint = vi.fn(winds().fetchPoint);
@@ -782,7 +775,6 @@ describe("pilot intent planner", () => {
     expect(saved.checkpoints).toEqual([{ name: "Farm strip", coordinateText: "N4145 W08730" }]);
     expect(saved.cruiseAltitudeTexts).toEqual(["4500"]);
     expect(saved.rawFields["cruise-altitude"]).toBe("not decided");
-    expect(repository.submissions).toHaveLength(0);
     expect(fetchMetar).not.toHaveBeenCalled();
     expect(fetchPoint).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).toBeNull();
@@ -836,7 +828,7 @@ describe("pilot intent planner", () => {
     repository.plans.push({
       id: "shared-legacy-altitude", title: "Shared legacy altitude", rawFields: { "plan-title": "Shared legacy altitude" },
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "4500"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     repository.plans.push({
       id: "differing-legacy-altitudes", title: "Differing legacy altitudes", rawFields: {
@@ -844,7 +836,7 @@ describe("pilot intent planner", () => {
         "taxi-fuel": "0.8", "reserve-fuel": "3", "departure-icao": "KORD", "destination-icao": "KJVL", "descent-target": "1800",
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "6200"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     expect(input(root, "cruise-altitude").value).toBe("4500");
@@ -867,7 +859,7 @@ describe("pilot intent planner", () => {
         "fuel-aboard": "20", "taxi-fuel": "0.8", "reserve-fuel": "3", "descent-target": "1800",
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "6200"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
 
@@ -891,7 +883,7 @@ describe("pilot intent planner", () => {
         "plan-title": "Waypoint altitudes", "departure-icao": "KORD", "destination-icao": "KJVL",
         "override-tas-0": "102", "override-reason-0": "Training comparison",
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4100"],
-      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     button(root, "Add checkpoint").click();
@@ -917,7 +909,7 @@ describe("pilot intent planner", () => {
         "reserve-fuel": "3", "departure-icao": "KORD", "destination-icao": "KJVL", "cruise-altitude": "4500",
         "override-tas-0": "100", "override-reason-0": "Training comparison",
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4100", "6200", "7300"],
-      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: { "tas-0": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
 
@@ -958,20 +950,19 @@ describe("pilot intent planner", () => {
 
   it("opens saved pilot inputs with editing and save guidance, separately from navlog calculation", async () => {
     const repository = new MemoryInputs();
-    repository.plans.push({ id: "saved", title: "Saved route", rawFields: { "plan-title": "Saved route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] });
+    repository.plans.push({ id: "saved", title: "Saved route", rawFields: { "plan-title": "Saved route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z" });
     const root = await mount(repository);
     expect(root.querySelector("[role='status']")?.textContent).toContain("ready to edit");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Save changes");
     expect(button(root, "Update navlog")).toBeTruthy();
-    expect(repository.submissions).toHaveLength(0);
     expect(root.querySelector("[data-current-result]")).toBeNull();
   });
 
   it("keeps the active draft visible when opening another saved plan fails", async () => {
     const repository = new MemoryInputs();
     repository.plans.push(
-      { id: "active", title: "Active route", rawFields: { "plan-title": "Active route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] },
-      { id: "other", title: "Other route", rawFields: { "plan-title": "Other route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [] },
+      { id: "active", title: "Active route", rawFields: { "plan-title": "Active route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z" },
+      { id: "other", title: "Other route", rawFields: { "plan-title": "Other route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z" },
     );
     const root = await mount(repository);
     repository.failOpen = true;
@@ -985,7 +976,7 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs();
     const other: PilotInputPlan = {
       id: "other-saved-plan", title: "Other saved plan", rawFields: { "plan-title": "Other saved plan" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     repository.plans.push(other);
     const root = await mount(repository);
@@ -1039,7 +1030,7 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(false);
   });
 
-  it("autosaves malformed airport codes but blocks submission before airport lookup", async () => {
+  it("autosaves malformed airport codes but blocks update before airport lookup", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const lookup = createLocalStudyAirportLookup();
     const lookupSpy = vi.spyOn(lookup, "lookupAirportCode");
@@ -1055,7 +1046,6 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").disabled = false;
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(0);
     expect(lookupSpy).not.toHaveBeenCalled();
   });
 
@@ -1073,7 +1063,6 @@ describe("pilot intent planner", () => {
 
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(lookupSpy).toHaveBeenCalledWith("KORD");
     expect(lookupSpy).toHaveBeenCalledWith("KJVL");
   });
@@ -1087,7 +1076,7 @@ describe("pilot intent planner", () => {
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "", "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: Array.from({ length: 24 }, (_, index) => ({ name: `Point ${index + 1}`, coordinateText: "N4145 W08730" })),
-      cruiseAltitudeTexts: Array(25).fill("4500"), overrideReasons: {}, updatedAt: now, submissions: [],
+      cruiseAltitudeTexts: Array(25).fill("4500"), overrideReasons: {}, updatedAt: now,
     };
     repository.plans.push(initial);
     const root = await mount(repository);
@@ -1107,10 +1096,9 @@ describe("pilot intent planner", () => {
     button(reopened, "Update navlog").disabled = false;
     button(reopened, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(0);
   });
 
-  it("rejects titles over 120 trimmed characters before submission and accepts 120", async () => {
+  it("rejects titles over 120 trimmed characters before update and accepts 120", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const weather = winds();
     const fetchForecast = vi.spyOn(weather, "fetchForecast");
@@ -1125,7 +1113,6 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(true);
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(0);
     expect(fetchForecast).not.toHaveBeenCalled();
     expect(fetchMetar).not.toHaveBeenCalled();
 
@@ -1134,11 +1121,10 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(false);
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(fetchForecast).not.toHaveBeenCalled();
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
-    expect(repository.submissions[0]?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
+    expect(repository.plans.at(-1)?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
   });
 
   it("persists an intentionally cleared aircraft profile selection", async () => {
@@ -1166,7 +1152,7 @@ describe("pilot intent planner", () => {
     };
     repository.plans.push({
       id: "profile-draft-plan", title: "Profile draft route", rawFields, selectedProfileId: profile.id, profileSnapshot: profile,
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     expect(root.querySelector<HTMLSelectElement>("[name='selectedProfileId']")?.value).toBe(profile.id);
@@ -1204,7 +1190,7 @@ describe("pilot intent planner", () => {
     };
     repository.plans.push({
       id: "profile-choice-plan", title: "Profile choice route", rawFields, selectedProfileId: profile.id, profileSnapshot: profile,
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     expect(input(root, "cruiseTasKnots").value).toBe("102");
@@ -1250,11 +1236,11 @@ describe("pilot intent planner", () => {
     const repository = new MemoryInputs();
     const first: PilotInputPlan = {
       id: "first-plan", title: "First plan", rawFields: { "plan-title": "First plan" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     const second: PilotInputPlan = {
       id: "second-plan", title: "Second plan", rawFields: { "plan-title": "Second plan" },
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     repository.plans.push(first, second);
     let releaseSave!: () => void;
@@ -1306,7 +1292,6 @@ describe("pilot intent planner", () => {
     expect(root.textContent).toContain("Leg 1 TAS override must be a positive number of knots.");
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(0);
   });
 
   it("reveals TAS editing only on request, retains a reason, and restores the aircraft default", async () => {
@@ -1318,11 +1303,11 @@ describe("pilot intent planner", () => {
     };
     repository.plans.push({
       id: "first-override-plan", title: "First plan", rawFields: fields, selectedProfileId: profile.id, profileSnapshot: profile,
-      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     }, {
       id: "second-override-plan", title: "Second plan", rawFields: { ...fields, "plan-title": "Second plan", "override-tas-0": "102", "override-reason-0": "Training comparison" },
       selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: { "tas-0": "Training comparison" },
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     expect(root.querySelector("[name='override-tas-0']")).toBeNull();
@@ -1344,7 +1329,7 @@ describe("pilot intent planner", () => {
     expect(repository.plans.at(-1)?.rawFields["override-tas-0"]).toBeUndefined();
   });
 
-  it("clears current evidence on edit or failure, retains submitted inputs, and recovers on success", async () => {
+  it("clears current evidence on edit or failure, retains saved inputs, and recovers on success", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     let failPoint = false;
     const client = winds({ fetchPoint: async (query) => {
@@ -1356,7 +1341,6 @@ describe("pilot intent planner", () => {
     button(root, "Update navlog").click();
     await settle();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
-    expect(repository.submissions).toHaveLength(1);
 
     edit(root, "plan-title", "Changed inputs");
     expect(root.querySelector("[data-current-result]")).toBeNull();
@@ -1366,8 +1350,7 @@ describe("pilot intent planner", () => {
     failPoint = true;
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(2);
-    expect(repository.submissions[1]?.rawFields["plan-title"]).toBe("Changed inputs");
+    expect(repository.plans.at(-1)?.rawFields["plan-title"]).toBe("Changed inputs");
     expect(root.querySelector("[data-current-result]")).toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("point service unavailable");
 
@@ -1377,7 +1360,6 @@ describe("pilot intent planner", () => {
     failPoint = false;
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(3);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
   });
@@ -1392,7 +1374,6 @@ describe("pilot intent planner", () => {
 
     button(root, "Save changes").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved");
     expect(root.querySelector("[role='status']")?.textContent).not.toContain("point service unavailable");
   });
@@ -1407,15 +1388,14 @@ describe("pilot intent planner", () => {
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
         "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository, client);
     expect(root.querySelector("[name='selected-forecast-period']")).toBeNull();
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
-    expect(repository.submissions[0]?.rawFields["selected-forecast-period"]).toBe(COMPLETE_FLIGHT_FORECAST_VALID_AT);
+    expect(repository.plans.at(-1)?.rawFields["selected-forecast-period"]).toBe(COMPLETE_FLIGHT_FORECAST_VALID_AT);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(discover).not.toHaveBeenCalled();
   });
@@ -1429,7 +1409,6 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root, true);
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(fetchForecast).not.toHaveBeenCalled();
@@ -1446,7 +1425,7 @@ describe("pilot intent planner", () => {
     repository.plans.push({
       id: "checkpoint-plan", title: "Checkpoint route", rawFields: fields, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "4500"],
-      overrideReasons: { "tas-1": "Leg 2 test" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: { "tas-1": "Leg 2 test" }, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     button(root, "Remove checkpoint 1").click();
@@ -1464,7 +1443,7 @@ describe("pilot intent planner", () => {
         "plan-title": "Second leg", "override-tas-1": "102", "override-reason-1": "Training comparison",
       }, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [{ name: "Farm strip", coordinateText: "414500N0873000W" }], cruiseAltitudeTexts: ["4500", "4500"],
-      overrideReasons: { "tas-1": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: { "tas-1": "Training comparison" }, updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     edit(root, "plan-title", "Second leg revised", true);
@@ -1482,7 +1461,7 @@ describe("pilot intent planner", () => {
     repository.plans.push({
       id: "override-route", title: "Override route", rawFields: fields, selectedProfileId: profile.id, profileSnapshot: profile,
       checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: { "tas-0": "Study comparison" },
-      updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      updatedAt: "2026-09-21T21:30:00.000Z",
     });
     const root = await mount(repository);
     button(root, "Add checkpoint").click();
@@ -1502,7 +1481,6 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root, true);
     button(root, "Update navlog").click();
     await settle();
-    expect(repository.submissions).toHaveLength(1);
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
 
@@ -1530,7 +1508,6 @@ describe("pilot intent planner", () => {
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     button(root, "New plan").click();
-    expect(root.querySelector("[role='status']")?.textContent).toContain("Saving");
     await settle();
     expect(input(root, "plan-title").value).toBe("New study route");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Enter pilot inputs");
@@ -1548,11 +1525,11 @@ describe("pilot intent planner", () => {
         "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL", "surface-weather-icao": "KORD",
         "selected-forecast-period": COMPLETE_FLIGHT_FORECAST_VALID_AT,
       }, selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     const otherPlan: PilotInputPlan = {
       id: "other-plan", title: "Other plan", rawFields: { "plan-title": "Other plan" }, checkpoints: [], cruiseAltitudeTexts: ["4500"],
-      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z", submissions: [],
+      overrideReasons: {}, updatedAt: "2026-09-21T21:30:00.000Z",
     };
     repository.plans.push(firstPlan, otherPlan);
     const root = await mount(repository);
@@ -1625,9 +1602,12 @@ describe("pilot intent planner", () => {
     root.remove();
   });
 
-  it("waits for a pending autosave before Update navlog and aborts submission after save failure", async () => {
+  it("waits for a pending autosave before Update navlog and aborts after save failure", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
-    const root = await mount(repository);
+    const client = winds();
+    const fetchMetar = vi.spyOn(client, "fetchMetar");
+    const fetchPoint = vi.spyOn(client, "fetchPoint");
+    const root = await mount(repository, client);
     await makeLocallyValid(root);
     repository.failSave = true;
     let release!: () => void;
@@ -1639,9 +1619,10 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(true);
     release();
     await settle();
-    expect(repository.submissions).toHaveLength(0);
     expect(root.querySelector("[role='status']")?.textContent).toContain("write failed");
     expect(input(root, "plan-title").value).toBe("Pending update draft");
+    expect(fetchMetar).not.toHaveBeenCalled();
+    expect(fetchPoint).not.toHaveBeenCalled();
     expect(button(root, "New plan").disabled).toBe(true);
     expect(planSelector(root).disabled).toBe(true);
   });

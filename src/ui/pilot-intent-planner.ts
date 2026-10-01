@@ -562,7 +562,7 @@ class PilotIntentPlanner {
     }
   }
   private el(tag: "h3", value: string): HTMLElement { const e = document.createElement(tag); e.textContent = value; return e; }
-  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: "New study route", rawFields: { ...initialFields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
+  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: "New study route", rawFields: { ...initialFields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now }; }
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...plan.rawFields }, title: plan.rawFields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
   private editDraft(plan: PilotInputPlan): void { this.planState.edit(plan); }
   private setField(name: string, value: string): void {
@@ -638,15 +638,14 @@ class PilotIntentPlanner {
     try {
       if (!this.current) throw new Error("Open a plan before updating it.");
       if (this.planState.view.phase === "save-failed") throw new Error(this.planState.view.error ?? "Save the current pilot inputs before updating the navlog.");
+      const current = this.current;
+      const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
+      this.editDraft({ ...current, profileSnapshot: selectedProfile });
       const saveResult = await this.planState.save();
       if (!saveResult.ok) throw new Error(saveResult.error ?? "Pilot inputs could not be saved; update stopped.");
       const invalid = this.localError();
       if (invalid) throw new Error(invalid);
       this.setStatus("Updating navlog…");
-      const current = this.current;
-      const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
-      this.editDraft({ ...current, profileSnapshot: selectedProfile });
-      await this.dependencies.repository.submitInputs(this.current!);
       const { draft, profile } = await this.prepareDraft();
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;

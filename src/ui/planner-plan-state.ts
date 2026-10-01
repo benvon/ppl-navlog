@@ -136,8 +136,7 @@ export class PlannerPlanState {
     try {
       await this.repository.saveWorkingCopy(snapshot);
       this.dirty = false;
-      const prior = this.savedPlans.find((plan) => plan.id === snapshot.id);
-      const savedSnapshot = structuredClone({ ...snapshot, submissions: prior?.submissions ?? snapshot.submissions });
+      const savedSnapshot = structuredClone(snapshot);
       const index = this.savedPlans.findIndex((plan) => plan.id === snapshot.id);
       this.savedPlans = index < 0
         ? [...this.savedPlans, savedSnapshot]
@@ -182,7 +181,7 @@ export class PlannerPlanState {
 
   private blankPlan(): PilotInputPlan {
     const now = this.options.clock.now().toISOString();
-    return { id: this.options.ids.next(), title: "New study route", rawFields: { "plan-title": "New study route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] };
+    return { id: this.options.ids.next(), title: "New study route", rawFields: { "plan-title": "New study route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now };
   }
 
   private publish(): void { const view = this.view; this.listeners.forEach((listener) => listener(view)); }

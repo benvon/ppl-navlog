@@ -5,15 +5,12 @@ import type {
   CheckpointRoutePoint,
   PlanDraft,
   PlanFuelInputs,
-  PlanFamily,
-  PlanRevision,
   PlanWeatherSelection,
   RouteDefinition,
   RoutePoint,
   UserRouteLeg,
 } from "../domain/route";
 import { selectForecastValidTime, type AvailableForecastValidPeriod } from "../domain/weather-valid-time";
-import type { IndexedDbNavlogRepository } from "../services/storage/indexed-db-repository";
 
 export interface UseCaseClock {
   now(): Date;
@@ -23,14 +20,10 @@ export interface UseCaseIds {
   next(): string;
 }
 
-export interface NavlogPersistence {
+export interface AircraftProfilePersistence {
   saveAircraftProfile(profile: AircraftProfile): Promise<void>;
   getAircraftProfile(id: string): Promise<AircraftProfile | undefined>;
   listAircraftProfiles(): Promise<readonly AircraftProfile[]>;
-  savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void>;
-  getPlanRevision(id: string): Promise<PlanRevision | undefined>;
-  listPlanRevisions(planId: string): Promise<readonly PlanRevision[]>;
-  listPlanFamilies(): Promise<readonly PlanFamily[]>;
 }
 
 export interface RouteDraftInput {
@@ -59,11 +52,6 @@ export interface PlanDraftInput {
   readonly weatherSelection?: PlanWeatherSelection;
 }
 
-export interface SavedPlan {
-  readonly family: PlanFamily;
-  readonly revision: PlanRevision;
-}
-
 export class DraftUseCaseError extends Error {
   public constructor(message: string) {
     super(message);
@@ -81,7 +69,7 @@ export function createAircraftProfile(input: AircraftProfileInput, ids: UseCaseI
 }
 
 export async function saveAircraftProfile(
-  persistence: NavlogPersistence,
+  persistence: AircraftProfilePersistence,
   input: AircraftProfileInput,
   ids: UseCaseIds,
   clock: UseCaseClock,
@@ -226,50 +214,6 @@ export function restoreCruiseTasDefault(draft: PlanDraft, legId: string, clock: 
   return { ...draft, route: { ...draft.route, legs: updatedLegs }, updatedAt: clock.now().toISOString() };
 }
 
-export async function saveDraftRevision(
-  persistence: NavlogPersistence,
-  draft: PlanDraft,
-  profile: AircraftProfile,
-  ids: UseCaseIds,
-  clock: UseCaseClock,
-  parentRevision?: PlanRevision,
-  restoredFromRevisionId?: string,
-): Promise<SavedPlan> {
-  if (profile.id !== draft.selectedAircraftProfileId) throw new DraftUseCaseError("The selected aircraft profile does not match this draft.");
-  if (parentRevision !== undefined && parentRevision.planId !== draft.planId) throw new DraftUseCaseError("A revised draft must keep its original plan family.");
-  const timestamp = clock.now().toISOString();
-  const revision: PlanRevision = {
-    schemaVersion: 1,
-    id: ids.next(),
-    planId: draft.planId,
-    revisionNumber: (parentRevision?.revisionNumber ?? 0) + 1,
-    ...(parentRevision === undefined ? {} : { parentRevisionId: parentRevision.id }),
-    ...(restoredFromRevisionId === undefined ? {} : { restoredFromRevisionId }),
-    reason: parentRevision === undefined ? "initial-save" : "input-change",
-    createdAt: timestamp,
-    draftSnapshot: { ...draft, updatedAt: timestamp },
-    aircraftProfileSnapshot: { profile: structuredClone(profile), snapshottedAt: timestamp },
-    weatherSnapshotIds: [],
-    warnings: ["This is an input-only draft revision; calculate the navlog separately before using its planning results."],
-  };
-  const family: PlanFamily = {
-    schemaVersion: 1,
-    id: draft.planId,
-    title: draft.title,
-    createdAt: parentRevision?.createdAt ?? timestamp,
-    latestRevisionId: revision.id,
-    latestRevisionNumber: revision.revisionNumber,
-  };
-  await persistence.savePlanRevision(family, revision);
-  return { family, revision };
-}
-
-export async function reopenPlanRevision(persistence: NavlogPersistence, revisionId: string): Promise<PlanRevision> {
-  const revision = await persistence.getPlanRevision(revisionId);
-  if (revision === undefined) throw new DraftUseCaseError("The selected saved revision is no longer available.");
-  return revision;
-}
-
 function pilotInputValue(value: number, sourceId: string, sourceLabel: string, recordedAt: string): PlanningValue<number> {
   return { computedValue: null, effectiveValue: value, origin: "pilot-input", provenance: { sourceId, sourceLabel, recordedAt } };
 }
@@ -321,5 +265,3 @@ function requiredUtcInstant(value: string): string {
 export function createSystemClock(): UseCaseClock {
   return { now: () => new Date() };
 }
-
-export type IndexedDbPersistence = Pick<IndexedDbNavlogRepository, keyof NavlogPersistence>;

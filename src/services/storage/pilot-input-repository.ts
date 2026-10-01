@@ -4,7 +4,6 @@ import { StorageValidationError, validateAircraftProfile } from "./validation";
 
 export const PILOT_INPUT_DATABASE_NAME = "ppl-navlog-pilot-input-v2";
 export const PILOT_INPUT_DATABASE_VERSION = 1;
-export const MAX_SUBMISSIONS_PER_PLAN = 20;
 export const MAX_CHECKPOINTS_PER_PLAN = 25;
 const MAX_PLAN_BYTES = 1024 * 1024;
 
@@ -18,22 +17,7 @@ export interface PilotInputPlan {
   readonly cruiseAltitudeTexts: readonly string[];
   readonly overrideReasons: Readonly<Record<string, string>>;
   readonly updatedAt: string;
-  readonly submissions: readonly {
-    readonly submittedAt: string;
-    readonly rawFields: Readonly<Record<string, string>>;
-    readonly inputs: PilotInputSnapshot;
-  }[];
   /** Profile version copied into the plan so later profile edits cannot invalidate it. */
-  readonly profileSnapshot?: AircraftProfile;
-}
-
-export interface PilotInputSnapshot {
-  readonly title: string;
-  readonly rawFields: Readonly<Record<string, string>>;
-  readonly selectedProfileId?: string;
-  readonly checkpoints: readonly { readonly name: string; readonly coordinateText: string }[];
-  readonly cruiseAltitudeTexts: readonly string[];
-  readonly overrideReasons: Readonly<Record<string, string>>;
   readonly profileSnapshot?: AircraftProfile;
 }
 
@@ -42,7 +26,6 @@ export interface PilotInputRepository {
   listPlans(): Promise<readonly PilotInputPlan[]>;
   getPlan(id: string): Promise<PilotInputPlan | undefined>;
   saveWorkingCopy(plan: PilotInputPlan): Promise<void>;
-  submitInputs(plan: PilotInputPlan): Promise<void>;
   saveProfile(profile: AircraftProfile): Promise<void>;
   listProfiles(): Promise<readonly AircraftProfile[]>;
   consumeUnsupportedProfileNotice?(): boolean;
@@ -101,35 +84,8 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const valid = validatePlan(plan);
     const db = await this.database();
     const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
-    const existingValue = await req<unknown>(tx.objectStore(PLAN_STORE).get(valid.id));
-    const existing = existingValue === undefined ? undefined : validatePlan(existingValue);
-    // A working-copy write is not a submission and must not let a stale editor
-    // snapshot roll back the submitted-input history.
-    const stored = validatePlan({ ...valid, submissions: existing?.submissions ?? valid.submissions });
-    await ensureProfileReference(tx, stored);
-    tx.objectStore(PLAN_STORE).put(stored);
-    await done(tx);
-  }
-
-  public async submitInputs(plan: PilotInputPlan): Promise<void> {
-    const valid = validatePlan(plan);
-    const timestamp = this.now().toISOString();
-    const db = await this.database();
-    const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
-    const priorValue = await req<unknown>(tx.objectStore(PLAN_STORE).get(valid.id));
-    const prior = priorValue === undefined ? undefined : validatePlan(priorValue);
-    const inputs: PilotInputSnapshot = {
-      title: valid.title, rawFields: structuredClone(valid.rawFields), selectedProfileId: valid.selectedProfileId,
-      checkpoints: structuredClone(valid.checkpoints), cruiseAltitudeTexts: structuredClone(valid.cruiseAltitudeTexts),
-      overrideReasons: structuredClone(valid.overrideReasons), profileSnapshot: valid.profileSnapshot && structuredClone(valid.profileSnapshot),
-    };
-    const submitted: PilotInputPlan = {
-      ...valid, updatedAt: timestamp,
-      submissions: [...(prior?.submissions ?? valid.submissions), { submittedAt: timestamp, rawFields: { ...valid.rawFields }, inputs }].slice(-MAX_SUBMISSIONS_PER_PLAN),
-    };
-    const stored = validatePlan(submitted);
-    await ensureProfileReference(tx, stored);
-    tx.objectStore(PLAN_STORE).put(stored);
+    await ensureProfileReference(tx, valid);
+    tx.objectStore(PLAN_STORE).put(valid);
     await done(tx);
   }
 
@@ -207,12 +163,16 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
 function validatePlan(value: unknown): PilotInputPlan {
   if (!isRecord(value)) throw invalid("$", "must be an object");
   assertOnlyKeys(value, ["id", "title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt", "submissions", "profileSnapshot"], "$");
-  validatePlanIdentity(value);
-  validatePlanMaps(value);
-  validatePlanCollections(value);
-  validatePlanProfile(value);
-  validateDocumentSize(value);
-  return structuredClone(value) as unknown as PilotInputPlan;
+  const plan = structuredClone(value) as Record<string, unknown>;
+  // Historical submissions are disposable. Drop this known legacy field at
+  // the persistence boundary before validating the current input set.
+  delete plan.submissions;
+  validatePlanIdentity(plan);
+  validatePlanMaps(plan);
+  validatePlanCollections(plan);
+  validatePlanProfile(plan);
+  validateDocumentSize(plan);
+  return plan as unknown as PilotInputPlan;
 }
 
 /** Drops only snapshots proven to use a different schema; malformed current data remains visible as an error. */
@@ -221,6 +181,10 @@ function sanitizeUnsupportedPlanProfiles(value: unknown, unsupportedIds: readonl
   let changed = false;
   let unsupportedDiscarded = false;
   const plan = structuredClone(value) as Record<string, unknown>;
+  if (Object.hasOwn(plan, "submissions")) {
+    delete plan.submissions;
+    changed = true;
+  }
   if (plan.profileSnapshot !== undefined && isUnsupportedProfile(plan.profileSnapshot)) {
     delete plan.profileSnapshot;
     delete plan.selectedProfileId;
@@ -230,23 +194,6 @@ function sanitizeUnsupportedPlanProfiles(value: unknown, unsupportedIds: readonl
   if (typeof plan.selectedProfileId === "string" && unsupportedIds.includes(plan.selectedProfileId) && plan.profileSnapshot === undefined) {
     delete plan.selectedProfileId;
     changed = true;
-  }
-  if (Array.isArray(plan.submissions)) {
-    plan.submissions = plan.submissions.map((submission) => {
-      if (!isRecord(submission) || !isRecord(submission.inputs)) return submission;
-      const inputs = { ...submission.inputs };
-      if (inputs.profileSnapshot !== undefined && isUnsupportedProfile(inputs.profileSnapshot)) {
-        delete inputs.profileSnapshot;
-        delete inputs.selectedProfileId;
-        changed = true;
-        unsupportedDiscarded = true;
-      }
-      if (typeof inputs.selectedProfileId === "string" && unsupportedIds.includes(inputs.selectedProfileId) && inputs.profileSnapshot === undefined) {
-        delete inputs.selectedProfileId;
-        changed = true;
-      }
-      return { ...submission, inputs };
-    });
   }
   return { value: plan, changed, unsupportedDiscarded };
 }
@@ -280,7 +227,6 @@ function validateTextMap(value: unknown, path: string): void {
 function validatePlanCollections(value: Record<string, unknown>): void {
   validateCheckpoints(value.checkpoints);
   validateAltitudes(value.cruiseAltitudeTexts);
-  validateSubmissions(value.submissions);
 }
 
 function validateCheckpoints(value: unknown): void {
@@ -297,20 +243,6 @@ function validateCheckpoints(value: unknown): void {
 function validateAltitudes(value: unknown): void {
   if (!Array.isArray(value) || value.length > 100) throw invalid("$.cruiseAltitudeTexts", "must be an array of at most 100 strings");
   value.forEach((item, index) => assertText(item, `$.cruiseAltitudeTexts[${index}]`));
-}
-
-function validateSubmissions(value: unknown): void {
-  if (!Array.isArray(value) || value.length > MAX_SUBMISSIONS_PER_PLAN) throw invalid("$.submissions", "must contain at most 20 submissions");
-  value.forEach((item, index) => validateSubmission(item, index));
-}
-
-function validateSubmission(value: unknown, index: number): void {
-  const path = `$.submissions[${index}]`;
-  if (!isRecord(value)) throw invalid(path, "must be an object");
-  assertText(value.submittedAt, `${path}.submittedAt`);
-  if (typeof value.submittedAt !== "string" || !validUtc(value.submittedAt)) throw invalid(`${path}.submittedAt`, "must be an ISO UTC instant");
-  validateTextMap(value.rawFields, `${path}.rawFields`);
-  validateSnapshot(value.inputs);
 }
 
 function validatePlanProfile(value: Record<string, unknown>): void {
@@ -339,12 +271,6 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
 
 function validateProfile(value: unknown, now: Date): asserts value is AircraftProfile {
   validateAircraftProfile(value, now);
-}
-
-function validateSnapshot(value: unknown): void {
-  if (!isRecord(value)) throw invalid("$", "must be an object");
-  assertOnlyKeys(value, ["title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "profileSnapshot"], "$");
-  validatePlan({ ...value, id: "snapshot", updatedAt: "2026-01-01T00:00:00.000Z", submissions: [] });
 }
 
 function invalid(path: string, message: string): StorageValidationError { return new StorageValidationError([{ path, message }]); }

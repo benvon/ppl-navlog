@@ -28,14 +28,13 @@ class MemoryPlans implements PilotInputRepository {
     if (index < 0) this.plans.push(plan);
     else this.plans[index] = plan;
   }
-  async submitInputs(): Promise<void> {}
   async saveProfile(): Promise<void> {}
   async listProfiles() { return []; }
 }
 
 const makePlan = (id: string, title = id): PilotInputPlan => ({
   id, title, rawFields: { title }, checkpoints: [], cruiseAltitudeTexts: ["4500"],
-  overrideReasons: {}, updatedAt: "2026-09-29T00:00:00.000Z", submissions: [],
+  overrideReasons: {}, updatedAt: "2026-09-29T00:00:00.000Z",
 });
 
 function owner(repository = new MemoryPlans()) {

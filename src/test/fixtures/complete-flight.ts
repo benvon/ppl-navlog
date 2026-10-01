@@ -1,8 +1,7 @@
 import type { MetarSuccessPayload, WindsForecastSuccessPayload, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
-import { createBrowserPlanCalculator } from "../../application/browser-plan-calculator";
 import { applyCruiseTasOverride } from "../../application/plan-use-cases";
 import type { AircraftProfile } from "../../domain/aircraft";
-import type { PlanDraft, PlanFamily, PlanRevision, WeatherReferenceSnapshot } from "../../domain/route";
+import type { PlanDraft } from "../../domain/route";
 import { aircraftProfile, planDraft } from "../../services/storage/__tests__/fixtures";
 import type { MetarTransportClient, WindsTransportClient } from "../../services/weather/winds-client";
 
@@ -74,25 +73,4 @@ export function completeFlightDraft(): PlanDraft {
     },
   };
   return applyCruiseTasOverride(draft, profile, "leg-1", 102, "Teaching example: deliberate per-leg TAS change", { now: () => new Date(COMPLETE_FLIGHT_TIME) });
-}
-
-export interface CompleteFlightFixture {
-  readonly profile: AircraftProfile;
-  readonly draft: PlanDraft;
-  readonly family: PlanFamily;
-  readonly revision: PlanRevision;
-  readonly weatherSnapshots: readonly WeatherReferenceSnapshot[];
-}
-
-/** Runs the actual application composition with frozen transport and clock inputs. */
-export async function createCompleteFlightFixture(): Promise<CompleteFlightFixture> {
-  const profile = completeFlightProfile();
-  const draft = completeFlightDraft();
-  let saved: { family: PlanFamily; revision: PlanRevision; snapshots: readonly WeatherReferenceSnapshot[] } | undefined;
-  let next = 0;
-  const calculate = createBrowserPlanCalculator({ saveCalculatedPlanRevision: async (family, revision, snapshots) => { saved = { family, revision, snapshots }; } }, completeFlightWeatherClient, { next: () => `synthetic-${++next}` }, { now: () => new Date(COMPLETE_FLIGHT_TIME) });
-  const result = await calculate(draft, profile);
-  if (result.status !== "saved" || saved === undefined) throw new Error(`Synthetic complete flight did not calculate: ${result.status === "blocked" ? result.message : "no saved revision"}`);
-  const record: { family: PlanFamily; revision: PlanRevision; snapshots: readonly WeatherReferenceSnapshot[] } = saved;
-  return { profile, draft, family: record.family, revision: record.revision, weatherSnapshots: record.snapshots };
 }

@@ -70,7 +70,7 @@ Label generated TOC/TOD points as estimated, including points coincident with au
 
 Printing is deferred to separate work.
 
-Persist pilot-entered inputs, not calculated worksheets. The current result and its inspector evidence are disposable in-memory state; input edits invalidate them, and reopening a plan requires Update navlog to obtain a fresh result. An input-only save contains no calculation snapshot or pending-calculation placeholder. Stored calculation/weather revision history has no product purpose and is to be retired with the inactive planner in issue #30.
+Persist pilot-entered inputs, not calculated worksheets. The current result and its inspector evidence are disposable in-memory state; input edits invalidate them, and reopening a plan requires Update navlog to obtain a fresh result. An input-only save contains no calculation snapshot or pending-calculation placeholder. There is no stored calculation/weather revision history or hidden input submission history. Save only the latest pilot inputs per plan. The inactive revision planner and its persistence writers are removed.
 
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
 

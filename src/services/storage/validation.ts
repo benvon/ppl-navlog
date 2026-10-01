@@ -4,11 +4,8 @@ import {
   PLAN_SCHEMA_VERSION,
   type JsonValue,
   type PlanDraft,
-  type PlanFamily,
-  type PlanRevision,
   type RouteDefinition,
   type RoutePoint,
-  type WeatherReferenceSnapshot,
 } from "../../domain/route";
 import { inspectAircraftProfile } from "../../domain/aircraft-profile-validation";
 
@@ -27,11 +24,8 @@ export class StorageValidationError extends Error {
 type UnknownRecord = Record<string, unknown>;
 const MAX_LABEL_LENGTH = 120;
 const MAX_REASON_LENGTH = 500;
-const MAX_WARNINGS = 100;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ITEMS = 20_000;
-/** Worker timestamps may lead an individual browser clock slightly. */
-const EXTERNAL_RETRIEVAL_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const airportCodePattern = /^[A-Z0-9]{3,4}$/;
 const utcPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -83,15 +77,6 @@ function finiteNumber(
 
 function positiveNumber(value: unknown, path: string, issues: ValidationIssue[]): value is number {
   return finiteNumber(value, path, issues, Number.MIN_VALUE);
-}
-
-function positiveInteger(value: unknown, path: string, issues: ValidationIssue[]): value is number {
-  if (!positiveNumber(value, path, issues)) return false;
-  if (!Number.isInteger(value)) {
-    add(issues, path, "must be an integer");
-    return false;
-  }
-  return true;
 }
 
 function nonNegativeNumber(value: unknown, path: string, issues: ValidationIssue[]): value is number {
@@ -358,22 +343,6 @@ function validateOptionalWeatherIcao(value: unknown, path: string, issues: Valid
   }
 }
 
-export function validatePlanFamily(value: unknown, now = new Date()): value is PlanFamily {
-  const issues: ValidationIssue[] = [];
-  if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
-  schemaVersion(value.schemaVersion, PLAN_SCHEMA_VERSION, "$.schemaVersion", issues);
-  identifier(value.id, "$.id", issues);
-  requiredString(value.title, "$.title", issues);
-  if (value.latestRevisionId !== undefined) identifier(value.latestRevisionId, "$.latestRevisionId", issues);
-  if (value.latestRevisionNumber !== undefined) positiveInteger(value.latestRevisionNumber, "$.latestRevisionNumber", issues);
-  if ((value.latestRevisionId === undefined) !== (value.latestRevisionNumber === undefined)) {
-    add(issues, "$.latestRevisionNumber", "must be present exactly when latestRevisionId is present");
-  }
-  if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
-  if (issues.length > 0) throw new StorageValidationError(issues);
-  return true;
-}
-
 export function isJsonValue(value: unknown, depth = 0, count = { value: 0 }): value is JsonValue {
   if (depth > MAX_JSON_DEPTH || ++count.value > MAX_JSON_ITEMS) return false;
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -381,61 +350,4 @@ export function isJsonValue(value: unknown, depth = 0, count = { value: 0 }): va
   if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1, count));
   if (!isRecord(value)) return false;
   return Object.entries(value).every(([key, item]) => key.length <= MAX_LABEL_LENGTH && isJsonValue(item, depth + 1, count));
-}
-
-export function validateWeatherReferenceSnapshot(value: unknown, now = new Date()): value is WeatherReferenceSnapshot {
-  const issues: ValidationIssue[] = [];
-  if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
-  schemaVersion(value.schemaVersion, PLAN_SCHEMA_VERSION, "$.schemaVersion", issues);
-  identifier(value.id, "$.id", issues);
-  requiredString(value.source, "$.source", issues);
-  if (utcInstant(value.retrievedAt, "$.retrievedAt", issues)) checkNoFutureTimestamp(value.retrievedAt, "$.retrievedAt", issues, now, EXTERNAL_RETRIEVAL_CLOCK_SKEW_MS);
-  if (!isJsonValue(value.payload)) add(issues, "$.payload", "must be finite JSON data within supported depth and collection limits");
-  if (issues.length > 0) throw new StorageValidationError(issues);
-  return true;
-}
-
-export function validatePlanRevision(value: unknown, now = new Date()): value is PlanRevision {
-  const issues: ValidationIssue[] = [];
-  if (!isRecord(value)) throw new StorageValidationError([{ path: "$", message: "must be an object" }]);
-  schemaVersion(value.schemaVersion, PLAN_SCHEMA_VERSION, "$.schemaVersion", issues);
-  identifier(value.id, "$.id", issues);
-  identifier(value.planId, "$.planId", issues);
-  positiveInteger(value.revisionNumber, "$.revisionNumber", issues);
-  if (value.parentRevisionId !== undefined) identifier(value.parentRevisionId, "$.parentRevisionId", issues);
-  if (value.restoredFromRevisionId !== undefined) identifier(value.restoredFromRevisionId, "$.restoredFromRevisionId", issues);
-  validateRevisionMetadata(value, issues, now);
-  validateRevisionSnapshots(value, issues, now);
-  validateRevisionReferences(value, issues);
-  validateRevisionSnapshotRelationships(value, issues);
-  if (issues.length > 0) throw new StorageValidationError(issues);
-  return true;
-}
-
-function validateRevisionSnapshotRelationships(value: UnknownRecord, issues: ValidationIssue[]): void {
-  if (isRecord(value.draftSnapshot) && value.planId !== value.draftSnapshot.planId) add(issues, "$.planId", "must equal draftSnapshot.planId");
-  const selectedAircraftProfileId = isRecord(value.draftSnapshot) ? value.draftSnapshot.selectedAircraftProfileId : undefined;
-  const snapshottedAircraftProfileId = isRecord(value.aircraftProfileSnapshot) && isRecord(value.aircraftProfileSnapshot.profile)
-    ? value.aircraftProfileSnapshot.profile.id
-    : undefined;
-  if (typeof selectedAircraftProfileId === "string" && typeof snapshottedAircraftProfileId === "string" && selectedAircraftProfileId !== snapshottedAircraftProfileId) {
-    add(issues, "$.aircraftProfileSnapshot.profile.id", "must equal draftSnapshot.selectedAircraftProfileId");
-  }
-}
-
-function validateRevisionMetadata(value: UnknownRecord, issues: ValidationIssue[], now: Date): void {
-  oneOf(value.reason, ["initial-save", "input-change", "weather-refresh", "recalculation"] as const, "$.reason", issues);
-  if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
-}
-
-function validateRevisionSnapshots(value: UnknownRecord, issues: ValidationIssue[], now: Date): void {
-  try { validatePlanDraft(value.draftSnapshot, now); } catch (error) { if (error instanceof StorageValidationError) error.issues.forEach((issue) => add(issues, `$.draftSnapshot${issue.path.slice(1)}`, issue.message)); else throw error; }
-  try { validateAircraftProfileSnapshot(value.aircraftProfileSnapshot, now); } catch (error) { if (error instanceof StorageValidationError) error.issues.forEach((issue) => add(issues, `$.aircraftProfileSnapshot${issue.path.slice(1)}`, issue.message)); else throw error; }
-}
-
-function validateRevisionReferences(value: UnknownRecord, issues: ValidationIssue[]): void {
-  if (!Array.isArray(value.weatherSnapshotIds) || value.weatherSnapshotIds.length > 100) add(issues, "$.weatherSnapshotIds", "must be an array of at most 100 identifiers");
-  else value.weatherSnapshotIds.forEach((id, index) => identifier(id, `$.weatherSnapshotIds[${index}]`, issues));
-  if (value.calculationSnapshot !== undefined && !isJsonValue(value.calculationSnapshot)) add(issues, "$.calculationSnapshot", "must be finite JSON data within supported depth and collection limits");
-  if (!Array.isArray(value.warnings) || value.warnings.length > MAX_WARNINGS || !value.warnings.every((warning) => typeof warning === "string" && warning.length <= MAX_LABEL_LENGTH)) add(issues, "$.warnings", `must be an array of at most ${MAX_WARNINGS} short strings`);
 }
