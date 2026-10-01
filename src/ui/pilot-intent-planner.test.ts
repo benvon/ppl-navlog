@@ -1430,6 +1430,152 @@ describe("pilot intent planner", () => {
     expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Pending draft");
   });
 
+  it.each(["edited title", "untouched input", "edited checkpoint"] as const)("opens a checkpoint on the first pointer click after focusing an input: %s", async (scenario) => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    if (scenario === "edited checkpoint") {
+      button(root, "Add checkpoint").click();
+      await settle();
+      edit(root, "checkpoint-name-0", "Visual checkpoint");
+      edit(root, "checkpoint-coordinate-0", "N4145 W08730");
+    } else if (scenario === "edited title") {
+      edit(root, "plan-title", "Unsaved route title");
+    }
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const focusedField = scenario === "edited checkpoint" ? "checkpoint-coordinate-0" : scenario === "edited title" ? "plan-title" : "cruise-altitude";
+    const add = button(root, "Add checkpoint");
+    // Model the browser default: pointer press blurs the input unless canceled,
+    // then microtasks run before the later pointer release and click.
+    const press = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 });
+    add.dispatchEvent(press);
+    if (!press.defaultPrevented) input(root, focusedField).dispatchEvent(new Event("blur"));
+    await Promise.resolve();
+    add.click();
+    const expectedCount = scenario === "edited checkpoint" ? 2 : 1;
+    const openedCount = root.querySelectorAll('[name^="checkpoint-name-"]').length;
+    await Promise.resolve();
+    const lockedDuringSave = button(root, "Add checkpoint").disabled;
+    button(root, "Add checkpoint").click();
+    const countDuringSave = root.querySelectorAll('[name^="checkpoint-name-"]').length;
+    release();
+    await settle();
+    expect(openedCount).toBe(expectedCount);
+    expect(lockedDuringSave).toBe(true);
+    expect(countDuringSave).toBe(expectedCount);
+    expect(button(root, "Add checkpoint").disabled).toBe(false);
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe(scenario === "edited title" ? "Unsaved route title" : "New study route");
+    expect(repository.plans[0]?.checkpoints).toEqual(scenario === "edited checkpoint"
+      ? [{ name: "Visual checkpoint", coordinateText: "N4145 W08730" }, { name: "", coordinateText: "" }]
+      : [{ name: "", coordinateText: "" }]);
+  });
+
+  it.each(["Override TAS for leg 1", "Remove checkpoint 1", "Restore aircraft default for leg 1", "Save changes", "Continue to Calculate", "Use current UTC", "Update navlog", "Save aircraft profile"])("accepts the first pointer click after input focus: %s", async (action) => {
+    const repository = new MemoryInputs();
+    repository.profiles.push(profile);
+    const root = await mount(repository);
+    document.body.append(root);
+    if (action === "Update navlog") await makeLocallyValid(root);
+    if (action === "Use current UTC") {
+      edit(root, "departure-time", "2026-09-21T20:00", true);
+      await settle();
+    }
+    if (action === "Save aircraft profile") {
+      const values = { "profile-name": "Pointer test aircraft", cruiseTasKnots: "95", cruiseFuelFlowGallonsPerHour: "6", climbRateFeetPerMinute: "500", climbTasKnots: "70", climbFuelFlowGallonsPerHour: "8", descentRateFeetPerMinute: "500", descentTasKnots: "90", descentFuelFlowGallonsPerHour: "4" };
+      for (const [name, value] of Object.entries(values)) edit(root, name, value);
+      edit(root, "compass-deviation-card", "000:+1, 090:-1");
+    }
+    if (action === "Remove checkpoint 1") {
+      button(root, "Add checkpoint").click();
+      await settle();
+    }
+    if (action === "Restore aircraft default for leg 1") {
+      button(root, "Override TAS for leg 1").click();
+      await settle();
+      edit(root, "override-tas-0", "105");
+      edit(root, "override-reason-0", "Study override");
+    }
+    edit(root, "plan-title", "Preserved pointer edits");
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const target = button(root, action);
+    const press = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 });
+    target.dispatchEvent(press);
+    const focusedField = action === "Save aircraft profile" ? "compass-deviation-card" : "plan-title";
+    // Some browsers deliver blur synchronously while a focused editor is
+    // removed. Model that event during the production content replacement.
+    const content = root.firstElementChild!;
+    const replaceChildren = content.replaceChildren.bind(content);
+    vi.spyOn(content, "replaceChildren").mockImplementation((...nodes) => {
+      input(root, focusedField).dispatchEvent(new Event("blur"));
+      replaceChildren(...nodes);
+    });
+    if (!press.defaultPrevented) input(root, focusedField).dispatchEvent(new Event("blur"));
+    await Promise.resolve();
+    target.click();
+    release();
+    await settle();
+    root.remove();
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Preserved pointer edits");
+    const outcomes: Record<string, () => void> = {
+      "Override TAS for leg 1": () => expect(root.querySelector('[name="override-tas-0"]')).not.toBeNull(),
+      "Remove checkpoint 1": () => expect(repository.plans[0]?.checkpoints).toEqual([]),
+      "Restore aircraft default for leg 1": () => expect(repository.plans[0]?.rawFields["override-tas-0"]).toBeUndefined(),
+      "Save changes": () => expect(root.querySelector('[role="status"]')?.textContent).toContain("Changes saved."),
+      "Continue to Calculate": () => expect(root.querySelector<HTMLDetailsElement>('[data-stage="calculate"]')?.open).toBe(true),
+      "Use current UTC": () => expect(repository.plans[0]?.rawFields["departure-time"]).toBe("2026-09-21T21:30"),
+      "Update navlog": () => expect(root.querySelector(".calculated-navlog")).not.toBeNull(),
+      "Save aircraft profile": () => expect(repository.profiles.some(({ name }) => name === "Pointer test aircraft")).toBe(true),
+    };
+    outcomes[action]!();
+  });
+
+  it.each([false, true])("preserves pointer button focus after saving without overriding later user focus: %s", async (moveFocus) => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    document.body.append(root);
+    edit(root, "plan-title", "Focused save");
+    input(root, "plan-title").focus();
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const save = button(root, "Save changes");
+    let focusedAtActivation: Element | null = null;
+    save.addEventListener("click", () => { focusedAtActivation = document.activeElement; }, { capture: true });
+    save.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    await Promise.resolve();
+    const enabledBeforeClick = !save.disabled;
+    save.click();
+    // Browsers can drop focus when the focused button becomes disabled.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    const other = button(root, "New plan");
+    if (moveFocus) other.focus();
+    release();
+    await settle();
+    const focusedAfterSave = document.activeElement;
+    root.remove();
+    expect(focusedAtActivation).toBe(save);
+    expect(enabledBeforeClick).toBe(true);
+    expect(focusedAfterSave).toBe(moveFocus ? other : save);
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Focused save");
+  });
+
+  it("keeps blur autosave available when a pointer press is canceled without a click", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    document.body.append(root);
+    edit(root, "plan-title", "Canceled button press");
+    const title = input(root, "plan-title");
+    title.focus();
+    button(root, "Save changes").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    const focusedAfterPress = document.activeElement;
+    // No click is delivered; the user subsequently focuses another input.
+    input(root, "departure-icao").focus();
+    await settle();
+    root.remove();
+    expect(focusedAfterPress).toBe(title);
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Canceled button press");
+  });
+
   it("coalesces rapid blur events into one write containing the latest literal fields", async () => {
     const repository = new MemoryInputs();
     let release!: () => void;
