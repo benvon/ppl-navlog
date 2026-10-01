@@ -55,6 +55,8 @@ class PilotIntentPlanner {
   private updating = false;
   private savingProfile = false;
   private replacingEditor = false;
+  private transferringButtonFocus = false;
+  private disabledButtonFocus?: HTMLButtonElement;
   private readonly status = document.createElement("p");
   private readonly content = document.createElement("div");
   private clockTimer?: number;
@@ -69,8 +71,18 @@ class PilotIntentPlanner {
       const button = event.target instanceof Element ? event.target.closest("button") : null;
       // Let enabled buttons act before blur autosave can lock them between
       // pointer press and release. Shared state still owns disabled controls.
-      if (event.button === 0 && button instanceof HTMLButtonElement && !button.disabled) event.preventDefault();
+      if (event.button !== 0 || !(button instanceof HTMLButtonElement) || button.disabled) return;
+      event.preventDefault();
     });
+    // Transfer focus only when a click is accepted. A canceled press must leave
+    // the input focused so its next ordinary blur still autosaves the edits.
+    this.content.addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest("button") : null;
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+      this.transferringButtonFocus = true;
+      try { button.focus(); }
+      finally { this.transferringButtonFocus = false; }
+    }, { capture: true });
     this.planState.subscribe((view) => this.onPlanState(view));
   }
 
@@ -169,11 +181,24 @@ class PilotIntentPlanner {
   }
 
   private syncPlanControls(view = this.planState.view): void {
+    const focused = document.activeElement;
     const availability = this.planControlAvailability(view);
     this.syncEditorControls(!availability.edit);
     this.syncDestinationControls(view, availability.destination);
     this.syncActionControls(availability);
     this.status.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { button.disabled = !availability.recovery; });
+    this.restoreButtonFocus(focused);
+  }
+
+  private restoreButtonFocus(focused: Element | null): void {
+    if (focused instanceof HTMLButtonElement && focused.disabled && this.content.contains(focused)) this.disabledButtonFocus = focused;
+    const button = this.disabledButtonFocus;
+    if (!button) return;
+    if (!this.content.contains(button)) { this.disabledButtonFocus = undefined; return; }
+    if (button.disabled) return;
+    this.disabledButtonFocus = undefined;
+    // Do not steal focus from a user who moved elsewhere during the save.
+    if (document.activeElement === document.body || document.activeElement === button) button.focus();
   }
 
   private planControlAvailability(view: PlannerPlanView): PlanControlAvailability {
@@ -297,7 +322,7 @@ class PilotIntentPlanner {
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
       input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => {
-        if (this.replacingEditor || !this.content.contains(input)) return;
+        if (this.replacingEditor || this.transferringButtonFocus || !this.content.contains(input)) return;
         this.touchedFields.add(input.name); this.captureStructured(form); this.refreshUpdateGate(); void this.persist();
       });
     });
@@ -515,7 +540,7 @@ class PilotIntentPlanner {
     form.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
       input.addEventListener("input", () => { if (this.result) this.activateStage("aircraft"); this.setField(`profile-${input.name}`, input.value); this.profileDraftDirty = true; this.invalidate(); this.refreshUpdateGate(); });
       input.addEventListener("blur", () => {
-        if (this.replacingEditor || !this.content.contains(input)) return;
+        if (this.replacingEditor || this.transferringButtonFocus || !this.content.contains(input)) return;
         this.setField(`profile-${input.name}`, input.value); void this.persist();
       });
     });

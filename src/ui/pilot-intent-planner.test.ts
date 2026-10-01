@@ -1530,6 +1530,52 @@ describe("pilot intent planner", () => {
     outcomes[action]!();
   });
 
+  it.each([false, true])("preserves pointer button focus after saving without overriding later user focus: %s", async (moveFocus) => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    document.body.append(root);
+    edit(root, "plan-title", "Focused save");
+    input(root, "plan-title").focus();
+    let release!: () => void;
+    repository.saveGate = new Promise<void>((resolve) => { release = resolve; });
+    const save = button(root, "Save changes");
+    let focusedAtActivation: Element | null = null;
+    save.addEventListener("click", () => { focusedAtActivation = document.activeElement; }, { capture: true });
+    save.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    await Promise.resolve();
+    const enabledBeforeClick = !save.disabled;
+    save.click();
+    // Browsers can drop focus when the focused button becomes disabled.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    const other = button(root, "New plan");
+    if (moveFocus) other.focus();
+    release();
+    await settle();
+    const focusedAfterSave = document.activeElement;
+    root.remove();
+    expect(focusedAtActivation).toBe(save);
+    expect(enabledBeforeClick).toBe(true);
+    expect(focusedAfterSave).toBe(moveFocus ? other : save);
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Focused save");
+  });
+
+  it("keeps blur autosave available when a pointer press is canceled without a click", async () => {
+    const repository = new MemoryInputs();
+    const root = await mount(repository);
+    document.body.append(root);
+    edit(root, "plan-title", "Canceled button press");
+    const title = input(root, "plan-title");
+    title.focus();
+    button(root, "Save changes").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    const focusedAfterPress = document.activeElement;
+    // No click is delivered; the user subsequently focuses another input.
+    input(root, "departure-icao").focus();
+    await settle();
+    root.remove();
+    expect(focusedAfterPress).toBe(title);
+    expect(repository.plans[0]?.rawFields["plan-title"]).toBe("Canceled button press");
+  });
+
   it("coalesces rapid blur events into one write containing the latest literal fields", async () => {
     const repository = new MemoryInputs();
     let release!: () => void;
