@@ -4,10 +4,13 @@ import { StorageValidationError, validateAircraftProfile } from "./validation";
 
 export const PILOT_INPUT_DATABASE_NAME = "ppl-navlog-pilot-input-v2";
 export const PILOT_INPUT_DATABASE_VERSION = 1;
+export const PILOT_INPUT_PLAN_SCHEMA_VERSION = 1;
+export type PilotInputPlanSchemaVersion = typeof PILOT_INPUT_PLAN_SCHEMA_VERSION;
 export const MAX_CHECKPOINTS_PER_PLAN = 25;
 const MAX_PLAN_BYTES = 1024 * 1024;
 
 export interface PilotInputPlan {
+  readonly schemaVersion: PilotInputPlanSchemaVersion;
   readonly id: string;
   readonly title: string;
   /** Literal editor text. Keys are stable field identifiers owned by the planner. */
@@ -30,6 +33,7 @@ export interface PilotInputRepository {
   listProfiles(): Promise<readonly AircraftProfile[]>;
   consumeUnsupportedProfileNotice?(): boolean;
   consumeUnsupportedProfileIds?(): readonly string[];
+  consumeUnsupportedPlanNotice?(): boolean;
 }
 
 export interface PilotInputRepositoryOptions {
@@ -48,6 +52,7 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
   private readonly now: () => Date;
   private databasePromise: Promise<IDBDatabase> | undefined;
   private unsupportedProfileDiscarded = false;
+  private unsupportedPlanDiscarded = false;
   private readonly unsupportedProfileIds = new Set<string>();
 
   public constructor(options: PilotInputRepositoryOptions = {}) {
@@ -73,9 +78,12 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
   public async getPlan(id: string): Promise<PilotInputPlan | undefined> {
     await this.listProfiles();
     const db = await this.database();
-    const tx = db.transaction(PLAN_STORE, "readonly");
-    const row = await req<unknown>(tx.objectStore(PLAN_STORE).get(id));
-    const plan = row === undefined ? undefined : validatePlan(row);
+    const tx = db.transaction(PLAN_STORE, "readwrite");
+    const store = tx.objectStore(PLAN_STORE);
+    const row = await req<unknown>(store.get(id));
+    let plan: PilotInputPlan | undefined;
+    if (row !== undefined && isUnsupportedPlan(row)) { store.delete(id); this.unsupportedPlanDiscarded = true; }
+    else if (row !== undefined) plan = validatePlan(row);
     await done(tx);
     return plan;
   }
@@ -102,7 +110,8 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const tx = db.transaction([PROFILE_STORE, PLAN_STORE], "readwrite");
     const profileStore = tx.objectStore(PROFILE_STORE);
     const [rows, keys] = await Promise.all([req<unknown[]>(profileStore.getAll()), req<IDBValidKey[]>(profileStore.getAllKeys())]);
-    const planRows = await req<unknown[]>(tx.objectStore(PLAN_STORE).getAll());
+    const planStore = tx.objectStore(PLAN_STORE);
+    const [planRows, planKeys] = await Promise.all([req<unknown[]>(planStore.getAll()), req<IDBValidKey[]>(planStore.getAllKeys())]);
     const profiles: AircraftProfile[] = [];
     const unsupportedIds: string[] = [];
     const unsupportedKeys: IDBValidKey[] = [];
@@ -116,11 +125,19 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
       else profiles.push(checked.profile);
     }
     const sanitizedPlans = planRows.map((value) => sanitizeUnsupportedPlanProfiles(value, unsupportedIds));
-    sanitizedPlans.forEach(({ value }) => { validatePlan(value); });
+    sanitizedPlans.forEach(({ value }) => { if (!isUnsupportedPlan(value)) validatePlan(value); });
     for (const key of unsupportedKeys) profileStore.delete(key);
-    sanitizedPlans.forEach(({ value, changed }) => { if (changed) tx.objectStore(PLAN_STORE).put(value); });
+    let unsupportedPlanFound = false;
+    sanitizedPlans.forEach(({ value, changed }, index) => {
+      if (isUnsupportedPlan(value)) {
+        const key = planKeys[index];
+        if (key !== undefined) planStore.delete(key);
+        unsupportedPlanFound = true;
+      } else if (changed) planStore.put(value);
+    });
     await done(tx);
     if (sanitizedPlans.some(({ unsupportedDiscarded }) => unsupportedDiscarded)) this.unsupportedProfileDiscarded = true;
+    if (unsupportedPlanFound) this.unsupportedPlanDiscarded = true;
     unsupportedIds.forEach((id) => this.unsupportedProfileIds.add(id));
     if (unsupportedKeys.length > 0) this.unsupportedProfileDiscarded = true;
     return structuredClone(profiles);
@@ -136,6 +153,12 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const ids = [...this.unsupportedProfileIds];
     this.unsupportedProfileIds.clear();
     return ids;
+  }
+
+  public consumeUnsupportedPlanNotice(): boolean {
+    const discarded = this.unsupportedPlanDiscarded;
+    this.unsupportedPlanDiscarded = false;
+    return discarded;
   }
 
   private database(): Promise<IDBDatabase> {
@@ -162,11 +185,9 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
 
 function validatePlan(value: unknown): PilotInputPlan {
   if (!isRecord(value)) throw invalid("$", "must be an object");
-  assertOnlyKeys(value, ["id", "title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt", "submissions", "profileSnapshot"], "$");
+  if (isUnsupportedPlan(value)) throw invalid("$.schemaVersion", "uses an unsupported plan schema version");
+  assertOnlyKeys(value, ["schemaVersion", "id", "title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt", "profileSnapshot"], "$");
   const plan = structuredClone(value) as Record<string, unknown>;
-  // Historical submissions are disposable. Drop this known legacy field at
-  // the persistence boundary before validating the current input set.
-  delete plan.submissions;
   validatePlanIdentity(plan);
   validatePlanMaps(plan);
   validatePlanCollections(plan);
@@ -175,16 +196,16 @@ function validatePlan(value: unknown): PilotInputPlan {
   return plan as unknown as PilotInputPlan;
 }
 
+function isUnsupportedPlan(value: unknown): boolean {
+  return !isRecord(value) || value.schemaVersion !== PILOT_INPUT_PLAN_SCHEMA_VERSION;
+}
+
 /** Drops only snapshots proven to use a different schema; malformed current data remains visible as an error. */
 function sanitizeUnsupportedPlanProfiles(value: unknown, unsupportedIds: readonly string[] = []): { readonly value: unknown; readonly changed: boolean; readonly unsupportedDiscarded: boolean } {
   if (!isRecord(value)) return { value, changed: false, unsupportedDiscarded: false };
   let changed = false;
   let unsupportedDiscarded = false;
   const plan = structuredClone(value) as Record<string, unknown>;
-  if (Object.hasOwn(plan, "submissions")) {
-    delete plan.submissions;
-    changed = true;
-  }
   if (plan.profileSnapshot !== undefined && isUnsupportedProfile(plan.profileSnapshot)) {
     delete plan.profileSnapshot;
     delete plan.selectedProfileId;
@@ -241,7 +262,7 @@ function validateCheckpoints(value: unknown): void {
 }
 
 function validateAltitudes(value: unknown): void {
-  if (!Array.isArray(value) || value.length > 100) throw invalid("$.cruiseAltitudeTexts", "must be an array of at most 100 strings");
+  if (!Array.isArray(value) || value.length !== 1) throw invalid("$.cruiseAltitudeTexts", "must contain exactly one altitude text");
   value.forEach((item, index) => assertText(item, `$.cruiseAltitudeTexts[${index}]`));
 }
 

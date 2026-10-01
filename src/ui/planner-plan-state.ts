@@ -1,4 +1,4 @@
-import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
+import { PILOT_INPUT_PLAN_SCHEMA_VERSION, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 
 export type PlannerPlanPhase = "editing" | "saving" | "switching" | "save-failed";
 export type PlannerDestination = { readonly kind: "new" } | { readonly kind: "open"; readonly id: string };
@@ -162,6 +162,7 @@ export class PlannerPlanState {
       let next: PilotInputPlan | undefined;
       if (request.target.kind === "new") next = request.createDraft?.();
       else next = await this.repository.getPlan(request.target.id);
+      if (!next && this.repository.consumeUnsupportedPlanNotice?.()) throw new Error("An unsupported saved plan was discarded. Create a new plan to continue.");
       if (!next) throw new Error(`Saved plan ${request.target.kind === "open" ? `“${request.target.id}”` : ""} was not found.`);
       this.activeDraft = structuredClone(next);
       this.dirty = false;
@@ -181,7 +182,7 @@ export class PlannerPlanState {
 
   private blankPlan(): PilotInputPlan {
     const now = this.options.clock.now().toISOString();
-    return { id: this.options.ids.next(), title: "New study route", rawFields: { "plan-title": "New study route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now };
+    return { schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION, id: this.options.ids.next(), title: "New study route", rawFields: { "plan-title": "New study route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now };
   }
 
   private publish(): void { const view = this.view; this.listeners.forEach((listener) => listener(view)); }

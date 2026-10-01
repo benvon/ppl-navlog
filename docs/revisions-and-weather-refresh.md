@@ -8,6 +8,6 @@ Airport responses, METAR and winds products, source evidence, calculations, and 
 
 Weather sampling and the calculation steps follow the [teaching contract](navigation-worksheet-teaching-contract.md). Status wording describes checks of the selected planning weather inputs; this is not a complete preflight briefing.
 
-The inactive revision planner, revision journal, calculation persistence, and hidden input submission history have been removed. Previously stored submission history is discarded while preserving the current pilot inputs. The old revision database is not opened by the application.
+The inactive revision planner, revision journal, calculation persistence, and hidden input submission history have been removed. Saved plans carry an explicit current schema version. Unsupported or unversioned stored plans are discarded with a notice to create a new plan; there is no migration of submission history or obsolete fields. Malformed current-format data produces a validation error. The old revision database is not opened by the application.
 
 Printing and plan/profile import/export are deferred. The Worker receives only lookup parameters required for airport and weather calculations, not saved plans.

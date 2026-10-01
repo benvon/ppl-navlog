@@ -1,6 +1,6 @@
 import { indexedDB } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
-import { IndexedDbPilotInputRepository, MAX_CHECKPOINTS_PER_PLAN } from "../pilot-input-repository";
+import { IndexedDbPilotInputRepository, MAX_CHECKPOINTS_PER_PLAN, PILOT_INPUT_PLAN_SCHEMA_VERSION } from "../pilot-input-repository";
 import type { PilotInputPlan } from "../pilot-input-repository";
 import { aircraftProfile, timestamp } from "./fixtures";
 
@@ -18,8 +18,9 @@ function repo(): IndexedDbPilotInputRepository {
 function plan(): PilotInputPlan {
   const profile = aircraftProfile();
   return {
+    schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION,
     id: "plan-one", title: "Raw draft", rawFields: { "departure-icao": "1C8", "surface-weather-icao": "KORD", "selected-forecast-period": "", "taxi-fuel": "-", "plan-title": "" },
-    selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [{ name: "", coordinateText: "41." }], cruiseAltitudeTexts: ["4500", ""], overrideReasons: { "leg-1-cruise-tas": "pilot choice" },
+    selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [{ name: "", coordinateText: "41." }], cruiseAltitudeTexts: ["4500"], overrideReasons: { "leg-1-cruise-tas": "pilot choice" },
     updatedAt: timestamp,
   };
 }
@@ -114,7 +115,6 @@ describe("input-only pilot repository", () => {
     const plans = await store.listPlans();
     const cleaned = plans.find(({ id }) => id === saved.id);
     expect(cleaned).toMatchObject({ rawFields: saved.rawFields, checkpoints: saved.checkpoints });
-    expect(cleaned).not.toHaveProperty("submissions");
     expect(cleaned).not.toHaveProperty("selectedProfileId");
     expect(cleaned).not.toHaveProperty("profileSnapshot");
     expect(plans.find(({ id }) => id === idOnly.id)).not.toHaveProperty("selectedProfileId");
@@ -161,53 +161,44 @@ describe("input-only pilot repository", () => {
     expect(store.consumeUnsupportedProfileNotice()).toBe(false);
   });
 
-  it("drops persisted historical submissions and preserves the latest current input set", async () => {
-    const databaseName = `pilot-input-test-${serial += 1}`;
-    names.push(databaseName);
-    const store = new IndexedDbPilotInputRepository({ databaseName, indexedDbFactory: indexedDB, now });
-    repos.push(store);
-    await store.initialize();
+  it("discards unsupported and unversioned plans while retaining current plans and exposes a one-shot notice", async () => {
+    const store = repo(); await store.initialize();
     const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
-    const current = { ...plan(), rawFields: { ...plan().rawFields, "taxi-fuel": "12" } };
+    const current = plan();
+    const missingVersion = { ...current, id: "old-plan" } as Record<string, unknown>;
+    delete missingVersion.schemaVersion;
+    const futureVersion = { ...current, id: "future-plan", schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION + 1 };
     const tx = db.transaction("pilotInputs", "readwrite");
-    tx.objectStore("pilotInputs").put({ ...current, submissions: [{ garbage: true }] });
+    tx.objectStore("pilotInputs").put(current);
+    tx.objectStore("pilotInputs").put(missingVersion);
+    tx.objectStore("pilotInputs").put(futureVersion);
     await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
 
-    db.close();
-    const reopenedStore = new IndexedDbPilotInputRepository({ databaseName, indexedDbFactory: indexedDB, now });
-    repos.push(reopenedStore);
-    const reopened = await reopenedStore.getPlan(current.id);
-    expect(reopened).toEqual(current);
-    expect(reopened).not.toHaveProperty("submissions");
+    expect(await store.listProfiles()).toEqual([]);
+    expect(await store.listPlans()).toEqual([current]);
+    expect(store.consumeUnsupportedPlanNotice?.()).toBe(true);
+    expect(store.consumeUnsupportedPlanNotice?.()).toBe(false);
+    const read = db.transaction("pilotInputs", "readonly");
+    const [old, future] = await Promise.all(["old-plan", "future-plan"].map((id) => new Promise<unknown>((resolve, reject) => {
+      const request = read.objectStore("pilotInputs").get(id);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    })));
+    expect(old).toBeUndefined();
+    expect(future).toBeUndefined();
   });
 
-  it("overwrites legacy history without reading or merging it during a save", async () => {
+  it("reports malformed persisted current plans instead of discarding them", async () => {
     const store = repo(); await store.initialize();
     const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
     const tx = db.transaction("pilotInputs", "readwrite");
-    tx.objectStore("pilotInputs").put({ ...plan(), submissions: [{ arbitrary: "large legacy payload" }] });
-    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
-    const updated = { ...plan(), rawFields: { ...plan().rawFields, "taxi-fuel": "17" } };
-    const objectStore = db.transaction("pilotInputs", "readonly").objectStore("pilotInputs");
-    const prototype = Object.getPrototypeOf(objectStore) as IDBObjectStore;
-    const originalGet = prototype.get;
-    Object.defineProperty(prototype, "get", {
-      configurable: true,
-      value(this: IDBObjectStore, ...args: Parameters<IDBObjectStore["get"]>) {
-        if (this.name === "pilotInputs") throw new Error("save must not read the existing plan");
-        return originalGet.apply(this, args);
-      },
-    });
-    try {
-      await store.saveWorkingCopy(updated);
-    } finally {
-      Object.defineProperty(prototype, "get", { configurable: true, writable: true, value: originalGet });
-    }
-
+    tx.objectStore("pilotInputs").put({ ...plan(), rawFields: null });
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); });
+    await expect(store.listPlans()).rejects.toThrow("rawFields");
+    expect(store.consumeUnsupportedPlanNotice()).toBe(false);
     const read = db.transaction("pilotInputs", "readonly");
-    const saved = await new Promise<unknown>((resolve, reject) => { const request = read.objectStore("pilotInputs").get(updated.id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
-    expect(saved).toEqual(updated);
-    expect(saved).not.toHaveProperty("submissions");
+    const stored = await new Promise<unknown>((resolve) => { const request = read.objectStore("pilotInputs").get(plan().id); request.onsuccess = () => resolve(request.result); });
+    expect(stored).toMatchObject({ schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION, rawFields: null });
   });
 
   it("does not write a plan when its selected profile reference is unavailable", async () => {

@@ -18,7 +18,7 @@ Reference: [FAA PHAK Chapter 16](https://www.faa.gov/sites/faa.gov/files/18_phak
 - Use aircraft profile climb/descent rates, TAS, and fuel rates. Keep the entered descent rate; a longer required descent distance moves TOD earlier. Do not automatically increase the rate.
 - Preserve authored route, profile, fuel, and other inputs during the change.
 
-A saved plan with one repeated altitude supplies that value. A saved plan with differing leg altitudes retains its original data and requires the student to choose one cruise altitude before calculation. Store the new choice separately from historical leg-altitude entries. Do not silently choose or discard a value.
+Support only the current saved-plan schema. Discard unsupported stored plans and ask the student to create a new plan; do not migrate historical per-leg altitudes or other obsolete fields. Malformed data claiming the current schema remains a validation error.
 
 ## Real weather and rows
 
@@ -91,7 +91,7 @@ Validate required authored inputs before weather requests. Report invalid rates/
 - All checkpoints outside the interval are reported together, and row weather selection stops after the placement weather requests.
 - Coincident labels do not duplicate time/fuel; repeated coordinates retain route occurrence.
 - Invalid input fails before weather; unavailable weather and fuel shortfall remain explicit.
-- Saved authored altitude data is preserved through migration.
+- Current-format authored inputs remain saveable when incomplete; unsupported stored plan formats are discarded with a create-new-plan notice.
 
 [Issue #34](https://github.com/benvon/ppl-navlog/issues/34) separately adds authoritative learning sources at the bottom of the page.
 
