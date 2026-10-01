@@ -4,11 +4,13 @@ import { StorageValidationError, validateAircraftProfile } from "./validation";
 
 export const PILOT_INPUT_DATABASE_NAME = "ppl-navlog-pilot-input-v2";
 export const PILOT_INPUT_DATABASE_VERSION = 1;
-export const MAX_SUBMISSIONS_PER_PLAN = 20;
+export const PILOT_INPUT_PLAN_SCHEMA_VERSION = 1;
+export type PilotInputPlanSchemaVersion = typeof PILOT_INPUT_PLAN_SCHEMA_VERSION;
 export const MAX_CHECKPOINTS_PER_PLAN = 25;
 const MAX_PLAN_BYTES = 1024 * 1024;
 
 export interface PilotInputPlan {
+  readonly schemaVersion: PilotInputPlanSchemaVersion;
   readonly id: string;
   readonly title: string;
   /** Literal editor text. Keys are stable field identifiers owned by the planner. */
@@ -18,22 +20,7 @@ export interface PilotInputPlan {
   readonly cruiseAltitudeTexts: readonly string[];
   readonly overrideReasons: Readonly<Record<string, string>>;
   readonly updatedAt: string;
-  readonly submissions: readonly {
-    readonly submittedAt: string;
-    readonly rawFields: Readonly<Record<string, string>>;
-    readonly inputs: PilotInputSnapshot;
-  }[];
   /** Profile version copied into the plan so later profile edits cannot invalidate it. */
-  readonly profileSnapshot?: AircraftProfile;
-}
-
-export interface PilotInputSnapshot {
-  readonly title: string;
-  readonly rawFields: Readonly<Record<string, string>>;
-  readonly selectedProfileId?: string;
-  readonly checkpoints: readonly { readonly name: string; readonly coordinateText: string }[];
-  readonly cruiseAltitudeTexts: readonly string[];
-  readonly overrideReasons: Readonly<Record<string, string>>;
   readonly profileSnapshot?: AircraftProfile;
 }
 
@@ -42,11 +29,11 @@ export interface PilotInputRepository {
   listPlans(): Promise<readonly PilotInputPlan[]>;
   getPlan(id: string): Promise<PilotInputPlan | undefined>;
   saveWorkingCopy(plan: PilotInputPlan): Promise<void>;
-  submitInputs(plan: PilotInputPlan): Promise<void>;
   saveProfile(profile: AircraftProfile): Promise<void>;
   listProfiles(): Promise<readonly AircraftProfile[]>;
   consumeUnsupportedProfileNotice?(): boolean;
   consumeUnsupportedProfileIds?(): readonly string[];
+  consumeUnsupportedPlanNotice?(): boolean;
 }
 
 export interface PilotInputRepositoryOptions {
@@ -65,6 +52,7 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
   private readonly now: () => Date;
   private databasePromise: Promise<IDBDatabase> | undefined;
   private unsupportedProfileDiscarded = false;
+  private unsupportedPlanDiscarded = false;
   private readonly unsupportedProfileIds = new Set<string>();
 
   public constructor(options: PilotInputRepositoryOptions = {}) {
@@ -90,9 +78,12 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
   public async getPlan(id: string): Promise<PilotInputPlan | undefined> {
     await this.listProfiles();
     const db = await this.database();
-    const tx = db.transaction(PLAN_STORE, "readonly");
-    const row = await req<unknown>(tx.objectStore(PLAN_STORE).get(id));
-    const plan = row === undefined ? undefined : validatePlan(row);
+    const tx = db.transaction(PLAN_STORE, "readwrite");
+    const store = tx.objectStore(PLAN_STORE);
+    const row = await req<unknown>(store.get(id));
+    let plan: PilotInputPlan | undefined;
+    if (row !== undefined && isUnsupportedPlan(row)) { store.delete(id); this.unsupportedPlanDiscarded = true; }
+    else if (row !== undefined) plan = validatePlan(row);
     await done(tx);
     return plan;
   }
@@ -101,35 +92,8 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const valid = validatePlan(plan);
     const db = await this.database();
     const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
-    const existingValue = await req<unknown>(tx.objectStore(PLAN_STORE).get(valid.id));
-    const existing = existingValue === undefined ? undefined : validatePlan(existingValue);
-    // A working-copy write is not a submission and must not let a stale editor
-    // snapshot roll back the submitted-input history.
-    const stored = validatePlan({ ...valid, submissions: existing?.submissions ?? valid.submissions });
-    await ensureProfileReference(tx, stored);
-    tx.objectStore(PLAN_STORE).put(stored);
-    await done(tx);
-  }
-
-  public async submitInputs(plan: PilotInputPlan): Promise<void> {
-    const valid = validatePlan(plan);
-    const timestamp = this.now().toISOString();
-    const db = await this.database();
-    const tx = db.transaction([PLAN_STORE, PROFILE_STORE], "readwrite");
-    const priorValue = await req<unknown>(tx.objectStore(PLAN_STORE).get(valid.id));
-    const prior = priorValue === undefined ? undefined : validatePlan(priorValue);
-    const inputs: PilotInputSnapshot = {
-      title: valid.title, rawFields: structuredClone(valid.rawFields), selectedProfileId: valid.selectedProfileId,
-      checkpoints: structuredClone(valid.checkpoints), cruiseAltitudeTexts: structuredClone(valid.cruiseAltitudeTexts),
-      overrideReasons: structuredClone(valid.overrideReasons), profileSnapshot: valid.profileSnapshot && structuredClone(valid.profileSnapshot),
-    };
-    const submitted: PilotInputPlan = {
-      ...valid, updatedAt: timestamp,
-      submissions: [...(prior?.submissions ?? valid.submissions), { submittedAt: timestamp, rawFields: { ...valid.rawFields }, inputs }].slice(-MAX_SUBMISSIONS_PER_PLAN),
-    };
-    const stored = validatePlan(submitted);
-    await ensureProfileReference(tx, stored);
-    tx.objectStore(PLAN_STORE).put(stored);
+    await ensureProfileReference(tx, valid);
+    tx.objectStore(PLAN_STORE).put(valid);
     await done(tx);
   }
 
@@ -146,7 +110,8 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const tx = db.transaction([PROFILE_STORE, PLAN_STORE], "readwrite");
     const profileStore = tx.objectStore(PROFILE_STORE);
     const [rows, keys] = await Promise.all([req<unknown[]>(profileStore.getAll()), req<IDBValidKey[]>(profileStore.getAllKeys())]);
-    const planRows = await req<unknown[]>(tx.objectStore(PLAN_STORE).getAll());
+    const planStore = tx.objectStore(PLAN_STORE);
+    const [planRows, planKeys] = await Promise.all([req<unknown[]>(planStore.getAll()), req<IDBValidKey[]>(planStore.getAllKeys())]);
     const profiles: AircraftProfile[] = [];
     const unsupportedIds: string[] = [];
     const unsupportedKeys: IDBValidKey[] = [];
@@ -160,11 +125,19 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
       else profiles.push(checked.profile);
     }
     const sanitizedPlans = planRows.map((value) => sanitizeUnsupportedPlanProfiles(value, unsupportedIds));
-    sanitizedPlans.forEach(({ value }) => { validatePlan(value); });
+    sanitizedPlans.forEach(({ value }) => { if (!isUnsupportedPlan(value)) validatePlan(value); });
     for (const key of unsupportedKeys) profileStore.delete(key);
-    sanitizedPlans.forEach(({ value, changed }) => { if (changed) tx.objectStore(PLAN_STORE).put(value); });
+    let unsupportedPlanFound = false;
+    sanitizedPlans.forEach(({ value, changed }, index) => {
+      if (isUnsupportedPlan(value)) {
+        const key = planKeys[index];
+        if (key !== undefined) planStore.delete(key);
+        unsupportedPlanFound = true;
+      } else if (changed) planStore.put(value);
+    });
     await done(tx);
     if (sanitizedPlans.some(({ unsupportedDiscarded }) => unsupportedDiscarded)) this.unsupportedProfileDiscarded = true;
+    if (unsupportedPlanFound) this.unsupportedPlanDiscarded = true;
     unsupportedIds.forEach((id) => this.unsupportedProfileIds.add(id));
     if (unsupportedKeys.length > 0) this.unsupportedProfileDiscarded = true;
     return structuredClone(profiles);
@@ -180,6 +153,12 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
     const ids = [...this.unsupportedProfileIds];
     this.unsupportedProfileIds.clear();
     return ids;
+  }
+
+  public consumeUnsupportedPlanNotice(): boolean {
+    const discarded = this.unsupportedPlanDiscarded;
+    this.unsupportedPlanDiscarded = false;
+    return discarded;
   }
 
   private database(): Promise<IDBDatabase> {
@@ -206,13 +185,19 @@ export class IndexedDbPilotInputRepository implements PilotInputRepository {
 
 function validatePlan(value: unknown): PilotInputPlan {
   if (!isRecord(value)) throw invalid("$", "must be an object");
-  assertOnlyKeys(value, ["id", "title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt", "submissions", "profileSnapshot"], "$");
-  validatePlanIdentity(value);
-  validatePlanMaps(value);
-  validatePlanCollections(value);
-  validatePlanProfile(value);
-  validateDocumentSize(value);
-  return structuredClone(value) as unknown as PilotInputPlan;
+  if (isUnsupportedPlan(value)) throw invalid("$.schemaVersion", "uses an unsupported plan schema version");
+  assertOnlyKeys(value, ["schemaVersion", "id", "title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "updatedAt", "profileSnapshot"], "$");
+  const plan = structuredClone(value) as Record<string, unknown>;
+  validatePlanIdentity(plan);
+  validatePlanMaps(plan);
+  validatePlanCollections(plan);
+  validatePlanProfile(plan);
+  validateDocumentSize(plan);
+  return plan as unknown as PilotInputPlan;
+}
+
+function isUnsupportedPlan(value: unknown): boolean {
+  return !isRecord(value) || value.schemaVersion !== PILOT_INPUT_PLAN_SCHEMA_VERSION;
 }
 
 /** Drops only snapshots proven to use a different schema; malformed current data remains visible as an error. */
@@ -230,23 +215,6 @@ function sanitizeUnsupportedPlanProfiles(value: unknown, unsupportedIds: readonl
   if (typeof plan.selectedProfileId === "string" && unsupportedIds.includes(plan.selectedProfileId) && plan.profileSnapshot === undefined) {
     delete plan.selectedProfileId;
     changed = true;
-  }
-  if (Array.isArray(plan.submissions)) {
-    plan.submissions = plan.submissions.map((submission) => {
-      if (!isRecord(submission) || !isRecord(submission.inputs)) return submission;
-      const inputs = { ...submission.inputs };
-      if (inputs.profileSnapshot !== undefined && isUnsupportedProfile(inputs.profileSnapshot)) {
-        delete inputs.profileSnapshot;
-        delete inputs.selectedProfileId;
-        changed = true;
-        unsupportedDiscarded = true;
-      }
-      if (typeof inputs.selectedProfileId === "string" && unsupportedIds.includes(inputs.selectedProfileId) && inputs.profileSnapshot === undefined) {
-        delete inputs.selectedProfileId;
-        changed = true;
-      }
-      return { ...submission, inputs };
-    });
   }
   return { value: plan, changed, unsupportedDiscarded };
 }
@@ -280,7 +248,6 @@ function validateTextMap(value: unknown, path: string): void {
 function validatePlanCollections(value: Record<string, unknown>): void {
   validateCheckpoints(value.checkpoints);
   validateAltitudes(value.cruiseAltitudeTexts);
-  validateSubmissions(value.submissions);
 }
 
 function validateCheckpoints(value: unknown): void {
@@ -295,22 +262,8 @@ function validateCheckpoints(value: unknown): void {
 }
 
 function validateAltitudes(value: unknown): void {
-  if (!Array.isArray(value) || value.length > 100) throw invalid("$.cruiseAltitudeTexts", "must be an array of at most 100 strings");
+  if (!Array.isArray(value) || value.length !== 1) throw invalid("$.cruiseAltitudeTexts", "must contain exactly one altitude text");
   value.forEach((item, index) => assertText(item, `$.cruiseAltitudeTexts[${index}]`));
-}
-
-function validateSubmissions(value: unknown): void {
-  if (!Array.isArray(value) || value.length > MAX_SUBMISSIONS_PER_PLAN) throw invalid("$.submissions", "must contain at most 20 submissions");
-  value.forEach((item, index) => validateSubmission(item, index));
-}
-
-function validateSubmission(value: unknown, index: number): void {
-  const path = `$.submissions[${index}]`;
-  if (!isRecord(value)) throw invalid(path, "must be an object");
-  assertText(value.submittedAt, `${path}.submittedAt`);
-  if (typeof value.submittedAt !== "string" || !validUtc(value.submittedAt)) throw invalid(`${path}.submittedAt`, "must be an ISO UTC instant");
-  validateTextMap(value.rawFields, `${path}.rawFields`);
-  validateSnapshot(value.inputs);
 }
 
 function validatePlanProfile(value: Record<string, unknown>): void {
@@ -339,12 +292,6 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
 
 function validateProfile(value: unknown, now: Date): asserts value is AircraftProfile {
   validateAircraftProfile(value, now);
-}
-
-function validateSnapshot(value: unknown): void {
-  if (!isRecord(value)) throw invalid("$", "must be an object");
-  assertOnlyKeys(value, ["title", "rawFields", "selectedProfileId", "checkpoints", "cruiseAltitudeTexts", "overrideReasons", "profileSnapshot"], "$");
-  validatePlan({ ...value, id: "snapshot", updatedAt: "2026-01-01T00:00:00.000Z", submissions: [] });
 }
 
 function invalid(path: string, message: string): StorageValidationError { return new StorageValidationError([{ path, message }]); }

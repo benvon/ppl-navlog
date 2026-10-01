@@ -5,17 +5,15 @@ import {
   createAircraftProfile,
   createPlanDraft,
   createRouteDefinition,
-  reopenPlanRevision,
   restoreCruiseTasDefault,
   saveAircraftProfile,
-  saveDraftRevision,
   selectPlanWeatherForecast,
-  type NavlogPersistence,
+  type AircraftProfilePersistence,
   type UseCaseClock,
   type UseCaseIds,
 } from "./plan-use-cases";
 import type { AircraftProfile, AircraftProfileInput } from "../domain/aircraft";
-import type { AirportRoutePoint, PlanFamily, PlanRevision } from "../domain/route";
+import type { AirportRoutePoint } from "../domain/route";
 
 const fixedClock: UseCaseClock = { now: () => new Date("2026-09-21T12:00:00.000Z") };
 const ids = (...values: string[]): UseCaseIds => ({ next: () => values.shift() ?? "unexpected-id" });
@@ -33,24 +31,12 @@ const profileInput = (): AircraftProfileInput => ({
   compassDeviationTable: [],
 });
 
-class MemoryPersistence implements NavlogPersistence {
+class MemoryPersistence implements AircraftProfilePersistence {
   public readonly profiles = new Map<string, AircraftProfile>();
-  public readonly revisions = new Map<string, PlanRevision>();
-  public readonly families = new Map<string, PlanFamily>();
 
   public async saveAircraftProfile(profile: AircraftProfile): Promise<void> { this.profiles.set(profile.id, structuredClone(profile)); }
   public async getAircraftProfile(id: string): Promise<AircraftProfile | undefined> { return this.profiles.get(id); }
   public async listAircraftProfiles(): Promise<readonly AircraftProfile[]> { return [...this.profiles.values()]; }
-  public async savePlanRevision(family: PlanFamily, revision: PlanRevision): Promise<void> {
-    if (this.revisions.has(revision.id)) throw new Error("duplicate revision");
-    this.families.set(family.id, structuredClone(family));
-    this.revisions.set(revision.id, structuredClone(revision));
-  }
-  public async getPlanRevision(id: string): Promise<PlanRevision | undefined> { return this.revisions.get(id); }
-  public async listPlanRevisions(planId: string): Promise<readonly PlanRevision[]> {
-    return [...this.revisions.values()].filter((revision) => revision.planId === planId);
-  }
-  public async listPlanFamilies(): Promise<readonly PlanFamily[]> { return [...this.families.values()]; }
 }
 
 describe("plan draft use cases", () => {
@@ -126,39 +112,6 @@ describe("plan draft use cases", () => {
     expect(restoreCruiseTasDefault(overridden, "leg-1", fixedClock).route.legs[0]?.performanceOverrides).toBeUndefined();
   });
 
-  it("saves an initial revision, then appends a revised immutable child and reopens it", async () => {
-    const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupAirportCode("KORD");
-    const destination = await airports.lookupAirportCode("KJVL");
-    const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
-    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
-    const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
-    const persistence = new MemoryPersistence();
-
-    const first = await saveDraftRevision(persistence, draft, profile, ids("revision-1"), fixedClock);
-    const revised = { ...draft, title: "Updated study route", updatedAt: "2026-09-21T13:00:00.000Z" };
-    const second = await saveDraftRevision(persistence, revised, profile, ids("revision-2"), fixedClock, first.revision);
-
-    expect(second.revision.parentRevisionId).toBe(first.revision.id);
-    expect([first.revision.revisionNumber, second.revision.revisionNumber]).toEqual([1, 2]);
-    await expect(reopenPlanRevision(persistence, second.revision.id)).resolves.toMatchObject({ id: "revision-2", draftSnapshot: { title: "Updated study route" } });
-  });
-
-  it("records an explicit historical restore without creating a journal branch", async () => {
-    const airports = createLocalStudyAirportLookup();
-    const departure = await airports.lookupAirportCode("KORD");
-    const destination = await airports.lookupAirportCode("KJVL");
-    const profile = createAircraftProfile(profileInput(), ids("aircraft-1"), fixedClock);
-    const route = createRouteDefinition({ departure, checkpoints: [], destination, cruiseAltitudesFeetMsl: [4_500] }, ids("leg-1", "route-1"));
-    const draft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-1", "plan-1"), fixedClock);
-    const persistence = new MemoryPersistence();
-    const first = await saveDraftRevision(persistence, draft, profile, ids("revision-1"), fixedClock);
-    const second = await saveDraftRevision(persistence, { ...draft, title: "Newer" }, profile, ids("revision-2"), fixedClock, first.revision);
-    const restored = await saveDraftRevision(persistence, first.revision.draftSnapshot, profile, ids("revision-3"), fixedClock, second.revision, first.revision.id);
-
-    expect(restored.revision).toMatchObject({ revisionNumber: 3, parentRevisionId: second.revision.id, restoredFromRevisionId: first.revision.id });
-  });
-
   it("rejects malformed route, draft, override, revision, and airport-lookup inputs", async () => {
     const airports = createLocalStudyAirportLookup();
     const departure = await airports.lookupAirportCode("KORD");
@@ -174,8 +127,6 @@ describe("plan draft use cases", () => {
     const incompleteDraft = createPlanDraft({ title: "Study route", departureTimeUtc: "2026-10-01T12:00:00.000Z", route, selectedAircraftProfileId: profile.id, taxiRunupFuelGallons: 0, reserveFuelGallons: 3, descentTargetAltitudeFeetMsl: 1_808 }, ids("draft-5", "plan-5"), fixedClock);
     expect(incompleteDraft.fuelInputs).not.toHaveProperty("fuelAboardGallons");
     expect(() => applyCruiseTasOverride(draft, profile, "missing-leg", 0, undefined, fixedClock)).toThrow(/positive/iu);
-    await expect(saveDraftRevision(new MemoryPersistence(), draft, { ...profile, id: "wrong-aircraft" }, ids("revision-1"), fixedClock)).rejects.toThrow(/does not match/iu);
-    await expect(reopenPlanRevision(new MemoryPersistence(), "missing-revision")).rejects.toThrow(/no longer available/iu);
     expect(() => normalizeAirportCode("too-long")).toThrow(AirportLookupError);
     expect(normalizeAirportCode("1c8")).toBe("1C8");
     await expect(airports.lookupAirportCode("KAAA")).rejects.toThrow(/local study airport/iu);

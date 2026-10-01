@@ -95,20 +95,8 @@ body {
 .route-form .field-error { color: #8b1e00; font-size: 0.9rem; font-weight: 600; }
 input[aria-invalid="true"] { border-color: #8b1e00; outline-color: #8b1e00; }
 
-.planner-panel {
-  min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-panel);
-  background: var(--color-surface);
-}
-
 .profile-form label,
-.route-form label,
-.checkpoint-editor label,
-.leg-altitudes label,
-.override-form label,
-.forecast-selection label {
+.route-form label {
   display: grid;
   gap: var(--space-1);
   font-weight: 600;

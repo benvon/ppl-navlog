@@ -5,12 +5,9 @@ import {
   validateAircraftProfile,
   validateAircraftProfileSnapshot,
   validatePlanDraft,
-  validatePlanFamily,
-  validatePlanRevision,
   validateRouteDefinition,
-  validateWeatherReferenceSnapshot,
 } from "../validation";
-import { aircraftDefaultValue, aircraftProfile, planDraft, planFamily, planRevision, route, timestamp, weatherSnapshot } from "./fixtures";
+import { aircraftDefaultValue, aircraftProfile, planDraft, route, timestamp } from "./fixtures";
 
 describe("storage model validation", () => {
   it("preserves original defaults while applying and restoring a deliberate override", () => {
@@ -99,21 +96,9 @@ describe("storage model validation", () => {
     expect(() => validateRouteDefinition(nonAirportEndpoints)).toThrow(/departure airport/);
   });
 
-  it("validates snapshot, family, weather, and revision relationships at persistence boundaries", () => {
+  it("validates aircraft profile snapshots", () => {
     const fixedNow = new Date("2027-01-01T00:00:00.000Z");
     expect(validateAircraftProfileSnapshot({ profile: aircraftProfile(), snapshottedAt: timestamp }, fixedNow)).toBe(true);
-    expect(validatePlanFamily(planFamily(), fixedNow)).toBe(true);
-    expect(validateWeatherReferenceSnapshot(weatherSnapshot(), fixedNow)).toBe(true);
-    expect(validateWeatherReferenceSnapshot({ ...weatherSnapshot(), retrievedAt: "2027-01-01T00:04:59.000Z" }, fixedNow)).toBe(true);
-    expect(() => validateWeatherReferenceSnapshot({ ...weatherSnapshot(), retrievedAt: "2027-01-01T00:05:01.000Z" }, fixedNow)).toThrow(/future/u);
-    expect(validatePlanRevision(planRevision(), fixedNow)).toBe(true);
-
-    const mismatched = { ...planRevision(), planId: "other-plan" };
-    expect(() => validatePlanRevision(mismatched, fixedNow)).toThrow(/draftSnapshot.planId/);
-    const mismatchedAircraft = { ...planRevision(), aircraftProfileSnapshot: { ...planRevision().aircraftProfileSnapshot, profile: { ...planRevision().aircraftProfileSnapshot.profile, id: "other-aircraft" } } };
-    expect(() => validatePlanRevision(mismatchedAircraft, fixedNow)).toThrow(/selectedAircraftProfileId/);
-    expect(() => validateWeatherReferenceSnapshot({ ...weatherSnapshot(), payload: Number.NaN }, fixedNow)).toThrow(/payload/);
-    expect(() => validatePlanFamily({ ...planFamily(), latestRevisionId: "" }, fixedNow)).toThrow(/latestRevisionId/);
   });
 
   it("accepts a documented override while preserving its original calculated value", () => {
@@ -141,9 +126,6 @@ describe("storage model validation", () => {
     expect(() => validateAircraftProfileSnapshot({}, fixedNow)).toThrow(/profile/);
     expect(() => validateRouteDefinition({})).toThrow(/points/);
     expect(() => validatePlanDraft({}, fixedNow)).toThrow(/route/);
-    expect(() => validatePlanFamily({}, fixedNow)).toThrow(/schemaVersion/);
-    expect(() => validateWeatherReferenceSnapshot({}, fixedNow)).toThrow(/payload/);
-    expect(() => validatePlanRevision({}, fixedNow)).toThrow(/draftSnapshot/);
   });
 
   it("rejects timestamps, ranges, and collection structures outside persistence limits", () => {
@@ -152,7 +134,5 @@ describe("storage model validation", () => {
     expect(() => validateAircraftProfile({ ...profile, usableFuelGallons: -1 }, fixedNow)).toThrow(/nonnegative/);
     expect(() => validateAircraftProfile({ ...profile, createdAt: "2030-01-01T00:00:00.000Z" }, fixedNow)).toThrow(/future/);
     expect(() => validatePlanDraft({ ...planDraft(), fuelInputs: "not-an-object" }, fixedNow)).toThrow(/fuelInputs/);
-    expect(() => validatePlanRevision({ ...planRevision(), weatherSnapshotIds: "not-an-array" }, fixedNow)).toThrow(/weatherSnapshotIds/);
-    expect(() => validatePlanRevision({ ...planRevision(), warnings: [123] }, fixedNow)).toThrow(/warnings/);
   });
 });

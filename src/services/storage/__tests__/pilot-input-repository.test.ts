@@ -1,6 +1,6 @@
 import { indexedDB } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
-import { IndexedDbPilotInputRepository, MAX_CHECKPOINTS_PER_PLAN, MAX_SUBMISSIONS_PER_PLAN } from "../pilot-input-repository";
+import { IndexedDbPilotInputRepository, MAX_CHECKPOINTS_PER_PLAN, PILOT_INPUT_PLAN_SCHEMA_VERSION } from "../pilot-input-repository";
 import type { PilotInputPlan } from "../pilot-input-repository";
 import { aircraftProfile, timestamp } from "./fixtures";
 
@@ -18,50 +18,11 @@ function repo(): IndexedDbPilotInputRepository {
 function plan(): PilotInputPlan {
   const profile = aircraftProfile();
   return {
+    schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION,
     id: "plan-one", title: "Raw draft", rawFields: { "departure-icao": "1C8", "surface-weather-icao": "KORD", "selected-forecast-period": "", "taxi-fuel": "-", "plan-title": "" },
-    selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [{ name: "", coordinateText: "41." }], cruiseAltitudeTexts: ["4500", ""], overrideReasons: { "leg-1-cruise-tas": "pilot choice" },
-    updatedAt: timestamp, submissions: [],
+    selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [{ name: "", coordinateText: "41." }], cruiseAltitudeTexts: ["4500"], overrideReasons: { "leg-1-cruise-tas": "pilot choice" },
+    updatedAt: timestamp,
   };
-}
-
-function largeFields(length: number): Record<string, string> {
-  return Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`field-${index}`, "x".repeat(length)]));
-}
-
-function planWithHistory(submissions: PilotInputPlan["submissions"]): PilotInputPlan {
-  return { ...plan(), selectedProfileId: undefined, profileSnapshot: undefined, submissions };
-}
-
-function historyRecord(rawFields: Readonly<Record<string, string>>): PilotInputPlan["submissions"][number] {
-  return {
-    submittedAt: timestamp,
-    rawFields,
-    inputs: {
-      title: "Raw draft", rawFields, checkpoints: [], cruiseAltitudeTexts: [], overrideReasons: {},
-    },
-  };
-}
-
-function historyNearSizeLimit(): PilotInputPlan {
-  let fields = largeFields(1_000);
-  let submissions = Array.from({ length: 10 }, () => historyRecord(fields));
-  while (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength > 1024 * 1024 - 100) {
-    const length = Object.values(fields)[0]?.length ?? 0;
-    if (length === 0) throw new Error("Could not create a valid near-limit history fixture");
-    fields = largeFields(length - 1);
-    submissions = Array.from({ length: 10 }, () => historyRecord(fields));
-  }
-  while (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength < 1024 * 1024 - 100) {
-    const length = Object.values(fields)[0]?.length ?? 0;
-    fields = largeFields(length + 1);
-    submissions = Array.from({ length: 10 }, () => historyRecord(fields));
-    if (new TextEncoder().encode(JSON.stringify(planWithHistory(submissions))).byteLength > 1024 * 1024 - 100) {
-      fields = largeFields(length);
-      submissions = Array.from({ length: 10 }, () => historyRecord(fields));
-      break;
-    }
-  }
-  return planWithHistory(submissions);
 }
 
 afterEach(async () => {
@@ -107,6 +68,15 @@ describe("input-only pilot repository", () => {
     expect(await store.listProfiles()).toEqual([]);
   });
 
+  it("continues to reject calculated and external weather fields", async () => {
+    const store = repo(); await store.initialize();
+    const invalid = { ...plan(), calculated: { groundspeed: 100 }, weather: { metar: "KORD" } };
+
+    await expect(store.saveWorkingCopy(invalid as unknown as PilotInputPlan)).rejects.toThrow("contains unsupported fields");
+    expect(await store.listPlans()).toEqual([]);
+    expect(await store.listProfiles()).toEqual([]);
+  });
+
   it("rejects an over-limit plan when reading from storage", async () => {
     const store = repo(); await store.initialize();
     const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
@@ -117,31 +87,18 @@ describe("input-only pilot repository", () => {
     await expect(store.getPlan("plan-one")).rejects.toThrow("at most 25 checkpoints");
   });
 
-  it("rejects 26 checkpoints in a submission snapshot without changing stored data", async () => {
-    const store = repo(); await store.initialize();
-    await store.saveWorkingCopy({ ...plan(), selectedProfileId: undefined, profileSnapshot: undefined });
-    const snapshot = { ...plan(), selectedProfileId: undefined, profileSnapshot: undefined, checkpoints: Array.from({ length: MAX_CHECKPOINTS_PER_PLAN + 1 }, (_, index) => ({ name: `stop-${index}`, coordinateText: "41.0" })) };
-    const invalid = { ...planWithHistory([historyRecord({})]), submissions: [{ submittedAt: timestamp, rawFields: {}, inputs: {
-      title: snapshot.title, rawFields: snapshot.rawFields, checkpoints: snapshot.checkpoints, cruiseAltitudeTexts: [], overrideReasons: {},
-    } }] };
-
-    await expect(store.saveWorkingCopy(invalid)).rejects.toThrow("at most 25 checkpoints");
-    expect(await store.getPlan("plan-one")).toEqual({ ...plan(), selectedProfileId: undefined, profileSnapshot: undefined });
-  });
-
   it("round trips incomplete literal editor text without creating a submission", async () => {
     const store = repo(); await store.initialize();
     await store.saveWorkingCopy(plan());
     expect(await store.getPlan("plan-one")).toEqual(plan());
-    expect((await store.listPlans())[0]?.submissions).toEqual([]);
     expect(await store.listProfiles()).toEqual([aircraftProfile()]);
   });
 
-  it("removes unsupported profile attachments while preserving saved route inputs and history", async () => {
+  it("removes unsupported profile attachments while preserving the latest saved route inputs", async () => {
     const store = repo(); await store.initialize();
     const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
     const unsupported = { ...aircraftProfile(), schemaVersion: 99 };
-    const saved = { ...planWithHistory([historyRecord({})]), profileSnapshot: unsupported, selectedProfileId: unsupported.id };
+    const saved = { ...plan(), profileSnapshot: unsupported, selectedProfileId: unsupported.id };
     const idOnly = { ...plan(), id: "plan-id-only", profileSnapshot: undefined, selectedProfileId: unsupported.id };
     const snapshotRecovery = { ...plan(), id: "plan-snapshot", profileSnapshot: aircraftProfile(), selectedProfileId: unsupported.id };
     const tx = db.transaction(["pilotInputs", "aircraftProfiles"], "readwrite");
@@ -157,7 +114,7 @@ describe("input-only pilot repository", () => {
     expect(await store.listProfiles()).toEqual([{ ...aircraftProfile(), id: "profile-supported" }]);
     const plans = await store.listPlans();
     const cleaned = plans.find(({ id }) => id === saved.id);
-    expect(cleaned).toMatchObject({ rawFields: saved.rawFields, checkpoints: saved.checkpoints, submissions: saved.submissions });
+    expect(cleaned).toMatchObject({ rawFields: saved.rawFields, checkpoints: saved.checkpoints });
     expect(cleaned).not.toHaveProperty("selectedProfileId");
     expect(cleaned).not.toHaveProperty("profileSnapshot");
     expect(plans.find(({ id }) => id === idOnly.id)).not.toHaveProperty("selectedProfileId");
@@ -204,23 +161,44 @@ describe("input-only pilot repository", () => {
     expect(store.consumeUnsupportedProfileNotice()).toBe(false);
   });
 
-  it("retains only the latest bounded explicit submissions", async () => {
+  it("discards unsupported and unversioned plans while retaining current plans and exposes a one-shot notice", async () => {
     const store = repo(); await store.initialize();
-    for (let i = 0; i < MAX_SUBMISSIONS_PER_PLAN + 3; i += 1) {
-      const p = plan();
-      await store.submitInputs({ ...p, rawFields: { ...p.rawFields, "plan-title": `submission-${i}` } });
-    }
-    const submissions = (await store.getPlan("plan-one"))?.submissions ?? [];
-    expect(submissions).toHaveLength(MAX_SUBMISSIONS_PER_PLAN);
-    expect(submissions.at(-1)?.rawFields["plan-title"]).toBe("submission-22");
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const current = plan();
+    const missingVersion = { ...current, id: "old-plan" } as Record<string, unknown>;
+    delete missingVersion.schemaVersion;
+    const futureVersion = { ...current, id: "future-plan", schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION + 1 };
+    const tx = db.transaction("pilotInputs", "readwrite");
+    tx.objectStore("pilotInputs").put(current);
+    tx.objectStore("pilotInputs").put(missingVersion);
+    tx.objectStore("pilotInputs").put(futureVersion);
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => reject(tx.error); });
+
+    expect(await store.listProfiles()).toEqual([]);
+    expect(await store.listPlans()).toEqual([current]);
+    expect(store.consumeUnsupportedPlanNotice?.()).toBe(true);
+    expect(store.consumeUnsupportedPlanNotice?.()).toBe(false);
+    const read = db.transaction("pilotInputs", "readonly");
+    const [old, future] = await Promise.all(["old-plan", "future-plan"].map((id) => new Promise<unknown>((resolve, reject) => {
+      const request = read.objectStore("pilotInputs").get(id);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    })));
+    expect(old).toBeUndefined();
+    expect(future).toBeUndefined();
   });
 
-  it("preserves submitted history when a stale working copy is saved", async () => {
+  it("reports malformed persisted current plans instead of discarding them", async () => {
     const store = repo(); await store.initialize();
-    await store.submitInputs(plan());
-    await store.saveWorkingCopy({ ...plan(), rawFields: { ...plan().rawFields, "taxi-fuel": "12" }, submissions: [] });
-    expect((await store.getPlan("plan-one"))?.submissions).toHaveLength(1);
-    expect((await store.getPlan("plan-one"))?.rawFields["taxi-fuel"]).toBe("12");
+    const db = await (store as unknown as { database(): Promise<IDBDatabase> }).database();
+    const tx = db.transaction("pilotInputs", "readwrite");
+    tx.objectStore("pilotInputs").put({ ...plan(), rawFields: null });
+    await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); });
+    await expect(store.listPlans()).rejects.toThrow("rawFields");
+    expect(store.consumeUnsupportedPlanNotice()).toBe(false);
+    const read = db.transaction("pilotInputs", "readonly");
+    const stored = await new Promise<unknown>((resolve) => { const request = read.objectStore("pilotInputs").get(plan().id); request.onsuccess = () => resolve(request.result); });
+    expect(stored).toMatchObject({ schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION, rawFields: null });
   });
 
   it("does not write a plan when its selected profile reference is unavailable", async () => {
@@ -228,25 +206,6 @@ describe("input-only pilot repository", () => {
     const invalid = { ...plan(), profileSnapshot: undefined };
     await expect(store.saveWorkingCopy(invalid)).rejects.toThrow("unavailable aircraft profile");
     expect(await store.getPlan("plan-one")).toBeUndefined();
-  });
-
-  it("rejects a submission whose merged history exceeds the document limit without writing it", async () => {
-    const store = repo(); await store.initialize();
-    const oversizedOnAppend = { ...plan(), rawFields: Object.fromEntries(Array.from({ length: 90 }, (_, index) => [`field-${index}`, "x".repeat(10_000)])), selectedProfileId: undefined, profileSnapshot: undefined };
-    await expect(store.submitInputs(oversizedOnAppend)).rejects.toThrow("plan exceeds size limit");
-    expect(await store.getPlan("plan-one")).toBeUndefined();
-    expect(await store.listPlans()).toEqual([]);
-    expect(await store.listProfiles()).toEqual([]);
-  });
-
-  it("rejects a working copy when retained submissions would make the stored document unreadable", async () => {
-    const store = repo(); await store.initialize();
-    const existing = historyNearSizeLimit();
-    await store.saveWorkingCopy(existing);
-    const oversizedMerged = { ...plan(), title: "x".repeat(10_000), selectedProfileId: undefined, profileSnapshot: undefined, submissions: [] };
-    await expect(store.saveWorkingCopy(oversizedMerged)).rejects.toThrow("plan exceeds size limit");
-    expect(await store.getPlan("plan-one")).toEqual(existing);
-    expect(await store.listPlans()).toEqual([existing]);
   });
 
 });

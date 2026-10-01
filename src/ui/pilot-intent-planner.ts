@@ -10,7 +10,7 @@ import { renderCalculatedNavlog } from "./calculated-navlog";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import type { PlanDraft, PlanRevision } from "../domain/route";
 import { WindsClientError, type WindsTransportClient, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
-import { MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
+import { PILOT_INPUT_PLAN_SCHEMA_VERSION, MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 import { localDateTimeToUtcText, utcTextToLocalDateTime } from "./departure-time";
 import { PlannerPlanState, type PlannerPlanView } from "./planner-plan-state";
 
@@ -71,12 +71,14 @@ class PilotIntentPlanner {
 
   private get current(): PilotInputPlan | undefined { return this.planState.view.activeDraft; }
   private get plans(): readonly PilotInputPlan[] { return this.planState.view.savedPlans; }
-  private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}, this.current?.cruiseAltitudeTexts ?? []); }
+  private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}); }
 
   async initialize(): Promise<void> {
     try {
       await this.planState.initialize();
-      const unsupportedNotice = await this.loadProfilesAndRecoverPlan();
+      const profileNotice = await this.loadProfilesAndRecoverPlan();
+      const unsupportedNotice = this.dependencies.repository.consumeUnsupportedPlanNotice?.()
+        ? "An unsupported saved plan was discarded. Create a new plan to continue." : profileNotice;
       const selected = this.profiles.find((profile) => profile.id === this.current?.selectedProfileId);
       this.profileDraftDirty = profileDraftDiffersFromSaved(this.fields, selected);
       this.activateStage(this.current?.selectedProfileId ? "route" : "aircraft");
@@ -179,9 +181,13 @@ class PilotIntentPlanner {
       edit: ready && editingOrFailed,
       destination: ready && canNavigate,
       save: ready && editingOrFailed,
-      update: ready && canNavigate && this.localError() === undefined,
+      update: this.canStartUpdate(view) && this.localError() === undefined,
       recovery: ready && view.phase === "save-failed",
     };
+  }
+
+  private canStartUpdate(view: PlannerPlanView): boolean {
+    return !this.updating && !this.savingProfile && view.phase === "editing";
   }
 
   private syncEditorControls(lockEditing: boolean): void {
@@ -391,6 +397,10 @@ class PilotIntentPlanner {
     const route = document.createElement("section");
     route.className = "waypoint-list";
     route.append(this.el("h3", "Route checkpoints"));
+    const guidance = document.createElement("p");
+    guidance.textContent = "Add recognizable visual checkpoints from estimated TOC through estimated TOD. Keep departure and destination as the route endpoints.";
+    guidance.className = "route-checkpoint-guidance";
+    route.append(guidance);
     route.append(this.input("cruise-altitude", "Cruise altitude (feet MSL)", this.fields["cruise-altitude"] ?? ""));
     const departureDestination = checkpoints.length > 0 ? "Checkpoint 1" : "Destination";
     route.append(this.renderWaypointGroup("departure", "Departure", departureDestination, 0));
@@ -558,7 +568,7 @@ class PilotIntentPlanner {
     }
   }
   private el(tag: "h3", value: string): HTMLElement { const e = document.createElement(tag); e.textContent = value; return e; }
-  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { id: this.dependencies.ids.next(), title: "New study route", rawFields: { ...initialFields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now, submissions: [] }; }
+  private blankPlan(): PilotInputPlan { const now = this.dependencies.clock.now().toISOString(); return { schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION, id: this.dependencies.ids.next(), title: "New study route", rawFields: { ...initialFields }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now }; }
   private withIdentity(plan: PilotInputPlan): PilotInputPlan { return { ...plan, id: plan.id || this.dependencies.ids.next(), rawFields: { ...plan.rawFields }, title: plan.rawFields["plan-title"] ?? plan.title, updatedAt: this.dependencies.clock.now().toISOString() }; }
   private editDraft(plan: PilotInputPlan): void { this.planState.edit(plan); }
   private setField(name: string, value: string): void {
@@ -624,7 +634,7 @@ class PilotIntentPlanner {
   }
 
   private async update(): Promise<void> {
-    if (this.updating) return;
+    if (!this.canStartUpdate(this.planState.view)) return;
     const form = this.content.querySelector("form.route-form");
     if (form instanceof HTMLFormElement) this.captureStructured(form);
     this.result = undefined;
@@ -634,15 +644,14 @@ class PilotIntentPlanner {
     try {
       if (!this.current) throw new Error("Open a plan before updating it.");
       if (this.planState.view.phase === "save-failed") throw new Error(this.planState.view.error ?? "Save the current pilot inputs before updating the navlog.");
+      const current = this.current;
+      const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
+      this.editDraft({ ...current, profileSnapshot: selectedProfile });
       const saveResult = await this.planState.save();
       if (!saveResult.ok) throw new Error(saveResult.error ?? "Pilot inputs could not be saved; update stopped.");
       const invalid = this.localError();
       if (invalid) throw new Error(invalid);
       this.setStatus("Updating navlog…");
-      const current = this.current;
-      const selectedProfile = this.profiles.find((profile) => profile.id === current.selectedProfileId);
-      this.editDraft({ ...current, profileSnapshot: selectedProfile });
-      await this.dependencies.repository.submitInputs(this.current!);
       const { draft, profile } = await this.prepareDraft();
       this.result = await this.calculateDraft(draft, profile);
       this.inspected = undefined;
@@ -840,20 +849,8 @@ function buildWeatherSelection(departureMetarIcao: string | undefined) {
     ...(departureMetarIcao === undefined ? {} : { departureMetarIcao }),
   };
 }
-function restorePilotFields(rawFields: Readonly<Record<string, string>>, legacyCruiseAltitudes: readonly string[]): Record<string, string> {
-  const fields = {
-    ...initialFields,
-    ...rawFields,
-    "departure-metar-icao": Object.hasOwn(rawFields, "departure-metar-icao")
-      ? rawFields["departure-metar-icao"] ?? ""
-      : rawFields["surface-weather-icao"] ?? "",
-  };
-  if (!Object.hasOwn(rawFields, "cruise-altitude")) {
-    const sharedAltitude = legacyCruiseAltitudes[0];
-    fields["cruise-altitude"] = sharedAltitude !== undefined && sharedAltitude.trim() !== ""
-      && legacyCruiseAltitudes.every((text) => text.trim() === sharedAltitude.trim()) ? sharedAltitude : "";
-  }
-  return fields;
+function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record<string, string> {
+  return { ...initialFields, ...rawFields };
 }
 function weatherSelectionFromInputs(
   raw: Readonly<Record<string, string>>,

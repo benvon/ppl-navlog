@@ -18,7 +18,7 @@ Reference: [FAA PHAK Chapter 16](https://www.faa.gov/sites/faa.gov/files/18_phak
 - Use aircraft profile climb/descent rates, TAS, and fuel rates. Keep the entered descent rate; a longer required descent distance moves TOD earlier. Do not automatically increase the rate.
 - Preserve authored route, profile, fuel, and other inputs during the change.
 
-A saved plan with one repeated altitude supplies that value. A saved plan with differing leg altitudes retains its original data and requires the student to choose one cruise altitude before calculation. Store the new choice separately from historical leg-altitude entries. Do not silently choose or discard a value.
+Support only the current saved-plan schema. Discard unsupported stored plans and ask the student to create a new plan; do not migrate historical per-leg altitudes or other obsolete fields. Malformed data claiming the current schema remains a validation error.
 
 ## Real weather and rows
 
@@ -60,9 +60,17 @@ Select the destination forecast using a preliminary arrival UTC: departure UTC p
 
 Preserve the existing UI/UX structure. Keep navlog route rows compact, showing the planned inputs and calculated results needed to read the worksheet. Present detailed calculation explanations in the existing **inspector below the route lines**, reached by selecting a value. Do not expand the rows with formulas, derivations, or lengthy teaching text. The single cruise-altitude input replaces the per-waypoint altitude inputs without a broader UI redesign.
 
-The altitude column shows the single cruise-altitude assumption alongside the row's phase label. New worksheet rows do not store or display starting/ending altitude transitions. Explain the whole-phase altitude gain/loss and TOC/TOD placement in the inspector; do not invent checkpoint crossing altitudes. Historical snapshots retain their original altitude presentation.
+The altitude column shows the single cruise-altitude assumption alongside the row's phase label. Worksheet rows do not store or display starting/ending altitude transitions. Explain the whole-phase altitude gain/loss and TOC/TOD placement in the inspector; do not invent checkpoint crossing altitudes.
+
+Pre-1.0 calculated worksheets have no backward-compatibility guarantee. Only the current stable-cruise worksheet format is eligible for display and inspection. Discard unsupported calculated results from the usable view and ask the student to recalculate; do not infer missing TOC/TOD metadata or render historical altitude/endpoint formats. Preserve pilot-authored route inputs. This requires no snapshot migration or rewriting of authored data.
 
 In the inspector, show inputs, units, formulas, intermediate steps, and assumptions for each calculated value. Retain the existing source → aircraft push → steering correction explanation. Keep technical weather provenance in disclosure. Show estimates and explain comparison with actual checkpoint observations; a live in-flight tracking system is outside scope.
+
+Label generated TOC/TOD points as estimated, including points coincident with authored checkpoints; preserve authored checkpoint names. The normal walkthrough uses rounded intermediate estimates to one decimal and explains that rounded arithmetic may differ slightly from the displayed result. Keep unrounded selected values and complete traces in the collapsed technical disclosure. Weather status describes checks of the selected inputs, rather than implying a complete weather briefing.
+
+Printing is deferred to separate work.
+
+Persist pilot-entered inputs, not calculated worksheets. The current result and its inspector evidence are disposable in-memory state; input edits invalidate them, and reopening a plan requires Update navlog to obtain a fresh result. An input-only save contains no calculation snapshot or pending-calculation placeholder. There is no stored calculation/weather revision history or hidden input submission history. Save only the latest pilot inputs per plan. The inactive revision planner and its persistence writers are removed.
 
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
 
@@ -83,7 +91,7 @@ Validate required authored inputs before weather requests. Report invalid rates/
 - All checkpoints outside the interval are reported together, and row weather selection stops after the placement weather requests.
 - Coincident labels do not duplicate time/fuel; repeated coordinates retain route occurrence.
 - Invalid input fails before weather; unavailable weather and fuel shortfall remain explicit.
-- Saved authored altitude data is preserved through migration.
+- Current-format authored inputs remain saveable when incomplete; unsupported stored plan formats are discarded with a create-new-plan notice.
 
 [Issue #34](https://github.com/benvon/ppl-navlog/issues/34) separately adds authoritative learning sources at the bottom of the page.
 

@@ -1,16 +1,16 @@
 import type { PlanRevision } from "../domain/route";
 import type { NavlogInspectionSelection, NavlogInspectionField } from "./calculation-inspector";
+import { isCurrentWorksheetSnapshot } from "./current-worksheet-snapshot";
 import { wholeNumberDisplay } from "./whole-number";
 
 type RecordValue = Record<string, unknown>;
-type NavlogEndpoint = { readonly kind: "pattern-altitude-airport" | "pattern-altitude-3nm" | "field-elevation-airport"; readonly routeDistanceNauticalMiles: number };
+type NavlogEndpoint = { readonly kind: "field-elevation-airport"; readonly routeDistanceNauticalMiles: number };
 const record = (value: unknown): value is RecordValue => typeof value === "object" && value !== null && !Array.isArray(value);
 const nested = (value: unknown, key: string): RecordValue | undefined => record(value) && record(value[key]) ? value[key] : undefined;
 const number = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
 const wholeNumber = wholeNumberDisplay;
 const wholeDegrees = (value: unknown): string => wholeNumber(value);
 const wholeKnots = (value: unknown): string => wholeNumber(value);
-const wholeHundredsOfFeet = (value: unknown): string => typeof value === "number" && Number.isFinite(value) ? String(Math.round(value / 100) * 100) : "—";
 const text = (value: unknown): string => typeof value === "string" ? value : "—";
 const cell = (content: string | HTMLElement): HTMLTableCellElement => {
   const element = document.createElement("td");
@@ -28,14 +28,12 @@ export interface CalculatedNavlogViewOptions {
 
 export const renderCalculatedNavlog = (revision: PlanRevision, options: CalculatedNavlogViewOptions = {}): HTMLElement | undefined => {
   const snapshot = completeNavlogSnapshot(revision.calculationSnapshot);
-  if (snapshot === undefined) return undefined;
+  if (revision.calculationSnapshot === undefined) return undefined;
   const section = document.createElement("section");
   section.className = "calculated-navlog";
-  if (snapshot.status === "infeasible-phase-allocation") {
-    return renderInfeasibleNavlog(section, snapshot);
-  }
+  if (snapshot === undefined || !isCurrentWorksheetSnapshot(snapshot)) return renderUnsupportedNavlog(section);
   const navlog = calculatedNavlog(snapshot);
-  if (navlog === undefined) return renderIncompleteNavlog(section);
+  if (navlog === undefined) return renderUnsupportedNavlog(section);
   const phaseAllocation = nested(snapshot, "phaseAllocation");
   return renderCalculatedResult(section, navlog, revision, options, phaseAllocation?.boundaries, navlogEndpoint(phaseAllocation));
 };
@@ -48,25 +46,18 @@ const calculatedNavlog = (snapshot: RecordValue): RecordValue | undefined => {
   return snapshot.status === "calculated" && Array.isArray(navlog?.rows) && navlog.rows.every(record) ? navlog : undefined;
 };
 
-const navlogEndpoint = (phaseAllocation: RecordValue | undefined): NavlogEndpoint | undefined => {
+export const navlogEndpoint = (phaseAllocation: RecordValue | undefined): NavlogEndpoint | undefined => {
   const endpoint = nested(phaseAllocation, "navlogEndpoint");
-  return (endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "pattern-altitude-3nm" || endpoint?.kind === "field-elevation-airport")
+  return endpoint?.kind === "field-elevation-airport"
     && typeof endpoint.routeDistanceNauticalMiles === "number"
     && Number.isFinite(endpoint.routeDistanceNauticalMiles)
     ? { kind: endpoint.kind, routeDistanceNauticalMiles: endpoint.routeDistanceNauticalMiles }
     : undefined;
 };
 
-const renderInfeasibleNavlog = (section: HTMLElement, snapshot: RecordValue): HTMLElement => {
+const renderUnsupportedNavlog = (section: HTMLElement): HTMLElement => {
   const message = document.createElement("p");
-  message.textContent = "The required climb, transition, and descent distances overlap or extend beyond this route. No flyable navlog was invented.";
-  section.append(message, details("Phase allocation evidence", snapshot.phaseAllocation));
-  return section;
-};
-
-const renderIncompleteNavlog = (section: HTMLElement): HTMLElement => {
-  const message = document.createElement("p");
-  message.textContent = "The saved calculation is incomplete or cannot be displayed safely.";
+  message.textContent = "This saved calculation uses an unsupported format. Update navlog to recalculate from your pilot inputs.";
   section.append(message);
   return section;
 };
@@ -83,12 +74,12 @@ const renderCalculatedResult = (
   if (options.currentWeatherValidated) {
     const currentWeather = document.createElement("p");
     currentWeather.className = "current-weather-status";
-    currentWeather.textContent = "Current weather validated for this calculation.";
+    currentWeather.textContent = "Selected weather inputs were checked for this calculation.";
     section.append(currentWeather);
   }
   const table = document.createElement("table");
   const caption = document.createElement("caption");
-  caption.textContent = "Calculated visual flight log";
+  caption.textContent = "Estimated visual flight log";
   table.append(caption, navlogHeader());
   const body = document.createElement("tbody");
   rows.forEach((row, index) => body.append(navlogRow(row, rows, revision, index, options, boundaries, endpoint)));
@@ -111,9 +102,7 @@ const renderCalculatedResult = (
 };
 
 const fuelRequiredScope = (endpoint: NavlogEndpoint | undefined): string => {
-  if (endpoint?.kind === "pattern-altitude-airport") return "Estimated fuel required through destination at pattern altitude, including taxi/run-up and reserve";
   if (endpoint?.kind === "field-elevation-airport") return "Estimated fuel required through destination at field elevation, including taxi/run-up and reserve";
-  if (endpoint?.kind === "pattern-altitude-3nm") return "Estimated fuel required through 3 NM point, including taxi/run-up and reserve";
   return "Estimated fuel required including taxi/run-up and reserve";
 };
 
@@ -124,8 +113,7 @@ const fuelBalance = (value: unknown): string => typeof value !== "number" || !Nu
   ? "—"
   : value < 0 ? `Deficit: ${fuelAmount(Math.abs(value))} gal` : `${fuelAmount(value)} gal`;
 const endpointFuelBalance = (value: unknown, endpoint: NavlogEndpoint | undefined): string => {
-  const location = endpoint?.kind === "pattern-altitude-airport" || endpoint?.kind === "field-elevation-airport" ? "at destination"
-    : endpoint?.kind === "pattern-altitude-3nm" ? "at 3 NM point" : "at arrival";
+  const location = endpoint?.kind === "field-elevation-airport" ? "at destination" : "at arrival";
   return typeof value === "number" && Number.isFinite(value) && value < 0
     ? `Estimated deficit ${location}: ${fuelAmount(Math.abs(value))} gal`
     : `Estimated balance ${location}: ${fuelBalance(value)}`;
@@ -236,11 +224,12 @@ const navlogRow = (row: RecordValue, rows: readonly RecordValue[], revision: Pla
   return tr;
 };
 
-const navlogAltitude = (subleg: RecordValue | undefined): string => subleg?.altitudePresentation === "cruise-assumption"
-  ? wholeHundredsOfFeet(subleg.selectedCruiseAltitude)
-  : `${wholeHundredsOfFeet(subleg?.startingAltitude)} → ${wholeHundredsOfFeet(subleg?.endingAltitude)}`;
+const navlogAltitude = (subleg: RecordValue | undefined): string =>
+  typeof subleg?.selectedCruiseAltitude === "number" && Number.isFinite(subleg.selectedCruiseAltitude)
+    ? String(Math.round(subleg.selectedCruiseAltitude / 100) * 100)
+    : "—";
 
-const navlogRowLabels = (
+export const navlogRowLabels = (
   rows: readonly RecordValue[],
   revision: PlanRevision,
   rowIndex: number,
@@ -249,13 +238,12 @@ const navlogRowLabels = (
 ): { from: string; to: string; toCoordinate: unknown } => {
   const subleg = nested(rows[rowIndex], "subleg");
   const source = sourceLabels(revision, subleg);
-  const nextSubleg = nested(rows[rowIndex + 1], "subleg");
-  const end = generatedEndpoint(subleg, nextSubleg, nested(rows[rowIndex], "cumulative"), boundaries, endpoint, rowIndex, rows.length, source.to, source.toCoordinate);
+  const end = generatedEndpoint(subleg, nested(rows[rowIndex], "cumulative"), boundaries, endpoint, rowIndex, rows.length, source.to, source.toCoordinate);
   const previousSubleg = nested(rows[rowIndex - 1], "subleg");
   const previousSource = sourceLabels(revision, previousSubleg);
   const start = rowIndex === 0
     ? source.from
-    : generatedOriginLabel(previousSubleg, subleg, nested(rows[rowIndex - 1], "cumulative"), boundaries, previousSource, source.from);
+    : generatedOriginLabel(nested(rows[rowIndex - 1], "cumulative"), boundaries, previousSource, source.from);
   return { from: start, to: end, toCoordinate: source.toCoordinate };
 };
 
@@ -288,7 +276,6 @@ const inspectionCell = (
 
 const generatedEndpoint = (
   subleg: RecordValue | undefined,
-  nextSubleg: RecordValue | undefined,
   cumulative: RecordValue | undefined,
   boundaries: unknown,
   endpoint: NavlogEndpoint | undefined,
@@ -298,23 +285,18 @@ const generatedEndpoint = (
   routeEndpointCoordinate: unknown,
 ): string => {
   const phase = subleg?.phase;
-  const phaseId = subleg?.phaseId;
   const routeDistance = cumulative?.routeDistance;
   return boundaryEndpointLabel(boundaries, routeDistance, routeEndpoint, routeEndpointCoordinate)
-    ?? patternEndpointLabel(phase, routeDistance, endpoint, rowIndex, rowCount, routeEndpoint)
-    ?? legacyGeneratedEndpoint(phase, phaseId, nextSubleg)
+    ?? fieldElevationEndpointLabel(phase, routeDistance, endpoint, rowIndex, rowCount, routeEndpoint)
     ?? routeEndpoint;
 };
 
 const generatedOriginLabel = (
-  previousSubleg: RecordValue | undefined,
-  currentSubleg: RecordValue | undefined,
   previousCumulative: RecordValue | undefined,
   boundaries: unknown,
   previousSource: { readonly to: string; readonly toCoordinate: unknown },
   fallback: string,
 ): string => boundaryEndpointLabel(boundaries, previousCumulative?.routeDistance, previousSource.to, previousSource.toCoordinate)
-  ?? legacyGeneratedEndpoint(previousSubleg?.phase, previousSubleg?.phaseId, currentSubleg)
   ?? fallback;
 
 const boundaryEndpointLabel = (boundaries: unknown, routeDistance: unknown, routeEndpoint: string, routeEndpointCoordinate: unknown): string | undefined => {
@@ -337,21 +319,14 @@ const boundaryMatchesDistance = (candidate: unknown, routeDistance: number): boo
 
 const boundaryName = (candidate: unknown): string | undefined => {
   if (!record(candidate)) return undefined;
-  if (candidate.kind === "top-of-climb") return "TOC";
-  return candidate.kind === "top-of-descent" ? "TOD" : undefined;
+  if (candidate.kind === "top-of-climb") return "TOC (estimated)";
+  return candidate.kind === "top-of-descent" ? "TOD (estimated)" : undefined;
 };
 
-const patternEndpointLabel = (phase: unknown, routeDistance: unknown, endpoint: NavlogEndpoint | undefined, rowIndex: number, rowCount: number, routeEndpoint: string): string | undefined => {
+const fieldElevationEndpointLabel = (phase: unknown, routeDistance: unknown, endpoint: NavlogEndpoint | undefined, rowIndex: number, rowCount: number, routeEndpoint: string): string | undefined => {
   if (phase !== "descent" || rowIndex !== rowCount - 1 || endpoint === undefined) return undefined;
   if (typeof routeDistance !== "number" || Math.abs(endpoint.routeDistanceNauticalMiles - routeDistance) > 0.01) return undefined;
-  if (endpoint.kind === "field-elevation-airport") return `${routeEndpoint} (field elevation)`;
-  return endpoint.kind === "pattern-altitude-airport" ? `${routeEndpoint} (pattern altitude)` : "3 NM before destination (pattern altitude)";
-};
-
-const legacyGeneratedEndpoint = (phase: unknown, phaseId: unknown, nextSubleg: RecordValue | undefined): string | undefined => {
-  if (phase === "climb" && phaseId === "departure-climb" && nextSubleg?.phase === "cruise") return "TOC";
-  if (phase === "cruise" && typeof phaseId === "string" && phaseId.endsWith(":to-tod") && nextSubleg?.phaseId === "arrival-descent") return "TOD";
-  return undefined;
+  return `${routeEndpoint} (field elevation)`;
 };
 
 const sourceLabels = (revision: PlanRevision, subleg: RecordValue | undefined): { from: string; to: string; toCoordinate: unknown } => {
@@ -367,13 +342,3 @@ const coordinatesMatch = (first: unknown, second: unknown): boolean => record(fi
   && typeof second.latitude === "number" && typeof second.longitude === "number"
   && Math.abs(first.latitude - second.latitude) <= 1e-8
   && Math.abs(first.longitude - second.longitude) <= 1e-8;
-
-const details = (label: string, value: unknown): HTMLDetailsElement => {
-  const element = document.createElement("details");
-  const summary = document.createElement("summary");
-  summary.textContent = label;
-  const pre = document.createElement("pre");
-  pre.textContent = JSON.stringify(value, null, 2) ?? "Unavailable";
-  element.append(summary, pre);
-  return element;
-};

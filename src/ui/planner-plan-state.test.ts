@@ -8,6 +8,7 @@ class MemoryPlans implements PilotInputRepository {
   failWrite = false;
   failList = false;
   failRead = false;
+  unsupportedPlanNotice = false;
   readGate?: Promise<void>;
   writeGate?: Promise<void>;
   async initialize(): Promise<void> {}
@@ -28,14 +29,14 @@ class MemoryPlans implements PilotInputRepository {
     if (index < 0) this.plans.push(plan);
     else this.plans[index] = plan;
   }
-  async submitInputs(): Promise<void> {}
+  consumeUnsupportedPlanNotice(): boolean { const value = this.unsupportedPlanNotice; this.unsupportedPlanNotice = false; return value; }
   async saveProfile(): Promise<void> {}
   async listProfiles() { return []; }
 }
 
-const makePlan = (id: string, title = id): PilotInputPlan => ({
-  id, title, rawFields: { title }, checkpoints: [], cruiseAltitudeTexts: ["4500"],
-  overrideReasons: {}, updatedAt: "2026-09-29T00:00:00.000Z", submissions: [],
+const makePlan = (id: string, title = id): PilotInputPlan => ({ schemaVersion: 1,
+  id, title, rawFields: { "cruise-altitude": "4500", title }, checkpoints: [], cruiseAltitudeTexts: ["4500"],
+  overrideReasons: {}, updatedAt: "2026-09-29T00:00:00.000Z",
 });
 
 function owner(repository = new MemoryPlans()) {
@@ -162,6 +163,18 @@ describe("PlannerPlanState", () => {
     await state.requestOpen("unreadable");
     expect(state.view.activeDraft).toEqual(draft);
     expect(state.view.error).toMatch(/read failed/i);
+  });
+
+  it("asks to create a new plan when Open discards an unsupported plan", async () => {
+    const { state, repository } = owner();
+    await state.initialize();
+    const draft = state.view.activeDraft;
+    repository.unsupportedPlanNotice = true;
+    const result = await state.requestOpen("unsupported");
+    expect(result.ok).toBe(false);
+    expect(state.view.error).toContain("unsupported saved plan was discarded");
+    expect(state.view.error).toContain("Create a new plan");
+    expect(state.view.activeDraft).toEqual(draft);
   });
 
   it("ignores a second Open while the first destination read is pending", async () => {

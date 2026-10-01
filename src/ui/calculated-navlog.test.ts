@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { planRevision } from "../services/storage/__tests__/fixtures";
-import { renderCalculatedNavlog } from "./calculated-navlog";
+import { renderCalculatedNavlog as renderCurrentNavlog } from "./calculated-navlog";
 import { renderCalculationInspector } from "./calculation-inspector";
 
 const rowLabels = (rendered: HTMLElement | undefined): string[] => {
@@ -10,6 +10,54 @@ const rowLabels = (rendered: HTMLElement | undefined): string[] => {
 
 const tableCellText = (rendered: HTMLElement | undefined, cellIndex: number): string | undefined =>
   rendered?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[cellIndex]?.textContent;
+
+type FixtureRecord = Record<string, unknown>;
+const fixtureRecord = (value: unknown): FixtureRecord => typeof value === "object" && value !== null && !Array.isArray(value) ? value as FixtureRecord : {};
+
+const currentFixtureRows = (value: unknown): FixtureRecord[] => {
+  const navlog = fixtureRecord(value);
+  const originalRows = Array.isArray(navlog.rows) ? navlog.rows : [];
+  const rows = originalRows.map((value) => {
+    const row = fixtureRecord(value);
+    const subleg = fixtureRecord(row.subleg);
+    const altitude = typeof subleg.selectedCruiseAltitude === "number" ? subleg.selectedCruiseAltitude : 4500;
+    return { ...row, subleg: { ...subleg, altitudePresentation: "cruise-assumption", selectedCruiseAltitude: altitude } };
+  });
+  return rows.length > 0 ? rows : [{ subleg: { altitudePresentation: "cruise-assumption", selectedCruiseAltitude: 4500, phase: "cruise" } }];
+};
+
+const currentFixtureBoundaries = (value: unknown, endpointDistance: number): FixtureRecord[] => {
+  const allocation = fixtureRecord(fixtureRecord(value).phaseAllocation);
+  const prior = Array.isArray(allocation.boundaries) ? allocation.boundaries.map(fixtureRecord) : [];
+  return ["top-of-climb", "top-of-descent"].map((kind, index) => prior.find((boundary) => boundary.kind === kind)
+    ?? { kind, routeDistanceNauticalMiles: endpointDistance * (index === 0 ? 0.4 : 0.7) });
+};
+
+const currentFixture = <T extends { readonly calculationSnapshot?: unknown }>(revision: T): T => {
+  const snapshot = fixtureRecord(revision.calculationSnapshot);
+  const navlog = fixtureRecord(snapshot.navlog);
+  const rows = currentFixtureRows(snapshot.navlog);
+  const lastRow = fixtureRecord(rows.at(-1));
+  const cumulative = fixtureRecord(lastRow.cumulative);
+  const endpointDistance = typeof cumulative.routeDistance === "number" ? cumulative.routeDistance : 20;
+  const allocation = fixtureRecord(snapshot.phaseAllocation);
+  return {
+    ...revision,
+    calculationSnapshot: {
+      ...snapshot,
+      phaseAllocation: {
+        ...allocation,
+        transitionPolicy: "stable-cruise-altitude",
+        navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: endpointDistance },
+        boundaries: currentFixtureBoundaries(snapshot, endpointDistance),
+      },
+      navlog: { ...navlog, rows },
+    },
+  };
+};
+
+const renderCalculatedNavlog = (revision: Parameters<typeof renderCurrentNavlog>[0], options?: Parameters<typeof renderCurrentNavlog>[1]) =>
+  renderCurrentNavlog(currentFixture(revision), options);
 
 describe("calculated visual flight log generated event timing", () => {
   it("shows cruise-altitude assumption for climb and descent subleg snapshots", () => {
@@ -29,7 +77,7 @@ describe("calculated visual flight log generated event timing", () => {
       const cell = rendered!.querySelector<HTMLButtonElement>(`button[data-row-index="${rowIndex}"][data-inspect-field="altitude"]`);
       expect(cell?.textContent).toBe("4500");
       const inspector = document.createElement("div");
-      inspector.append(renderCalculationInspector(revision, { rowIndex, field: "altitude" }));
+      inspector.append(renderCalculationInspector(currentFixture(revision), { rowIndex, field: "altitude" }));
       expect(inspector.textContent).toContain("4523.6");
       expect(inspector.textContent).toContain("Result: 4500 ft MSL as shown in the navlog.");
       expect(inspector.textContent).toContain("fixed cruise-altitude assumption");
@@ -60,14 +108,14 @@ describe("calculated visual flight log generated event timing", () => {
 
     const rendered = renderCalculatedNavlog(revision);
     const labels = rowLabels(rendered);
-    expect(labels[0]).toContain("Chicago O'Hare → TOC");
-    expect(labels[1]).toContain("TOC →");
-    expect(labels[2]).toContain("TOD");
-    expect(labels[3]).toContain("TOD → Southern Wisconsin Regional (pattern altitude)");
-    expect(labels[3]).toContain("pattern altitude");
+    expect(labels[0]).toContain("Chicago O'Hare → TOC (estimated)");
+    expect(labels[1]).toContain("TOC (estimated) →");
+    expect(labels[2]).toContain("TOD (estimated)");
+    expect(labels[3]).toContain("TOD (estimated) → Southern Wisconsin Regional (field elevation)");
+    expect(labels[3]).toContain("field elevation");
     expect(rendered?.textContent).toContain("Cumulative NM");
     expect(rendered?.textContent).toContain("Cumulative ETE min");
-    expect(tableCellText(rendered, 1)).toBe("700 → 4500");
+    expect(tableCellText(rendered, 1)).toBe("4500");
     expect(tableCellText(rendered, 10)).toBe("8.2");
     expect(tableCellText(rendered, 12)).toBe("10");
     expect(tableCellText(rendered, 13)).toBe("8.2");
@@ -96,15 +144,15 @@ describe("direct route generated event labels", () => {
 
     const rendered = renderCalculatedNavlog(revision, { onInspect: vi.fn() });
     const labels = rowLabels(rendered);
-    expect(labels[0]).toContain("TOC");
-    expect(labels[1]).toContain("TOD");
-    expect(labels[2]).toContain("Southern Wisconsin Regional (pattern altitude)");
-    expect(rendered?.querySelector<HTMLButtonElement>('button[data-row-index="1"][data-inspect-field="altitude"]')?.getAttribute("aria-label")).toContain("TOC to TOD");
+    expect(labels[0]).toContain("TOC (estimated)");
+    expect(labels[1]).toContain("TOD (estimated)");
+    expect(labels[2]).toContain("Southern Wisconsin Regional (field elevation)");
+    expect(rendered?.querySelector<HTMLButtonElement>('button[data-row-index="1"][data-inspect-field="altitude"]')?.getAttribute("aria-label")).toContain("TOC (estimated) to TOD (estimated)");
   });
 });
 
 describe("field-elevation worksheet endpoint", () => {
-  it("labels the destination endpoint at field elevation and keeps legacy endpoint formats readable", () => {
+  it("labels the destination endpoint at field elevation", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
@@ -142,9 +190,9 @@ describe("generated navlog event labels", () => {
     };
 
     const labels = rowLabels(renderCalculatedNavlog(revision));
-    expect(labels[0]).toContain("Chicago O'Hare → TOC");
-    expect(labels[1]).toContain("TOC → Study checkpoint");
-    expect(labels[2]).toContain("Study checkpoint → TOD");
+    expect(labels[0]).toContain("Chicago O'Hare → TOC (estimated)");
+    expect(labels[1]).toContain("TOC (estimated) → Study checkpoint");
+    expect(labels[2]).toContain("Study checkpoint → TOD (estimated)");
   });
 
   it("shows coincident generated events and preserves a pilot checkpoint name", () => {
@@ -165,10 +213,40 @@ describe("generated navlog event labels", () => {
     };
 
     const label = renderCalculatedNavlog(revision)?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[0]?.textContent;
-    expect(label).toContain(`${checkpoint.name} / TOC / TOD`);
+    expect(label).toContain(`${checkpoint.name} / TOC (estimated) / TOD (estimated)`);
+    const heading = renderCalculationInspector(currentFixture(revision), { rowIndex: 0, field: "distance" }).querySelector("h3")!.textContent;
+    expect(heading).toBe(`Distance · ${label}`);
   });
 
-  it("keeps legacy calculated snapshots labeled for arrival", () => {
+  it("preserves an authored waypoint named TOC alongside the estimated generated TOC", () => {
+    const parent = planRevision();
+    const checkpoint = parent.draftSnapshot.route.points.find((point) => point.id === "checkpoint-1")!;
+    const revision = {
+      ...parent,
+      draftSnapshot: {
+        ...parent.draftSnapshot,
+        route: {
+          ...parent.draftSnapshot.route,
+          points: parent.draftSnapshot.route.points.map((point) => point.id === "checkpoint-1" ? { ...point, name: "TOC" } : point),
+        },
+      },
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        phaseAllocation: { boundaries: [
+          { kind: "top-of-climb", routeDistanceNauticalMiles: 20, coordinate: { latitude: Number(checkpoint.coordinate.latitude), longitude: Number(checkpoint.coordinate.longitude) } },
+        ] },
+        navlog: { rows: [
+          { subleg: { sourceLegId: "leg-1", phaseId: "departure-climb", phase: "climb", distance: 20 }, cumulative: { routeDistance: 20 } },
+        ], fuelSummary: { requiredFuel: 1, enrouteFuel: 1 } },
+      },
+    };
+
+    expect(rowLabels(renderCalculatedNavlog(revision))[0]).toContain("TOC / TOC (estimated)");
+    expect(renderCalculationInspector(currentFixture(revision), { rowIndex: 0, field: "distance" }).querySelector("h3")!.textContent)
+      .toBe(`Distance · ${rowLabels(renderCalculatedNavlog(revision))[0]}`);
+  });
+
+  it("rejects legacy calculated snapshots without showing a table", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
@@ -179,13 +257,12 @@ describe("generated navlog event labels", () => {
       },
     };
 
-    const rendered = renderCalculatedNavlog(revision);
-    expect(rendered?.querySelector<HTMLTableRowElement>("tbody tr")?.cells[0]?.textContent).not.toContain("3 NM before destination");
-    expect(rendered?.textContent).toContain("Estimated fuel required including taxi/run-up and reserve");
-    expect(rendered?.textContent).toContain("Estimated balance at arrival: 2.0 gal");
+    const rendered = renderCurrentNavlog(revision);
+    expect(rendered?.textContent).toBe("This saved calculation uses an unsupported format. Update navlog to recalculate from your pilot inputs.");
+    expect(rendered?.querySelector("table")).toBeNull();
   });
 
-  it("keeps the prior 3 NM endpoint wording for saved snapshots with that marker", () => {
+  it("rejects prior 3 NM endpoint snapshots", () => {
     const revision = {
       ...planRevision(),
       calculationSnapshot: {
@@ -197,10 +274,9 @@ describe("generated navlog event labels", () => {
       },
     };
 
-    const rendered = renderCalculatedNavlog(revision);
-    expect(rowLabels(rendered)[0]).toContain("3 NM before destination (pattern altitude)");
-    expect(rendered?.textContent).toContain("Estimated fuel required through 3 NM point");
-    expect(rendered?.textContent).toContain("Estimated balance at 3 NM point: 2.0 gal");
+    const rendered = renderCurrentNavlog(revision);
+    expect(rendered?.textContent).toContain("uses an unsupported format");
+    expect(rendered?.querySelector("table")).toBeNull();
   });
 });
 
@@ -240,7 +316,9 @@ describe("calculated visual flight log", () => {
     };
     const rendered = renderCalculatedNavlog(revision, { currentWeatherValidated: true });
     expect(rendered?.textContent).toContain("TC°");
-    expect(rendered?.textContent).toContain("Current weather validated for this calculation.");
+    expect(rendered?.textContent).toContain("Selected weather inputs were checked for this calculation.");
+    expect(rendered?.textContent).not.toContain("Current weather validated");
+    expect(rendered!.querySelector("caption")!.textContent).toBe("Estimated visual flight log");
     expect([...rendered!.querySelector<HTMLTableRowElement>("tbody tr")!.cells].slice(2, 10).map((heading) => heading.textContent)).toEqual([
       "280", "270° / 12 kt", "2", "282", "-3", "285", "1", "286",
     ]);
@@ -250,13 +328,15 @@ describe("calculated visual flight log", () => {
     expect(rendered?.textContent).not.toContain("METAR at field elevation");
     expect(rendered?.textContent).not.toContain("Raw row evidence");
     expect(rendered?.textContent).not.toContain("Phase boundaries and weather selection");
-    expect(rendered?.textContent).toContain("Estimated fuel required through destination at pattern altitude, including taxi/run-up and reserve: 10.0 gal");
+    expect(rendered?.textContent).toContain("Estimated fuel required through destination at field elevation, including taxi/run-up and reserve: 10.0 gal");
     expect(rendered?.querySelector("unsafe")).toBeNull();
   });
 
-  it("marks infeasible route phases instead of showing invented rows", () => {
+  it("rejects infeasible snapshots", () => {
     const revision = { ...planRevision(), calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { violations: [] } } };
-    expect(renderCalculatedNavlog(revision)?.textContent).toContain("No flyable navlog was invented");
+    const rendered = renderCurrentNavlog(revision);
+    expect(rendered?.textContent).toContain("uses an unsupported format");
+    expect(rendered?.querySelector("table")).toBeNull();
   });
 
   it("prominently reports insufficient usable fuel and saved stale-weather warnings", () => {
