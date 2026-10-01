@@ -1,9 +1,9 @@
-import type { MetarSuccessPayload, WindsForecastSuccessPayload, WindsStationsSuccessPayload } from "../../../worker/api/contracts";
+import type { MetarSuccessPayload } from "../../../worker/api/contracts";
 import { applyCruiseTasOverride } from "../../application/plan-use-cases";
 import type { AircraftProfile } from "../../domain/aircraft";
 import type { PlanDraft } from "../../domain/route";
 import { aircraftProfile, planDraft } from "../../services/storage/__tests__/fixtures";
-import type { MetarTransportClient, WindsTransportClient } from "../../services/weather/winds-client";
+import type { MetarTransportClient } from "../../services/weather/winds-client";
 
 /** Synthetic study data only; never use this fixture as a weather briefing or aircraft POH. */
 export const COMPLETE_FLIGHT_TIME = "2026-09-21T21:30:00.000Z";
@@ -14,27 +14,8 @@ const cache = {
   fetchedAt: COMPLETE_FLIGHT_TIME, expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200,
   servedAt: COMPLETE_FLIGHT_TIME, ttlSeconds: 1200, maxPayloadAgeSeconds: 7200, key: "synthetic-study-weather", resource: "winds-temps",
 };
-const station = { id: "BRL", name: "Synthetic study winds station", coordinates: { latitudeDeg: 40.7832, longitudeDeg: -91.1255 }, elevationFt: 698, region: "us" as const, availableForecastCycles: ["06" as const], source: "aviationweather" as const };
-const period = { stationId: "BRL", forecastCycle: "06" as const, issuedAt: "2026-09-21T18:00:00.000Z", validAt: COMPLETE_FLIGHT_FORECAST_VALID_AT, useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" };
-const provenance = { adapter: "aviationweather" as const, product: "NCEP FB Winds/Temps (legacy FD)" as const, region: "us" as const, endpoint: "https://aviationweather.gov/api/data/windtemp" as const, fetchedAt: COMPLETE_FLIGHT_TIME, cache };
 
-export const completeFlightWeatherClient: WindsTransportClient & MetarTransportClient = {
-  discoverStations: async (): Promise<WindsStationsSuccessPayload> => ({
-    stations: [station], forecasts: [period], unavailableForecastCycles: [], requestedRoute: [], provenance: [provenance], requestId: "11111111-1111-4111-8111-111111111111",
-  }),
-  fetchForecast: async (): Promise<WindsForecastSuccessPayload> => ({
-    forecast: {
-      station, ...period,
-      levels: [
-        { altitudeFt: 3000, windFromDegTrue: 270, windSpeedKt: 15, temperatureC: 2, availability: "available", raw: "2715+02" },
-        { altitudeFt: 6000, windFromDegTrue: 280, windSpeedKt: 20, temperatureC: -2, availability: "available", raw: "2820-02" },
-        { altitudeFt: 9000, windFromDegTrue: 280, windSpeedKt: 25, temperatureC: -9, availability: "available", raw: "2825-09" },
-      ],
-      rawProduct: "SYNTHETIC STUDY FB PRODUCT — not an official forecast",
-      source: "aviationweather", fetchedAt: COMPLETE_FLIGHT_TIME,
-    },
-    provenance, requestId: "22222222-2222-4222-8222-222222222222",
-  }),
+export const completeFlightWeatherClient: MetarTransportClient = {
   fetchMetar: async (): Promise<MetarSuccessPayload> => ({
     metar: {
       icao: "KORD", metarRaw: "SYNTHETIC KORD 212130Z 27010KT", wind: { raw: "27010KT", directionType: "fixed", directionDegTrue: 270, directionVariation: null, speedKt: 10, gustKt: null },
@@ -65,7 +46,7 @@ export function completeFlightDraft(): PlanDraft {
     title: "Synthetic KORD → KJVL teaching flight",
     departureTimeUtc: "2026-09-21T22:00:00.000Z",
     route: { ...base.route, legs: base.route.legs.map((leg, index) => ({ ...leg, cruiseAltitudeFeetMsl: index === 0 ? 4_500 : 5_500 })) },
-    weatherSelection: { forecastValidTimeUtc: COMPLETE_FLIGHT_FORECAST_VALID_AT, selectedAtUtc: COMPLETE_FLIGHT_TIME, surfaceWeatherIcao: "KORD" },
+    weatherSelection: { departureMetarIcao: "KORD" },
     fuelInputs: { fuelAboardGallons: 20, taxiRunupFuelGallons: 0.8, reserveFuelGallons: 3 },
     descentTargetAltitudeFeetMsl: {
       computedValue: null, effectiveValue: 808, origin: "pilot-input",

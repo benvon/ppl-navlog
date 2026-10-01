@@ -95,4 +95,4 @@ Validate required authored inputs before weather requests. Report invalid rates/
 
 [Issue #34](https://github.com/benvon/ppl-navlog/issues/34) separately adds authoritative learning sources at the bottom of the page.
 
-PR #33 implements this contract for issue #28. Broader retirement of legacy calculation engines remains issue #30. Preserve this contract when reassessing older review findings; retain necessary corrections for row input selection, route identity, validation, and arithmetic.
+PR #33 implements this contract for issue #28. Issue #30 retires the competing calculation engines; the [sequential worksheet](worksheet-calculation.md) is the sole path. Preserve this contract when reassessing older review findings; retain necessary corrections for row input selection, route identity, validation, and arithmetic.

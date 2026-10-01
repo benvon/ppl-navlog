@@ -1,7 +1,7 @@
 import type { AircraftProfile } from "../../../domain/aircraft";
 import { coordinate as makeCoordinate } from "../../../domain/coordinates";
 import type { PlanningValue } from "../../../domain/planning-value";
-import type { PlanDraft, PlanFamily, PlanRevision, RouteDefinition, WeatherReferenceSnapshot } from "../../../domain/route";
+import type { PlanDraft, WorksheetResult, RouteDefinition } from "../../../domain/route";
 
 export const timestamp = "2026-09-21T12:00:00.000Z";
 
@@ -86,29 +86,10 @@ export const planDraft = (): PlanDraft => ({
   updatedAt: timestamp,
 });
 
-export const planFamily = (): PlanFamily => ({
-  schemaVersion: 1,
-  id: "plan-1",
-  title: "KORD to KJVL study route",
-  createdAt: timestamp,
-  latestRevisionId: "revision-1",
-  latestRevisionNumber: 1,
-});
-
-export const weatherSnapshot = (): WeatherReferenceSnapshot => ({
-  schemaVersion: 1,
-  id: "weather-1",
-  retrievedAt: timestamp,
-  source: "fixture",
-  payload: { raw: "METAR KORD 211200Z" },
-});
-
-export const planRevision = (): PlanRevision => ({
+export const planRevision = (): WorksheetResult => ({
   schemaVersion: 1,
   id: "revision-1",
   planId: "plan-1",
-  revisionNumber: 1,
-  reason: "initial-save",
   createdAt: timestamp,
   draftSnapshot: planDraft(),
   aircraftProfileSnapshot: { profile: aircraftProfile(), snapshottedAt: timestamp },

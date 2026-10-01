@@ -3,7 +3,7 @@ import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { AirportLookup } from "../application/airport-lookup";
 import type { AircraftProfile } from "../domain/aircraft";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
-import type { MetarTransportClient, TafTransportClient, WindsTransportClient } from "../services/weather/winds-client";
+import type { MetarTransportClient } from "../services/weather/winds-client";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { coordinate } from "../domain/coordinates";
 import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance-course";
@@ -55,7 +55,7 @@ const ids = { next: () => `planner-id-${++idNumber}` };
 const clock = { now: () => new Date("2026-09-21T21:30:00.000Z") };
 const profile = aircraftProfile();
 
-function winds(overrides: Partial<WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): WindsTransportClient & MetarTransportClient & TafTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
+function winds(overrides: Partial<MetarTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): MetarTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
   return {
     ...completeFlightWeatherClient,
     fetchMetar: async (icao) => {
@@ -63,7 +63,6 @@ function winds(overrides: Partial<WindsTransportClient & MetarTransportClient & 
       return { ...payload, metar: { ...payload.metar, icao }, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache, key: `synthetic-metar:${icao}` } } };
     },
     fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", product: { region: "us", cycle: "06", cache: { status: "upstream_refresh", source: "upstream", ageSeconds: 0, fetchedAt: "2026-09-21T21:30:00.000Z", expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: "2026-09-21T21:30:00.000Z" } }, sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12, upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0, temperatureLowerC: 3, temperatureUpperC: 3 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
-    fetchTaf: async () => ({ stationIcao: "KJVL", issuedAt: "2026-09-21T20:00:00.000Z", validFrom: "2026-09-21T21:00:00.000Z", validUntil: "2026-09-22T03:00:00.000Z", rawTaf: "SYNTHETIC TAF", groups: [{ kind: "prevailing", fromUtc: "2026-09-21T21:00:00.000Z", untilUtc: "2026-09-22T03:00:00.000Z", windDirectionType: "fixed", windFromDegTrue: 270, windSpeedKt: 8, gustKt: null, probabilityPercent: null, raw: "SYNTHETIC prevailing" }], requestId: "55555555-5555-4555-8555-555555555555" }),
     ...overrides,
   };
 }
@@ -583,10 +582,8 @@ describe("pilot intent planner", () => {
       fetchPoint: async (query) => { callOrder.push("point"); pointQueries.push(query); return winds().fetchPoint(query); },
       fetchMetar: async (icao) => { callOrder.push("metar"); return completeFlightWeatherClient.fetchMetar(icao); },
     });
-    const discovery = vi.spyOn(client, "discoverStations").mockRejectedValue(new Error("oversized legacy discovery response (651267 bytes)"));
     const fetchPoint = vi.spyOn(client, "fetchPoint");
     const fetchMetar = vi.spyOn(client, "fetchMetar");
-    const fetchTaf = vi.spyOn(client, "fetchTaf");
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
     button(root, "Update navlog").click();
@@ -594,10 +591,8 @@ describe("pilot intent planner", () => {
 
     expect(fetchMetar).toHaveBeenCalledTimes(1);
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
-    expect(fetchTaf).not.toHaveBeenCalled();
     expect(fetchPoint).toHaveBeenCalledTimes(pointQueries.length);
     assertProgressiveWeatherQueryOrder(callOrder, pointQueries);
-    expect(discovery).not.toHaveBeenCalled();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector(".calculated-navlog")?.textContent).toContain("Selected weather inputs were checked");
     expect(root.querySelector(".calculated-navlog")?.textContent).not.toContain("BRL");
@@ -999,7 +994,6 @@ describe("pilot intent planner", () => {
   it("rejects titles over 120 trimmed characters before update and accepts 120", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const weather = winds();
-    const fetchForecast = vi.spyOn(weather, "fetchForecast");
     const fetchMetar = vi.spyOn(weather, "fetchMetar");
     const root = await mount(repository, weather);
     await makeLocallyValid(root);
@@ -1011,7 +1005,6 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(true);
     button(root, "Update navlog").click();
     await settle();
-    expect(fetchForecast).not.toHaveBeenCalled();
     expect(fetchMetar).not.toHaveBeenCalled();
 
     edit(root, "plan-title", `  ${"a".repeat(120)}  `);
@@ -1019,7 +1012,6 @@ describe("pilot intent planner", () => {
     expect(button(root, "Update navlog").disabled).toBe(false);
     button(root, "Update navlog").click();
     await settle();
-    expect(fetchForecast).not.toHaveBeenCalled();
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
     expect(repository.plans.at(-1)?.rawFields["plan-title"]).toBe(`  ${"a".repeat(120)}  `);
@@ -1280,7 +1272,6 @@ describe("pilot intent planner", () => {
   it("does not consult the legacy weather transport for a new endpoint selection", async () => {
     const repository = new MemoryInputs(); repository.profiles.push(profile);
     const client = winds();
-    const fetchForecast = vi.spyOn(client, "fetchForecast");
     const fetchMetar = vi.spyOn(client, "fetchMetar");
     const root = await mount(repository, client);
     await makeLocallyValid(root, true);
@@ -1288,7 +1279,6 @@ describe("pilot intent planner", () => {
     await settle();
     expect(root.querySelector("[data-current-result]")).not.toBeNull();
     expect(root.querySelector("[role='status']")?.textContent).toContain("Plan updated");
-    expect(fetchForecast).not.toHaveBeenCalled();
     expect(fetchMetar).toHaveBeenCalledWith("KORD");
   });
 

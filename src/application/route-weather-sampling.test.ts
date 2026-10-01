@@ -59,7 +59,7 @@ const run = async (draft = directEastboundDraft(), windAt: (query: AloftPointQue
     const selected = windAt(query);
     return answer(query, selected.direction, selected.speed);
   } }, { departureMetar: metar() });
-  return { draft, queries, solution, snapshot: solution.weather.progressiveCalculationSnapshot as unknown as TestSnapshot };
+  return { draft, queries, solution, snapshot: solution.calculationSnapshot as unknown as TestSnapshot };
 };
 const routeDistance = (draft: ReturnType<typeof directEastboundDraft>): number => draft.route.legs.reduce((sum, _leg, index) => {
   const geometry = calculateGreatCircleDistanceAndInitialCourse(draft.route.points[index]!.coordinate, draft.route.points[index + 1]!.coordinate);
@@ -82,10 +82,12 @@ describe("route weather sampling for the waypoint worksheet", () => {
     });
     expect(Date.parse(queries[1]!.plannedUtc)).toBeGreaterThan(Date.parse(departure));
     expect(snapshot.schema).toBe("complete-navlog/v1");
+    expect(solution).toMatchObject({ calculationSnapshot: expect.any(Object), weatherSnapshotIds: expect.arrayContaining([expect.stringMatching(/^point-/u)]), warnings: expect.any(Array) });
+    expect(solution.calculationSnapshot).not.toHaveProperty("progressiveCalculationSnapshot");
     expect(snapshot.phaseAllocation.navlogEndpoint.kind).toBe("field-elevation-airport");
     expect(snapshot.phaseAllocation.navlogEndpoint.routeDistanceNauticalMiles).toBeCloseTo(distance, 6);
     expect(snapshot.weather.endpointSources.destinationCruiseAltitudeForecast.plannedUtc).toBe(expectedPreliminaryUtc);
-    expect(solution.weather.departureMetarPayload?.requestId).toBe("metar-request");
+    expect(solution.departureMetarPayload.requestId).toBe("metar-request");
     const rows = snapshot.navlog.rows;
     const climbRow = rows.find((row) => row.subleg.phase === "climb")!;
     expect(climbRow.effectiveWind.wind.effectiveValue).toMatchObject({ directionFrom: 270, speed: 10 });
@@ -137,7 +139,7 @@ describe("route weather sampling for the waypoint worksheet", () => {
     expect(deficit).toBeGreaterThan(0);
     expect(summary.fuelExhaustionDeficit).toBeCloseTo(deficit, 10);
     expect(summary.reserveShortfall).toBeCloseTo(deficit + 3, 10);
-    const rendered = renderCalculatedNavlog({ ...planRevision(), draftSnapshot: draft, calculationSnapshot: solution.weather.progressiveCalculationSnapshot! });
+    const rendered = renderCalculatedNavlog({ ...planRevision(), draftSnapshot: draft, calculationSnapshot: solution.calculationSnapshot });
     expect(rendered?.textContent).toContain(`Estimated fuel exhaustion deficit: ${deficit.toFixed(1)} gal`);
     expect(rendered?.textContent).toContain(`Estimated reserve shortfall: ${(deficit + 3).toFixed(1)} gal`);
     expect(rendered?.textContent).not.toContain("estimated balance is zero");
@@ -158,6 +160,8 @@ describe("route weather sampling for the waypoint worksheet", () => {
     await expect(resolveRouteWeather(unsupported, aircraftProfile(), { fetchPoint }, { departureMetar: metar() })).rejects.toThrow(/3,000 through 53,000/u);
     const missingFuel = { ...draft, fuelInputs: { taxiRunupFuelGallons: 1, reserveFuelGallons: 3 } };
     await expect(resolveRouteWeather(missingFuel, aircraftProfile(), { fetchPoint }, { departureMetar: metar() })).rejects.toThrow(/Fuel aboard is required/u);
+    const mismatchedProfile = { ...draft, selectedAircraftProfileId: "another-profile" };
+    await expect(resolveRouteWeather(mismatchedProfile, aircraftProfile(), { fetchPoint }, { departureMetar: metar() })).rejects.toThrow(/does not match the plan draft/u);
     expect(fetchPoint).not.toHaveBeenCalled();
   });
 

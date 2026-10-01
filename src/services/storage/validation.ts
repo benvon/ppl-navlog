@@ -307,7 +307,7 @@ export function validatePlanDraft(value: unknown, now = new Date()): value is Pl
     nonNegativeNumber(value.fuelInputs.taxiRunupFuelGallons, "$.fuelInputs.taxiRunupFuelGallons", issues);
     nonNegativeNumber(value.fuelInputs.reserveFuelGallons, "$.fuelInputs.reserveFuelGallons", issues);
   }
-  validateWeatherSelection(value.weatherSelection, issues, now);
+  validateWeatherSelection(value.weatherSelection, issues);
   validatePlanningValue(value.descentTargetAltitudeFeetMsl, "$.descentTargetAltitudeFeetMsl", issues);
   if (utcInstant(value.createdAt, "$.createdAt", issues)) checkNoFutureTimestamp(value.createdAt, "$.createdAt", issues, now);
   if (utcInstant(value.updatedAt, "$.updatedAt", issues)) {
@@ -318,23 +318,14 @@ export function validatePlanDraft(value: unknown, now = new Date()): value is Pl
   return true;
 }
 
-function validateWeatherSelection(value: unknown, issues: ValidationIssue[], now: Date): void {
+function validateWeatherSelection(value: unknown, issues: ValidationIssue[]): void {
   if (value === undefined) return;
   if (!isRecord(value)) {
     add(issues, "$.weatherSelection", "must be an object");
     return;
   }
-  validateOptionalUtcInstant(value.forecastValidTimeUtc, "$.weatherSelection.forecastValidTimeUtc", issues);
-  validateOptionalUtcInstant(value.selectedAtUtc, "$.weatherSelection.selectedAtUtc", issues, now);
+  if (Object.keys(value).some((key) => key !== "departureMetarIcao")) add(issues, "$.weatherSelection", "contains unsupported fields");
   validateOptionalWeatherIcao(value.departureMetarIcao, "$.weatherSelection.departureMetarIcao", issues);
-  validateOptionalWeatherIcao(value.destinationTafIcao, "$.weatherSelection.destinationTafIcao", issues);
-  validateOptionalWeatherIcao(value.destinationMetarIcao, "$.weatherSelection.destinationMetarIcao", issues);
-  validateOptionalWeatherIcao(value.surfaceWeatherIcao, "$.weatherSelection.surfaceWeatherIcao", issues);
-}
-
-function validateOptionalUtcInstant(value: unknown, path: string, issues: ValidationIssue[], now?: Date): void {
-  if (value === undefined) return;
-  if (utcInstant(value, path, issues) && now !== undefined) checkNoFutureTimestamp(value, path, issues, now);
 }
 
 function validateOptionalWeatherIcao(value: unknown, path: string, issues: ValidationIssue[]): void {

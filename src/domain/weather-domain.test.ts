@@ -5,7 +5,6 @@ import { coordinate } from "./coordinates";
 import { feetMsl } from "./units";
 import { windAtAltitude } from "./wind";
 import { resolveWindAtAltitude } from "./weather-altitude";
-import { sampleEffectivePhaseWind } from "./weather-effective-wind";
 import { joinSurfaceWindToAloftLevels } from "./weather-surface-to-aloft";
 import { selectNearestWindsStation } from "./weather-stations";
 import { selectForecastValidTime } from "./weather-valid-time";
@@ -118,7 +117,7 @@ describe("explicit forecast valid-time selection", () => {
   });
 });
 
-describe("altitude interpolation and effective phase wind", () => {
+describe("published altitude interpolation", () => {
   const levels = [value(windAtAltitude(3000, 350, 20)), value(windAtAltitude(9000, 10, 20))];
 
   it("resolves exact levels and vector-interpolates only within the published envelope", () => {
@@ -133,30 +132,6 @@ describe("altitude interpolation and effective phase wind", () => {
     });
   });
 
-  it("samples inclusive altitude endpoints with deterministic trapezoidal vector averaging", () => {
-    const result = value(sampleEffectivePhaseWind(levels, value(feetMsl(3000)), value(feetMsl(9000))));
-    expect(result.samples).toHaveLength(5);
-    expect(result.samples.map((sample) => sample.altitude)).toEqual([3000, 4500, 6000, 7500, 9000]);
-    expect(result.samples.map((sample) => sample.weight)).toEqual([0.5, 1, 1, 1, 0.5]);
-    expect(result.wind.directionFrom).toBeCloseTo(0, 8);
-    expect(result.wind.speed).toBeCloseTo(19.696, 3);
-    expect(result.trace.warnings[0]).toContain("vector-averaged");
-  });
-
-  it("uses the same altitude samples for descent and rejects invalid sampling", () => {
-    const climb = value(sampleEffectivePhaseWind(levels, value(feetMsl(3000)), value(feetMsl(9000)), { sampleCount: 3 }));
-    const descent = value(sampleEffectivePhaseWind(levels, value(feetMsl(9000)), value(feetMsl(3000)), { sampleCount: 3 }));
-    expect(descent.samples.map((sample) => sample.altitude)).toEqual(climb.samples.map((sample) => sample.altitude));
-    expect(descent.wind).toEqual(climb.wind);
-    expect(sampleEffectivePhaseWind(levels, value(feetMsl(3000)), value(feetMsl(3000)))).toMatchObject({
-      ok: false,
-      error: { code: "INVALID_WIND_SAMPLING" },
-    });
-    expect(sampleEffectivePhaseWind(levels, value(feetMsl(3000)), value(feetMsl(9000)), { sampleCount: 1 })).toMatchObject({
-      ok: false,
-      error: { code: "INVALID_WIND_SAMPLING" },
-    });
-  });
 });
 
 describe("surface-to-aloft wind anchor", () => {
