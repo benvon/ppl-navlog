@@ -219,6 +219,9 @@ td {
   font-size: 0.875rem;
 }
 
+.learning-sources a { color: var(--color-focus); text-underline-offset: 0.15em; }
+.learning-sources a:focus-visible { outline: 3px solid var(--color-focus-ring); outline-offset: 2px; }
+
 .teaching-disclaimer {
   margin-block: var(--space-3) var(--space-4);
   padding: var(--space-3);
