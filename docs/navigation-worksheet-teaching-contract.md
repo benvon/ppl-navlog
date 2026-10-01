@@ -70,6 +70,8 @@ Label generated TOC/TOD points as estimated, including points coincident with au
 
 Printing is deferred to separate work.
 
+Persist pilot-entered inputs, not calculated worksheets. The current result and its inspector evidence are disposable in-memory state; input edits invalidate them, and reopening a plan requires Update navlog to obtain a fresh result. An input-only save contains no calculation snapshot or pending-calculation placeholder. Stored calculation/weather revision history has no product purpose and is to be retired with the inactive planner in issue #30.
+
 Deduct entered taxi/run-up fuel before airborne rows. Compare signed estimated arrival fuel with entered reserve. Zero is exhausted; a shortage remains visible alongside valid calculations.
 
 Show the fuel exhaustion deficit separately from the reserve shortfall. For estimated arrival fuel of −2 gallons and an entered reserve of 3 gallons, show 2 gallons short of completing the route and 5 gallons short of completing it with reserve. Preserve signed balances and the worksheet so the student can inspect fuel consumption.

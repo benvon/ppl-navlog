@@ -136,6 +136,7 @@ describe("plan draft use cases", () => {
     const persistence = new MemoryPersistence();
 
     const first = await saveDraftRevision(persistence, draft, profile, ids("revision-1"), fixedClock);
+    expect(first.revision.calculationSnapshot).toBeUndefined();
     const revised = { ...draft, title: "Updated study route", updatedAt: "2026-09-21T13:00:00.000Z" };
     const second = await saveDraftRevision(persistence, revised, profile, ids("revision-2"), fixedClock, first.revision);
 

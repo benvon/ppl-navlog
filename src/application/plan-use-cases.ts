@@ -250,7 +250,6 @@ export async function saveDraftRevision(
     draftSnapshot: { ...draft, updatedAt: timestamp },
     aircraftProfileSnapshot: { profile: structuredClone(profile), snapshottedAt: timestamp },
     weatherSnapshotIds: [],
-    calculationSnapshot: { status: "calculation-pending", version: "draft/v1" },
     warnings: ["This is an input-only draft revision; calculate the navlog separately before using its planning results."],
   };
   const family: PlanFamily = {

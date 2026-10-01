@@ -160,6 +160,26 @@ describe("planner shell", () => {
     expect(routeText).toContain("Entering a destination station here still treats it as a departure source");
     expect(routeText).toContain("Route-aware weather is planned");
   });
+  it("does not expose deferred printing for a current worksheet", async () => {
+    const fixture = await createCompleteFlightFixture();
+    const revision = { ...fixture.revision, calculationSnapshot: {
+      schema: "complete-navlog/v1", status: "calculated",
+      phaseAllocation: { transitionPolicy: "stable-cruise-altitude", navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: 20 },
+        boundaries: [{ kind: "top-of-climb", routeDistanceNauticalMiles: 5 }, { kind: "top-of-descent", routeDistanceNauticalMiles: 15 }] },
+      navlog: { rows: [{ subleg: { sourceLegId: "leg-1", phase: "cruise", altitudePresentation: "cruise-assumption", selectedCruiseAltitude: 4500 }, cumulative: { routeDistance: 10 } }] },
+    } };
+    const persistence = new MemoryPersistence();
+    await persistence.saveAircraftProfile(fixture.profile);
+    await persistence.savePlanRevision(fixture.family, revision);
+    const root = document.createElement("div");
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
+    await settle();
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+    expect(root.querySelector(".calculated-navlog table")).not.toBeNull();
+    expect(root.textContent).not.toContain("Print / Save PDF");
+  });
+
   it("rejects an unsupported saved calculation without displaying or printing its worksheet", async () => {
     const fixture = await createCompleteFlightFixture();
     const persistence = new MemoryPersistence();

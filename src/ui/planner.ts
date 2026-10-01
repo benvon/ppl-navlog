@@ -474,12 +474,6 @@ class Planner {
       if (calculated !== undefined) {
         section.append(calculated);
         section.append(this.renderRawWeatherEvidence());
-        if (isCalculatedRevision(this.state.currentRevision)) {
-          const print = button("Print / Save PDF", "button");
-          print.classList.add("print-navlog-action");
-          print.addEventListener("click", () => this.printCurrentRevision());
-          section.append(print);
-        }
         return section;
       }
     }
@@ -497,36 +491,6 @@ class Planner {
     section.append(scroll);
     if (this.state.draft === undefined) section.append(text("p", "Save a route draft to populate the table."));
     return section;
-  }
-
-  private printCurrentRevision(): void {
-    const revision = this.state.currentRevision;
-    if (revision === undefined) return;
-    if (!isCurrentWorksheetSnapshot(revision.calculationSnapshot)) {
-      this.feedback.textContent = "Recalculate this saved plan to create a current worksheet before printing.";
-      return;
-    }
-    const completeEvidence = revision.weatherSnapshotIds.length > 0 && revision.weatherSnapshotIds.every(
-      (id) => this.state.weatherSnapshots.some((snapshot) => snapshot.id === id),
-    );
-    const panel = this.content.querySelector<HTMLElement>('[data-region="navlog"]');
-    if (!isCalculatedRevision(revision) || !completeEvidence || panel === null) {
-      this.feedback.textContent = "Only a complete saved calculated revision with weather evidence can be printed.";
-      return;
-    }
-    this.feedback.textContent = "Opening the browser print dialog. Choose Save as PDF to create a PDF artifact.";
-    const cleanup = (): void => {
-      document.body.classList.remove("printing-navlog");
-      window.removeEventListener("afterprint", cleanup);
-    };
-    document.body.classList.add("printing-navlog");
-    window.addEventListener("afterprint", cleanup, { once: true });
-    try {
-      window.print();
-    } catch (error) {
-      cleanup();
-      this.reportError(error);
-    }
   }
 
   private renderRawWeatherEvidence(): HTMLElement {
