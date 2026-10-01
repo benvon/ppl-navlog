@@ -27,6 +27,7 @@ import { renderRevisionHistory } from "./revision-history";
 import { renderWorkspaceLayout } from "./workspace-layout";
 import { renderCalculationInspector, type NavlogInspectionSelection } from "./calculation-inspector";
 import { routeCoordinatesDistanceMidpoint } from "../application/weather-station-reference";
+import { isCurrentWorksheetSnapshot } from "./current-worksheet-snapshot";
 
 export interface PlannerDependencies {
   readonly airportLookup: AirportLookup;
@@ -460,6 +461,10 @@ class Planner {
         return section;
       }
     }
+    if (hasUnsupportedCalculation(this.state.currentRevision)) {
+      section.append(text("p", "This saved calculation uses an older worksheet format and cannot be displayed. Recalculate the saved plan to create a current worksheet."));
+      return section;
+    }
     if (this.state.currentRevision !== undefined) {
       if (this.hasUnsavedPlanInputs()) section.append(text("p", "Viewing the saved revision. Route, aircraft, altitude, or forecast edits are unsaved and cannot be calculated until saved."));
       const calculated = renderCalculatedNavlog(this.state.currentRevision, {
@@ -497,6 +502,10 @@ class Planner {
   private printCurrentRevision(): void {
     const revision = this.state.currentRevision;
     if (revision === undefined) return;
+    if (!isCurrentWorksheetSnapshot(revision.calculationSnapshot)) {
+      this.feedback.textContent = "Recalculate this saved plan to create a current worksheet before printing.";
+      return;
+    }
     const completeEvidence = revision.weatherSnapshotIds.length > 0 && revision.weatherSnapshotIds.every(
       (id) => this.state.weatherSnapshots.some((snapshot) => snapshot.id === id),
     );
@@ -541,7 +550,11 @@ class Planner {
 
   private renderInspector(): HTMLElement {
     const section = panel("Calculation Inspector", "Select a calculated worksheet value to inspect its inputs, intermediate results, and source.");
-    section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
+    if (hasUnsupportedCalculation(this.state.currentRevision)) {
+      section.append(text("p", "Recalculate this saved plan to create a current worksheet before inspecting calculated values."));
+    } else {
+      section.append(renderCalculationInspector(this.state.currentRevision, this.state.inspectedCalculation));
+    }
     return section;
   }
 
@@ -1300,9 +1313,12 @@ function firstAirport(points: readonly RoutePoint[]): AirportRoutePoint | undefi
   return first?.kind === "airport" ? first : undefined;
 }
 
+function hasUnsupportedCalculation(revision: PlanRevision | undefined): boolean {
+  return revision?.calculationSnapshot !== undefined && !isCurrentWorksheetSnapshot(revision.calculationSnapshot);
+}
+
 function isCalculatedRevision(revision: PlanRevision | undefined): boolean {
-  const snapshot = revision?.calculationSnapshot;
-  return typeof snapshot === "object" && snapshot !== null && !Array.isArray(snapshot) && "schema" in snapshot && snapshot.schema === "complete-navlog/v1" && "status" in snapshot && snapshot.status === "calculated";
+  return isCurrentWorksheetSnapshot(revision?.calculationSnapshot);
 }
 
 function lastAirport(points: readonly RoutePoint[]): AirportRoutePoint | undefined {

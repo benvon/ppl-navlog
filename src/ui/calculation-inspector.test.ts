@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { planRevision } from "../services/storage/__tests__/fixtures";
-import { renderCalculationInspector } from "./calculation-inspector";
+import { renderCalculationInspector as renderRawCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("asks to recalculate before inspecting a legacy worksheet snapshot", () => {
+    const revision = {
+      ...planRevision(),
+      calculationSnapshot: {
+        schema: "complete-navlog/v1", status: "calculated",
+        navlog: { rows: [{ subleg: { phase: "climb", startingAltitude: 1000, endingAltitude: 4500 } }] },
+      },
+    };
+    const rendered = renderRawCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
+    expect(rendered.textContent).toContain("Recalculate this navlog to inspect its current worksheet values.");
+    expect(rendered.textContent).not.toContain("1000 → 4500 ft MSL");
+    expect(renderRawCalculationInspector(revision, undefined).textContent).toContain("Recalculate this navlog to inspect its current worksheet values.");
+  });
+
   it("keeps raw precision in a closed disclosure while teaching with rounded estimates", () => {
     const rendered = renderCalculationInspector(teachingRevision(), { rowIndex: 0, field: "estimatedTimeEnroute" });
     const technical = rendered.querySelector("details")!;
@@ -22,11 +36,10 @@ describe("calculation inspector", () => {
   it("matches nearest-hundred-foot navlog altitude while retaining its unrounded values", () => {
     const revision = teachingRevision();
     const subleg = revision.calculationSnapshot.navlog.rows[0]!.subleg as Record<string, unknown>;
-    subleg.startingAltitude = 1798.3;
-    subleg.endingAltitude = 1800.2;
+    subleg.selectedCruiseAltitude = 1798.3;
     const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
-    expect(rendered.textContent).toContain("Result: 1800 → 1800 ft MSL as shown in the navlog.");
-    expect(rendered.textContent).toContain("1798.3");
+    expect(rendered.textContent).toContain("Result: 1800 ft MSL as shown in the navlog.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 1798.3 ft MSL.");
   });
   it("explains marked altitude as the fixed selected cruise-altitude assumption", () => {
     const revision = teachingRevision();
@@ -39,7 +52,7 @@ describe("calculation inspector", () => {
 
     const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "altitude" });
     expect(rendered.textContent).toContain("Result: 4500 ft MSL as shown in the navlog.");
-    expect(rendered.textContent).toContain("Stored unrounded value: 4523.6.");
+    expect(rendered.textContent).toContain("Stored unrounded value: 4523.6 ft MSL.");
     expect(rendered.textContent).toContain("fixed cruise-altitude assumption");
     expect(rendered.textContent).toContain("does not represent a row altitude transition or a crossing altitude");
     expect(rendered.textContent).not.toContain("unavailable ft to unavailable ft");
@@ -284,6 +297,30 @@ function teachingRevision() {
       }] },
     },
   };
+}
+
+function renderCalculationInspector(revision: Parameters<typeof renderRawCalculationInspector>[0], selection: Parameters<typeof renderRawCalculationInspector>[1]): HTMLElement {
+  if (revision === undefined || selection === undefined) return renderRawCalculationInspector(revision, selection);
+  const snapshot = revision.calculationSnapshot as unknown as Record<string, unknown>;
+  const navlog = snapshot.navlog as Record<string, unknown>;
+  const rows = navlog.rows as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    const subleg = row.subleg as Record<string, unknown>;
+    subleg.altitudePresentation = "cruise-assumption";
+    subleg.selectedCruiseAltitude ??= 4500;
+  }
+  const allocation = snapshot.phaseAllocation as Record<string, unknown> | undefined;
+  const boundaries = allocation?.boundaries;
+  snapshot.phaseAllocation = {
+    ...allocation,
+    transitionPolicy: "stable-cruise-altitude",
+    navlogEndpoint: { kind: "field-elevation-airport", routeDistanceNauticalMiles: 20 },
+    boundaries: Array.isArray(boundaries) && boundaries.length > 0 ? boundaries : [
+      { kind: "top-of-climb", routeDistanceNauticalMiles: 8 },
+      { kind: "top-of-descent", routeDistanceNauticalMiles: 12 },
+    ],
+  };
+  return renderRawCalculationInspector(revision, selection);
 }
 
 function teachingRevisionWithLongDecimals() {

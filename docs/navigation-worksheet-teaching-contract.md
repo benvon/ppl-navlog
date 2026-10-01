@@ -60,7 +60,9 @@ Select the destination forecast using a preliminary arrival UTC: departure UTC p
 
 Preserve the existing UI/UX structure. Keep navlog route rows compact, showing the planned inputs and calculated results needed to read the worksheet. Present detailed calculation explanations in the existing **inspector below the route lines**, reached by selecting a value. Do not expand the rows with formulas, derivations, or lengthy teaching text. The single cruise-altitude input replaces the per-waypoint altitude inputs without a broader UI redesign.
 
-The altitude column shows the single cruise-altitude assumption alongside the row's phase label. New worksheet rows do not store or display starting/ending altitude transitions. Explain the whole-phase altitude gain/loss and TOC/TOD placement in the inspector; do not invent checkpoint crossing altitudes. Historical snapshots retain their original altitude presentation.
+The altitude column shows the single cruise-altitude assumption alongside the row's phase label. Worksheet rows do not store or display starting/ending altitude transitions. Explain the whole-phase altitude gain/loss and TOC/TOD placement in the inspector; do not invent checkpoint crossing altitudes.
+
+Pre-1.0 calculated worksheets have no backward-compatibility guarantee. Only the current stable-cruise worksheet format is eligible for display and inspection. Discard unsupported calculated results from the usable view and ask the student to recalculate; do not infer missing TOC/TOD metadata or render historical altitude/endpoint formats. Preserve pilot-authored route inputs. This requires no snapshot migration or rewriting of authored data.
 
 In the inspector, show inputs, units, formulas, intermediate steps, and assumptions for each calculated value. Retain the existing source → aircraft push → steering correction explanation. Keep technical weather provenance in disclosure. Show estimates and explain comparison with actual checkpoint observations; a live in-flight tracking system is outside scope.
 

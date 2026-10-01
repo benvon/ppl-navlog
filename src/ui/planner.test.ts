@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { NavlogPersistence, UseCaseClock, UseCaseIds } from "../application/plan-use-cases";
 import type { AircraftProfile } from "../domain/aircraft";
-import type { JsonValue, PlanFamily, PlanRevision } from "../domain/route";
+import type { PlanFamily, PlanRevision } from "../domain/route";
 import type { WindsTransportClient } from "../services/weather/winds-client";
 import type { WindsForecastAvailability, WindsStation } from "../../worker/api/contracts";
 import type { BrowserPlanCalculator } from "../application/browser-plan-calculator";
@@ -44,10 +44,6 @@ function input(root: HTMLElement, id: string): HTMLInputElement {
   return element;
 }
 
-function regionText(root: HTMLElement, region: string): string {
-  return root.querySelector<HTMLElement>(`[data-region="${region}"]`)?.textContent ?? "";
-}
-
 function clickByLabel(root: HTMLElement, label: string): void {
   const routeInputs = (names: readonly string[]): void => {
     names.forEach((name) => root.querySelector<HTMLInputElement>(`#${name}`)?.dispatchEvent(new Event("input", { bubbles: true })));
@@ -61,32 +57,12 @@ function clickByLabel(root: HTMLElement, label: string): void {
   control.click();
 }
 
-function legacyMismatchedWeatherSnapshots(fixture: Awaited<ReturnType<typeof createCompleteFlightFixture>>) {
-  let found = false;
-  const snapshots = fixture.weatherSnapshots.map((snapshot) => {
-    if (typeof snapshot.payload !== "object" || snapshot.payload === null || Array.isArray(snapshot.payload)) return snapshot;
-    const payload = snapshot.payload as Record<string, JsonValue>;
-    const value = payload.surfaceToAloftInterpolation;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return snapshot;
-    const evidence = { ...(value as Record<string, JsonValue>) };
-    const metar = evidence.metar;
-    if (typeof metar !== "object" || metar === null || Array.isArray(metar)) return snapshot;
-    delete evidence.surfaceWeatherIcao;
-    evidence.airportIcao = "1C8";
-    evidence.metar = { ...(metar as Record<string, JsonValue>), icao: "KORD" };
-    found = true;
-    return { ...snapshot, payload: { ...payload, surfaceToAloftInterpolation: evidence } };
-  });
-  if (!found) throw new Error("Complete flight fixture did not include surface interpolation evidence.");
-  return snapshots;
-}
-
 describe("planner shell", () => {
   it("keeps the Calculation Inspector empty for a saved draft until a calculated value is selected", async () => {
     const persistence = new MemoryPersistence();
     const family = planFamily();
     await persistence.saveAircraftProfile(aircraftProfile());
-    await persistence.savePlanRevision(family, planRevision());
+    await persistence.savePlanRevision(family, { ...planRevision(), calculationSnapshot: undefined });
     const root = document.createElement("div");
     renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
     await settle();
@@ -184,90 +160,25 @@ describe("planner shell", () => {
     expect(routeText).toContain("Entering a destination station here still treats it as a departure source");
     expect(routeText).toContain("Route-aware weather is planned");
   });
-  it("offers browser-local PDF printing only for a complete saved revision", async () => {
+  it("rejects an unsupported saved calculation without displaying or printing its worksheet", async () => {
     const fixture = await createCompleteFlightFixture();
-    const weatherSnapshots = legacyMismatchedWeatherSnapshots(fixture);
     const persistence = new MemoryPersistence();
     await persistence.saveAircraftProfile(fixture.profile);
     await persistence.savePlanRevision(fixture.family, fixture.revision);
     const root = document.createElement("div");
     const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
-    renderPlanner(root, {
-      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
-      weatherEvidence: { getWeatherSnapshot: async (id) => weatherSnapshots.find((snapshot) => snapshot.id === id) },
-    });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
     await settle();
+    clickByLabel(root, `Open ${fixture.family.title}`);
+    await settle();
+
+    expect(root.querySelector('[data-region="navlog"]')?.textContent).toContain("older worksheet format");
+    expect(root.querySelector(".calculated-navlog")).toBeNull();
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Recalculate this saved plan");
     expect(root.textContent).not.toContain("Print / Save PDF");
-    clickByLabel(root, `Open ${fixture.family.title}`);
-    await settle();
-    const panel = root.querySelector<HTMLElement>('[data-region="navlog"]');
-    const closed = panel?.querySelector<HTMLDetailsElement>("details");
-    expect(panel).not.toBeNull();
-    expect(closed?.open).toBe(false);
-    expect(panel?.querySelectorAll(".calculated-navlog tbody tr")).toHaveLength(5);
-    expect(panel?.querySelector<HTMLButtonElement>(".navlog-value")?.textContent).toMatch(/^\d/);
-    clickByLabel(root, "Print / Save PDF");
-    expect(print).toHaveBeenCalledOnce();
-    expect(document.body.classList.contains("printing-navlog")).toBe(true);
-    expect(document.querySelector(".print-sheet")).toBeNull();
-    expect(panel?.querySelector("details")).toBe(closed);
-    expect(panel?.textContent).not.toContain("Surface METAR Unavailable");
-    window.dispatchEvent(new Event("afterprint"));
-    expect(document.body.classList.contains("printing-navlog")).toBe(false);
-    expect(document.querySelector(".print-sheet")).toBeNull();
-    if (closed == null) throw new Error("Expected a navlog disclosure.");
-    closed.open = true;
-    clickByLabel(root, "Print / Save PDF");
-    expect(print).toHaveBeenCalledTimes(2);
-    expect(closed.open).toBe(true);
-    expect(document.body.classList.contains("printing-navlog")).toBe(true);
-    window.dispatchEvent(new Event("afterprint"));
-    expect(document.body.classList.contains("printing-navlog")).toBe(false);
-    print.mockRestore();
-  });
-
-  it("refuses to print a saved revision when its referenced weather evidence is missing", async () => {
-    const fixture = await createCompleteFlightFixture();
-    const persistence = new MemoryPersistence();
-    await persistence.saveAircraftProfile(fixture.profile);
-    await persistence.savePlanRevision(fixture.family, fixture.revision);
-    const root = document.createElement("div");
-    const print = vi.spyOn(window, "print").mockImplementation(() => undefined);
-    renderPlanner(root, {
-      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
-      weatherEvidence: { getWeatherSnapshot: async () => undefined },
-    });
-    await settle();
-    clickByLabel(root, `Open ${fixture.family.title}`);
-    await settle();
-
-    clickByLabel(root, "Print / Save PDF");
-
     expect(print).not.toHaveBeenCalled();
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("weather evidence");
-    print.mockRestore();
-  });
-
-  it("clears print mode and reports a browser print error", async () => {
-    const fixture = await createCompleteFlightFixture();
-    const persistence = new MemoryPersistence();
-    await persistence.saveAircraftProfile(fixture.profile);
-    await persistence.savePlanRevision(fixture.family, fixture.revision);
-    const root = document.createElement("div");
-    const print = vi.spyOn(window, "print").mockImplementation(() => { throw new Error("print unavailable"); });
-    renderPlanner(root, {
-      airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock,
-      weatherEvidence: { getWeatherSnapshot: async (id) => fixture.weatherSnapshots.find((snapshot) => snapshot.id === id) },
-    });
-    await settle();
-    clickByLabel(root, `Open ${fixture.family.title}`);
-    await settle();
-
-    clickByLabel(root, "Print / Save PDF");
-
-    expect(print).toHaveBeenCalledOnce();
-    expect(document.body.classList.contains("printing-navlog")).toBe(false);
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("print unavailable");
+    expect(root.textContent).toContain("KORD");
+    expect(root.textContent).toContain("KJVL");
     print.mockRestore();
   });
 
@@ -1228,95 +1139,18 @@ describe("planner shell", () => {
     expect(persistence.savedRevisions.at(-1)?.draftSnapshot.weatherSelection?.forecastValidTimeUtc).toBe("2030-09-21T13:00:00.000Z");
   });
 
-  it("shows a blocked calculation, then renders a saved complete worksheet and raw weather evidence", async () => {
-    const root = document.createElement("div");
-    const persistence = new MemoryPersistence();
-    const refreshWeather = vi.fn().mockResolvedValue({ status: "blocked", reason: "infeasible-profile", message: "Route phases overlap.", warnings: [], calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { boundaries: [] } } });
-    const winds = { discoverStations: async () => plannerDiscovery([{ stationId: "BRL", forecastCycle: "06", issuedAt: "2026-09-21T18:00:00.000Z", validAt: "2026-09-22T00:00:00.000Z", useFrom: "2026-09-21T20:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z" }]) } as unknown as WindsTransportClient;
-    let attempt = 0;
-    const calculatePlan: BrowserPlanCalculator = async (_draft, _profile, parent) => {
-      attempt += 1;
-      if (attempt === 1) return { status: "blocked", reason: "weather-unavailable", message: "Selected winds are unavailable.", warnings: [] };
-      if (parent === undefined) throw new Error("Expected a saved parent revision.");
-      const revision: PlanRevision = { ...parent, id: "calculated-1", revisionNumber: parent.revisionNumber + 1, parentRevisionId: parent.id, reason: "recalculation", weatherSnapshotIds: ["weather-1"], calculationSnapshot: { schema: "complete-navlog/v1", status: "calculated", phaseAllocation: { boundaries: [] }, weather: { source: "fixture" }, navlog: { rows: [{ subleg: { sourceLegId: parent.draftSnapshot.route.legs[0]!.id, phase: "cruise", startingAltitude: 4500, endingAltitude: 4500, trueCourse: 270, distance: 20 }, effectiveWind: { wind: { effectiveValue: { directionFrom: 240, speed: 12 } } }, trueHeading: 274.25, variation: { effectiveValue: -2 }, assumptions: [], appliedOverrides: [], traces: { windTriangle: { formulaId: "wind-triangle", formulaVersion: "1.0.0", inputs: [{ name: "TAS", value: 95, unit: "knots" }], intermediateValues: [], result: { name: "True heading", value: 274.25, unit: "degrees-true" }, rounding: { calculation: "unrounded", display: "nearest degree" }, warnings: [] } } }], fuelSummary: { requiredFuel: 10, enrouteFuel: 6 } } } };
-      return { status: "saved", family: { schemaVersion: 1, id: revision.planId, title: revision.draftSnapshot.title, createdAt: revision.createdAt, latestRevisionId: revision.id, latestRevisionNumber: revision.revisionNumber }, revision, calculation: { status: "ready", routeLegs: [], weather: { snapshotIds: ["weather-1"], selectedForecastValidTimeUtc: "2026-09-22T00:00:00.000Z", phaseWindResolver: { resolveEffectiveWind: () => ({ ok: false, error: { code: "UNSUPPORTED_WIND_ALTITUDE", message: "not used", context: {} } }) }, warnings: [], provenance: { source: "fixture" } }, calculationSnapshot: revision.calculationSnapshot!, warnings: [] } };
-    };
-    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, winds, calculatePlan, refreshWeather, weatherEvidence: { getWeatherSnapshot: async () => ({ schemaVersion: 1, id: "weather-1", retrievedAt: "2026-09-21T12:00:00.000Z", source: "fixture", payload: { rawProduct: "RAW FB PRODUCT" } }) } });
-    await settle();
-    const profileForm = root.querySelector<HTMLFormElement>(".profile-form");
-    if (profileForm === null) throw new Error("Profile form was not rendered.");
-    profileForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await settle();
-    input(root, "departure-icao").value = "KORD";
-    input(root, "destination-icao").value = "KJVL";
-    clickByLabel(root, "Resolve airport endpoints");
-    await settle();
-    input(root, "departure-time").value = "2026-09-21T22:00";
-    clickByLabel(root, "Save new plan revision");
-    await settle();
-    clickByLabel(root, "Calculate complete navlog");
-    await settle();
-    expect(root.textContent).toContain("Navlog blocked: Selected winds are unavailable.");
-    clickByLabel(root, "Calculate complete navlog");
-    await settle();
-    await settle();
-    expect(root.textContent).toContain("Calculated and saved complete navlog revision calculated-1.");
-    expect(root.textContent).toContain("Estimated fuel required including taxi/run-up and reserve: 10.0 gal.");
-    expect(root.textContent).toContain("RAW FB PRODUCT");
-    const navlogTable = root.querySelector(".calculated-navlog table");
-    const inspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
-    inspectedValue?.click();
-    expect(root.querySelector(".calculated-navlog table")).toBe(navlogTable);
-    expect(root.textContent).toContain("Stored unrounded value: 274.25");
-    expect(root.textContent).toContain("Formula: wind-triangle");
-    clickByLabel(root, "Refresh weather into new revision");
-    await settle();
-    expect(root.textContent).toContain("Unavailable: Load and select a published winds period first.");
-    expect(refreshWeather).not.toHaveBeenCalled();
-    clickByLabel(root, "Load available winds periods");
-    await settle();
-    const selector = root.querySelector<HTMLSelectElement>("#selected-forecast-period");
-    if (selector === null) throw new Error("Forecast selector was not rendered.");
-    selector.value = "2026-09-22T00:00:00.000Z";
-    selector.dispatchEvent(new Event("change", { bubbles: true }));
-    const currentInspectedValue = root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]');
-    currentInspectedValue?.click();
-    input(root, "surface-weather-icao").value = "KORD";
-    input(root, "surface-weather-icao").dispatchEvent(new Event("input", { bubbles: true }));
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
-    expect(currentInspectedValue?.getAttribute("aria-pressed")).toBe("false");
-    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="refresh-weather"]')?.disabled).toBe(false);
-    expect(root.querySelector<HTMLButtonElement>('button[data-workflow-action="calculate"]')?.disabled).toBe(true);
-    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
-    expect(regionText(root, "inspector")).toContain("Stored unrounded value: 274.25");
-    clickByLabel(root, "Refresh weather into new revision");
-    await settle();
-    expect(refreshWeather).toHaveBeenCalledWith(expect.objectContaining({ id: "calculated-1" }), expect.objectContaining({ forecastValidTimeUtc: "2026-09-22T00:00:00.000Z", surfaceWeatherIcao: "KORD" }));
-    expect(root.textContent).toContain("Weather refresh blocked: Route phases overlap.");
-    expect(regionText(root, "navlog")).toContain("No flyable navlog was invented.");
-    expect(regionText(root, "inspector")).toContain("Choose a value");
-  });
-
-  it("clears inspected calculations when recalculation produces a blocked preview", async () => {
+  it("does not expose inspector values for an unsupported saved worksheet", async () => {
     const fixture = await createCompleteFlightFixture();
     const persistence = new MemoryPersistence();
     await persistence.saveAircraftProfile(fixture.profile);
     await persistence.savePlanRevision(fixture.family, fixture.revision);
     const root = document.createElement("div");
-    const calculatePlan: BrowserPlanCalculator = async () => ({ status: "blocked", reason: "infeasible-profile", message: "Route phases overlap.", warnings: [], calculationSnapshot: { schema: "complete-navlog/v1", status: "infeasible-phase-allocation", phaseAllocation: { boundaries: [] } } });
-    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock, calculatePlan });
+    renderPlanner(root, { airportLookup: createLocalStudyAirportLookup(), persistence, ids: ids(), clock });
     await settle();
     clickByLabel(root, `Open ${fixture.family.title}`);
     await settle();
-    root.querySelector<HTMLButtonElement>('button[aria-label^="Inspect trueHeading"]')?.click();
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Stored unrounded value:");
-
-    clickByLabel(root, "Calculate complete navlog");
-    await settle();
-
-    expect(root.querySelector('[data-region="navlog"]')?.textContent).toContain("No flyable navlog was invented.");
-    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Choose a value");
     expect(root.querySelector('[data-region="inspector"]')?.textContent).not.toContain("Stored unrounded value:");
+    expect(root.querySelector('[data-region="inspector"]')?.textContent).toContain("Recalculate this saved plan");
   });
 
   it("disables winds loading when an edited route endpoint has not been resolved", async () => {
