@@ -566,18 +566,25 @@ describe("pilot intent planner", () => {
   });
 
   it("marks the derived local departure control against its matching baseline", async () => {
-    const repository = new MemoryInputs();
-    const root = await mount(repository);
-    const local = root.querySelector<HTMLInputElement>("[name='departure-local']")!;
-    local.value = "2026-09-21T17:30";
-    local.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(local.dataset.unsaved).toBe("true");
-    expect(input(root, "departure-time").value).toBe("2026-09-21T22:30");
-    expect(input(root, "departure-time").dataset.unsaved).toBe("true");
-    button(root, "Save changes").click();
-    await settle();
-    expect(local.hasAttribute("data-unsaved")).toBe(false);
-    expect(input(root, "departure-time").hasAttribute("data-unsaved")).toBe(false);
+    const originalZone = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const repository = new MemoryInputs();
+      const root = await mount(repository);
+      const local = root.querySelector<HTMLInputElement>("[name='departure-local']")!;
+      local.value = "2026-09-21T17:30";
+      local.dispatchEvent(new Event("change", { bubbles: true }));
+      expect(local.dataset.unsaved).toBe("true");
+      expect(input(root, "departure-time").value).toBe("2026-09-21T22:30");
+      expect(input(root, "departure-time").dataset.unsaved).toBe("true");
+      button(root, "Save changes").click();
+      await settle();
+      expect(local.hasAttribute("data-unsaved")).toBe(false);
+      expect(input(root, "departure-time").hasAttribute("data-unsaved")).toBe(false);
+    } finally {
+      if (originalZone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalZone;
+    }
   });
 
   it("acknowledges a saved draft when the following Open read fails", async () => {
