@@ -45,6 +45,8 @@ The production Wrangler environment deploys one Worker named `ppl-navlog-product
 
 3. The job verifies that the stable tag points to a published development build from a successful `main` push CI run, with the required production configuration and unexpired artifact. It downloads the validated `dist/` artifact and deploys it **once** with `wrangler deploy --env production`. It checks static artifact identity, stable API release identity, security header, and the bound airport lookup through **each** hostname. Only after both pass does it publish the GitHub Release. The static manifest retains the `dev-<run number>` build identity; the production API reports stable `vX.Y.Z`.
 
+Each production hostname gets its own strict three-minute monotonic smoke deadline, so both checks take up to six minutes total when the first host passes. Each failed request or identity check is retried after five seconds while time remains. A request, including response-body consumption, is limited to ten seconds or the time remaining in that hostname's deadline, whichever is shorter. Workflow event-loop scheduling may add a small amount of wall-clock overhead around the six-minute smoke budget.
+
 If a deploy or smoke step fails, the manually pushed stable tag remains but no GitHub Release is created. The Worker may already be serving the attempted version, so inspect both hostnames and roll back the `ppl-navlog-production` Worker in Cloudflare if needed; Cloudflare rollback restores the selected Worker version across its custom domains. Investigate before rerunning that workflow. The first deploy has no prior production version to restore. Production has not been deployed by adding this workflow.
 
 ## References
