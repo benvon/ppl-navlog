@@ -74,6 +74,7 @@ function aviationWeatherFetch(fetches: Request[]): typeof globalThis.fetch {
 
 function env(overrides: Partial<Env> = {}): Env {
   return {
+    APP_ENV: 'local',
     APP_VERSION: 'v0.1.0',
     APP_COMMIT_SHA: 'abcdef1',
     ASSETS: { async fetch() { return new Response('asset'); } },
