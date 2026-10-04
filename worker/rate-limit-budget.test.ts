@@ -58,12 +58,17 @@ describe("production deployment configuration", () => {
 
 
 describe("API environment configuration", () => {
-  it("identifies local mode explicitly and keeps deployed environments protected", () => {
+  it("cannot enable the local bypass in a default deploy and opts into it only for local dev", () => {
     const config = JSON.parse(readFileSync(resolve(process.cwd(), "wrangler.jsonc"), "utf8")) as {
-      vars: { APP_ENV?: string };
+      vars?: { APP_ENV?: string };
       env: Record<string, { vars: { APP_ENV: string }; ratelimits: Array<{ name: string }> }>;
     };
-    expect(config.vars.APP_ENV).toBe("local");
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(config.vars?.APP_ENV).not.toBe("local");
+    expect(pkg.scripts.dev).toContain("wrangler dev --local --var APP_ENV:local");
+    expect(pkg.scripts["dev:worker"]).toContain("wrangler dev --local --var APP_ENV:local");
     for (const name of ["development", "production"]) {
       const deployed = config.env[name]!;
       expect(deployed.vars.APP_ENV).toBe(name);
