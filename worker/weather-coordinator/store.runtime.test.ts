@@ -75,6 +75,7 @@ describe('SQLite-backed weather budget in workerd', () => {
     await call('fail', 'winds:alaska:12', { now: start + 2, generation: Number(b.generation), providerRetryAt: start + 90_000, objectId: 404 });
     expect((await call('cooldown', 'winds:us:12', { objectId: 404 })).cooldown).toBe('operator_required');
     expect((await call('reserve', 'winds:hawaii:06', { now: start + 5, objectId: 404 })).allowed).toBe(false);
+    expect((await call('metadata', 'winds:us:12', { objectId: 404 })).attempts24h).toBe(2);
   });
 
 
@@ -91,6 +92,60 @@ describe('SQLite-backed weather budget in workerd', () => {
     const next = await call('reserve', 'winds:hawaii:12', { now: 1_800_400_000_000, objectId });
     expect(next.allowed).toBe(true);
     expect((await call('state', 'winds:hawaii:12', { objectId })).leaseUntilMs).toBe(1_800_500_030_100);
+  });
+
+
+  it('publish_rejects_when_shared_clock_advanced_past_lease', async () => {
+    const start = 1_800_600_000_000; const objectId = 707; const key = 'station-catalog:v1';
+    const first = await call('reserve', key, { now: start, objectId });
+    await call('reserve', 'winds:us:06', { now: start + 31_000, objectId });
+    const resource = { kind: 'catalog', key, metadata: { fetchedAt: new Date(start).toISOString(), checkedAt: new Date(start).toISOString(), refreshAfter: new Date(start + 86_400_000).toISOString(), staleUntil: new Date(start + 86_520_000).toISOString() }, entries: [{ iataId: 'ABC', info: { name: null, coordinates: { latitudeDeg: 1, longitudeDeg: 2 }, elevationFt: null } }] };
+    expect((await call('publish', key, { now: start, generation: Number(first.generation), resource, objectId })).published).toBe(false);
+  });
+  it('catalog_and_overall_rolling_limits_do_not_debit_on_denial', async () => {
+    const catalogStart = 1_800_700_000_000; const objectId = 808;
+    const catalog = { kind: 'catalog', key: 'station-catalog:v1', metadata: { fetchedAt: new Date(catalogStart).toISOString(), checkedAt: new Date(catalogStart).toISOString(), refreshAfter: new Date(catalogStart + 86_400_000).toISOString(), staleUntil: new Date(catalogStart + 86_520_000).toISOString() }, entries: [{ iataId: 'ABC', info: { name: null, coordinates: { latitudeDeg: 1, longitudeDeg: 2 }, elevationFt: null } }] };
+    for (let index = 0; index < 4; index += 1) { const r = await call('reserve', 'station-catalog:v1', { now: catalogStart, objectId }); expect(r.allowed).toBe(true); expect((await call('publish', 'station-catalog:v1', { now: catalogStart, generation: Number(r.generation), resource: catalog, objectId })).published).toBe(true); }
+    const catalogDenied = await call('reserve', 'station-catalog:v1', { now: catalogStart, objectId }); expect(catalogDenied.allowed).toBe(false);
+    expect((await call('metadata', 'station-catalog:v1', { now: catalogStart, objectId })).attempts24h).toBe(4);
+    const totalId = 809; const start = 1_800_800_000_000;
+    const keys = ['winds:us:06','winds:us:12','winds:us:24','winds:alaska:06','winds:alaska:12','winds:alaska:24','winds:hawaii:06','winds:hawaii:12','winds:hawaii:24','station-catalog:v1'];
+    for (let round = 0; round < 2; round += 1) for (const key of keys) {
+      const r = await call('reserve', key, { now: start, objectId: totalId }); expect(r.allowed).toBe(true);
+      const checkedAt = new Date(start).toISOString();
+      const resource = key === 'station-catalog:v1' ? catalog : { kind: 'winds', key, metadata: { fetchedAt: checkedAt, checkedAt, refreshAfter: new Date(start + 3_600_000).toISOString(), staleUntil: new Date(start + 3_720_000).toISOString() }, rawProduct: 'x', forecasts: [{ stationId: 'ABC', forecastCycle: key.slice(-2), issuedAt: checkedAt, validAt: checkedAt, useFrom: checkedAt, useUntil: new Date(start + 3_600_000).toISOString(), levels: [] }] };
+      expect((await call('publish', key, { now: start, generation: Number(r.generation), resource, objectId: totalId })).published).toBe(true);
+    }
+    expect((await call('reserve', 'winds:us:06', { now: start, objectId: totalId })).allowed).toBe(false);
+    expect((await call('metadata', 'winds:us:06', { now: start, objectId: totalId })).attempts24h).toBe(20);
+  });
+
+
+  it('ordinary_provider_cooldown_survives_store_restart', async () => {
+    const start = 1_800_900_000_000; const objectId = 909;
+    const first = await call('reserve', 'winds:us:06', { now: start, objectId });
+    await call('fail', 'winds:us:06', { now: start + 1, generation: Number(first.generation), providerRetryAt: start + 90_000, objectId });
+    expect((await call('cooldown', 'winds:us:06', { objectId })).cooldown).toBe(start + 90_000);
+    await mf.dispose();
+    mf = new Miniflare({ scriptPath: join(tempDir, 'worker.mjs'), modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-07-30', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
+    expect((await call('cooldown', 'winds:us:06', { objectId })).cooldown).toBe(start + 90_000);
+    const denied = await call('reserve', 'winds:alaska:06', { now: start + 10_000, objectId });
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAtMs).toBe(start + 90_000);
+  });
+  it('failure_preserves_previous_valid_resource_and_regressed_winds', async () => {
+    const start = 1_801_000_000_000; const objectId = 1001; const key = 'winds:us:06';
+    const checked = new Date(start).toISOString();
+    const original = { kind: 'winds', key, metadata: { fetchedAt: checked, checkedAt: checked, refreshAfter: new Date(start + 3_600_000).toISOString(), staleUntil: new Date(start + 3_720_000).toISOString() }, rawProduct: 'newer', forecasts: [{ stationId: 'ABC', forecastCycle: '06', issuedAt: checked, validAt: checked, useFrom: checked, useUntil: new Date(start + 3_600_000).toISOString(), levels: [] }] };
+    const first = await call('reserve', key, { now: start, objectId });
+    expect((await call('publish', key, { now: start, generation: Number(first.generation), resource: original, objectId })).published).toBe(true);
+    await call('fail', key, { now: start + 1, generation: Number(first.generation), objectId });
+    expect(((await call('read', key, { objectId })).resource as { rawProduct: string }).rawProduct).toBe('newer');
+    const retryAt = start + 60_001; const second = await call('reserve', key, { now: retryAt, objectId });
+    const oldIssue = new Date(start - 3_600_000).toISOString(); const checked2 = new Date(retryAt).toISOString();
+    const regressed = { ...original, metadata: { fetchedAt: checked2, checkedAt: checked2, refreshAfter: new Date(retryAt + 3_600_000).toISOString(), staleUntil: new Date(retryAt + 3_720_000).toISOString() }, rawProduct: 'older', forecasts: [{ ...original.forecasts[0], issuedAt: oldIssue }] };
+    expect((await call('publish', key, { now: retryAt, generation: Number(second.generation), resource: regressed, objectId })).published).toBe(false);
+    expect(((await call('read', key, { objectId })).resource as { rawProduct: string }).rawProduct).toBe('newer');
   });
 
 });

@@ -2,8 +2,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ppl-navlog-weather-coordinator-dev",
   "main": "worker/weather-coordinator/index.ts",
-  "compatibility_date": "2026-10-05",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2026-09-21",
   "durable_objects": { "bindings": [{ "name": "WEATHER_BUDGET", "class_name": "WeatherBudgetCoordinator" }] },
+  "workers_dev": false,
+  "preview_urls": false,
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WeatherBudgetCoordinator"] }]
 }

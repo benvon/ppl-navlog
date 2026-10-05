@@ -16,7 +16,7 @@ export class WeatherBudgetTestHarness {
     if (body.op === 'fault') { await this.store.readAccountingMetadata(); this.sql.exec("CREATE TRIGGER fail_debit BEFORE INSERT ON attempts BEGIN SELECT RAISE(ABORT, 'storage fault'); END"); return Response.json({ ok: true }); }
     if (body.op === 'corrupt') { this.sql.exec('INSERT OR REPLACE INTO resources(resource_key,generation,envelope) VALUES(?,?,?)', key, 1, '{'); return Response.json({ ok: true }); }
     if (body.op === 'read') return Response.json({ resource: await this.store.readResource(key) ?? null });
-    if (body.op === 'publish') return Response.json({ published: await this.store.publishResource(key, Number(body.generation), body.resource as WeatherResourceEnvelope) });
+    if (body.op === 'publish') return Response.json({ published: await this.store.publishResource(key, Number(body.generation), body.resource as WeatherResourceEnvelope, Number(body.now)) });
     if (body.op === 'fail') { await this.store.recordFailure(key, Number(body.generation), Number(body.now), body.providerRetryAt as number | 'operator_required' | undefined); return Response.json({ ok: true }); }
     return new Response('bad op', { status: 400 });
   }
