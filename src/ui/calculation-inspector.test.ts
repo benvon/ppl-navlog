@@ -3,6 +3,19 @@ import { planRevision } from "../services/storage/__tests__/fixtures";
 import { renderCalculationInspector as renderRawCalculationInspector } from "./calculation-inspector";
 
 describe("calculation inspector", () => {
+  it("identifies stale product and catalog provenance with separate grace deadlines", () => {
+    const revision = teachingRevision();
+    const snapshot = revision.calculationSnapshot as unknown as Record<string, unknown>;
+    snapshot.weather = { ...snapshot.weather as object, resourceProvenance: [{
+      product: { status: "stale_on_error", checkedAt: "2026-09-21T21:00:00.000Z", refreshAfter: "2026-09-21T22:00:00.000Z", staleUntil: "2026-09-21T22:02:00.000Z" },
+      catalog: { status: "kv_hit", checkedAt: "2026-09-20T21:00:00.000Z", refreshAfter: "2026-09-21T21:00:00.000Z", staleUntil: "2026-09-21T21:02:00.000Z" },
+    }] };
+    const rendered = renderCalculationInspector(revision, { rowIndex: 0, field: "wind" });
+    expect(rendered.textContent).toContain("Winds product used grace");
+    expect(rendered.textContent).toContain("Station catalog checked");
+    expect(rendered.textContent).toContain("2026-09-21T22:02:00.000Z");
+    expect(rendered.textContent).toContain("2026-09-21T21:02:00.000Z");
+  });
   it("asks to recalculate before inspecting a legacy worksheet snapshot", () => {
     const revision = {
       ...planRevision(),

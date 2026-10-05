@@ -79,7 +79,21 @@ function appendSelectedCalculation(section: HTMLElement, heading: HTMLElement, r
   appendTrace(technical, selectedTrace(row, selection.field));
   appendProvenance(technical, selectedProvenance(row, selection.field));
   appendEndpointSources(technical, revision);
+  appendWeatherResourceProvenance(technical, revision);
   section.append(technical);
+}
+
+function appendWeatherResourceProvenance(section: HTMLElement, revision: WorksheetResult | undefined): void {
+  const weather = nested(revision?.calculationSnapshot, "weather");
+  const rawResources = weather?.resourceProvenance;
+  const resources = Array.isArray(rawResources) ? rawResources : record(rawResources) ? [rawResources] : [];
+  for (const [key, label] of [["product", "Winds product"], ["catalog", "Station catalog"]] as const) {
+    const entries = resources.map((item) => nested(item, key)).filter((item): item is RecordValue => item !== undefined);
+    if (entries.length === 0) continue;
+    const selected = entries.find((entry) => entry.status === "stale_on_error") ?? entries[0]!;
+    const grace = selected.status === "stale_on_error";
+    section.append(paragraph(`${label}${grace ? " used grace" : " checked"}; checked ${String(selected.checkedAt ?? "unknown")}; refresh after ${String(selected.refreshAfter ?? "unknown")}; grace until ${String(selected.staleUntil ?? "unknown")}.`));
+  }
 }
 
 function appendSupportingHeadingTraces(section: HTMLElement, row: RecordValue, field: NavlogInspectionField): void {

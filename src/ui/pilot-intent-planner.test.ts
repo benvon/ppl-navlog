@@ -54,6 +54,15 @@ let idNumber = 0;
 const ids = { next: () => `planner-id-${++idNumber}` };
 const clock = { now: () => new Date("2026-09-21T21:30:00.000Z") };
 const profile = aircraftProfile();
+const testWeatherCache = (kind: "winds" | "catalog") => {
+  const now = Date.now(), ttlSeconds = kind === "winds" ? 3600 : 86400;
+  const checkedAt = new Date(now).toISOString(), refreshAfter = new Date(now + ttlSeconds * 1000).toISOString();
+  return { status: "upstream_refresh" as const, source: "upstream" as const, ageSeconds: 0,
+    fetchedAt: checkedAt, checkedAt, refreshAfter, staleUntil: new Date(now + (ttlSeconds + 120) * 1000).toISOString(),
+    expiresAt: refreshAfter, freshnessRemainingSeconds: ttlSeconds, servedAt: checkedAt, ttlSeconds,
+    maxPayloadAgeSeconds: ttlSeconds + 120,
+    key: kind === "winds" ? "winds:us:06" : "station-catalog:v1", resource: kind === "winds" ? "winds-temps" : "station-catalog" };
+};
 
 function winds(overrides: Partial<MetarTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> }> = {}): MetarTransportClient & { fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> } {
   return {
@@ -62,7 +71,7 @@ function winds(overrides: Partial<MetarTransportClient & { fetchPoint(query: Alo
       const payload = await completeFlightWeatherClient.fetchMetar(icao);
       return { ...payload, metar: { ...payload.metar, icao }, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache, key: `synthetic-metar:${icao}` } } };
     },
-    fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", product: { region: "us", cycle: "06", cache: { status: "upstream_refresh", source: "upstream", ageSeconds: 0, fetchedAt: "2026-09-21T21:30:00.000Z", expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: "2026-09-21T21:30:00.000Z" } }, sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12, upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0, temperatureLowerC: 3, temperatureUpperC: 3 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
+    fetchPoint: async (query) => ({ query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3, issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z", forecastCycle: "06", product: { region: "us", cycle: "06", cache: testWeatherCache("winds") }, catalog: { cache: testWeatherCache("catalog") }, sources: [{ stationId: "BRL", latitudeDeg: 40.7832, longitudeDeg: -91.1255, distanceNauticalMiles: 0, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12, upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: query.altitudeFeetMsl, temperatureUpperAltitudeFeet: query.altitudeFeetMsl, temperatureVerticalWeight: 0, temperatureLowerC: 3, temperatureUpperC: 3 }], method: "station-level", requestId: "44444444-4444-4444-8444-444444444444" }),
     ...overrides,
   };
 }

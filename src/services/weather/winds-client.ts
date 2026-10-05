@@ -14,6 +14,7 @@ import { canonicalPointCoordinateDegrees } from "../../domain/coordinates";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
+const WEATHER_REQUEST_TIMEOUT_MS = 20_000;
 const UTC_MILLISECONDS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface BrowserFetch {
@@ -104,7 +105,23 @@ const isRequestId = (value: unknown): value is string => isString(value, 128) &&
 
 const POINT_QUERY_KEYS = ["latitudeDeg", "longitudeDeg", "altitudeFeetMsl", "plannedUtc"] as const;
 const POINT_PRODUCT_KEYS = ["region", "cycle", "cache"] as const;
-const POINT_CACHE_KEYS = ["status", "source", "ageSeconds", "fetchedAt", "expiresAt", "freshnessRemainingSeconds", "servedAt"] as const;
+const POINT_CACHE_KEYS = ["status", "source", "ageSeconds", "fetchedAt", "expiresAt", "freshnessRemainingSeconds", "servedAt", "ttlSeconds", "maxPayloadAgeSeconds", "key", "resource", "checkedAt", "refreshAfter", "staleUntil"] as const;
+type PointCacheShape = Record<string, unknown> & {
+  status: CacheProvenance["status"];
+  source: CacheProvenance["source"];
+  ageSeconds: number;
+  fetchedAt: string;
+  expiresAt: string;
+  freshnessRemainingSeconds: number;
+  servedAt: string;
+  ttlSeconds: number;
+  maxPayloadAgeSeconds: number;
+  key: string;
+  resource: string;
+  checkedAt: string;
+  refreshAfter: string;
+  staleUntil: string;
+};
 const POINT_SOURCE_KEYS = ["stationId", "latitudeDeg", "longitudeDeg", "distanceNauticalMiles", "horizontalWeight", "lowerAltitudeFeet", "upperAltitudeFeet", "verticalWeight", "lowerWindFromDegTrue", "lowerWindSpeedKt", "upperWindFromDegTrue", "upperWindSpeedKt", "temperatureLowerAltitudeFeet", "temperatureUpperAltitudeFeet", "temperatureVerticalWeight", "temperatureLowerC", "temperatureUpperC"] as const;
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 const isAloftPointQuery = (value: unknown): value is AloftPointQuery => isRecord(value) && hasExactKeys(value, POINT_QUERY_KEYS) &&
@@ -130,20 +147,45 @@ const isPointSourceSet = (value: unknown): value is AloftSourceWeight[] => {
 const isPointDirection = (value: unknown): boolean => isFiniteNumber(value) && value >= 0 && value <= 360;
 const isPointWind = (direction: unknown, speed: unknown): boolean => isBoundedNumber(speed, 0, 199) &&
   ((speed === 0 && direction === null) || isPointDirection(direction));
-const isPointCacheProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_CACHE_KEYS) &&
-  oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh"]) && oneOf(value.source, ["edge", "kv", "upstream"]) &&
-  isFiniteNumber(value.ageSeconds) && value.ageSeconds >= 0 && isUtcMilliseconds(value.fetchedAt) && isUtcMilliseconds(value.expiresAt) &&
-  isFiniteNumber(value.freshnessRemainingSeconds) && value.freshnessRemainingSeconds > 0 && isUtcMilliseconds(value.servedAt);
-const isPointProduct = (value: unknown): boolean => isRecord(value) && hasExactKeys(value, POINT_PRODUCT_KEYS) &&
-  isRegion(value.region) && isForecastCycle(value.cycle) && isPointCacheProduct(value.cache);
+const isPointResourceCache = (value: unknown, expectedKey: string, expectedResource: string, ttlSeconds: number): boolean => {
+  if (!isRecord(value) || !hasExactKeys(value, POINT_CACHE_KEYS) || !isPointCacheShape(value)) return false;
+  if (!all(
+    value.ageSeconds >= 0, value.maxPayloadAgeSeconds >= 0, value.key === expectedKey, value.resource === expectedResource,
+    value.ttlSeconds === ttlSeconds, value.expiresAt === value.refreshAfter,
+    value.ageSeconds === Math.floor((Date.parse(value.servedAt) - Date.parse(value.fetchedAt)) / 1000),
+    value.maxPayloadAgeSeconds === Math.floor((Date.parse(value.staleUntil) - Date.parse(value.fetchedAt)) / 1000),
+    Date.parse(value.fetchedAt) <= Date.parse(value.checkedAt), Date.parse(value.checkedAt) <= Date.parse(value.servedAt),
+    Date.parse(value.refreshAfter) - Date.parse(value.checkedAt) === ttlSeconds * 1000,
+    Date.parse(value.staleUntil) - Date.parse(value.refreshAfter) === 120_000,
+    Date.parse(value.servedAt) < Date.parse(value.staleUntil), Date.parse(value.servedAt) <= Date.now(), Date.parse(value.checkedAt) <= Date.now(),
+  )) return false;
+  const stale = value.status === "stale_on_error" && value.source === "stale";
+  if (stale) return value.freshnessRemainingSeconds === 0 && Date.now() >= Date.parse(value.refreshAfter) && Date.now() < Date.parse(value.staleUntil);
+  return oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh"]) && oneOf(value.source, ["edge", "kv", "upstream"]) &&
+    value.freshnessRemainingSeconds >= 0 && Date.now() < Date.parse(value.refreshAfter);
+};
+const isPointCacheShape = (value: Record<string, unknown>): value is PointCacheShape => all(
+    oneOf(value.status, ["edge_hit", "kv_hit", "upstream_refresh", "stale_on_error"]),
+    oneOf(value.source, ["edge", "kv", "upstream", "stale"]), isFiniteNumber(value.ageSeconds), isFiniteNumber(value.freshnessRemainingSeconds),
+    isFiniteNumber(value.ttlSeconds), isFiniteNumber(value.maxPayloadAgeSeconds), isUtcMilliseconds(value.fetchedAt), isUtcMilliseconds(value.checkedAt),
+    isUtcMilliseconds(value.refreshAfter), isUtcMilliseconds(value.staleUntil), isUtcMilliseconds(value.expiresAt), isUtcMilliseconds(value.servedAt),
+    isString(value.key, 512), isString(value.resource, 128),
+);
+const isPointProduct = (value: unknown): boolean => isRecord(value) && all(
+  hasExactKeys(value, POINT_PRODUCT_KEYS), isRegion(value.region), isForecastCycle(value.cycle),
+  isPointResourceCache(value.cache, `winds:${value.region}:${value.cycle}`, "winds-temps", 3600),
+);
 const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMilliseconds(value.issuedAt) && isUtcMilliseconds(value.useFrom) && isUtcMilliseconds(value.useUntil) &&
   Date.parse(value.issuedAt) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse(value.useFrom) < Date.parse(value.useUntil) &&
   Date.parse(value.useFrom) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse((value.query as AloftPointQuery).plannedUtc) < Date.parse(value.useUntil);
-const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "product", "requestId"] as const;
-const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && hasExactKeys(value, POINT_ANSWER_KEYS) &&
-  isAloftPointQuery(value.query) && isPointWind(value.windFromDegTrue, value.windSpeedKt) && nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)) &&
-  isPointAnswerTiming(value) && isForecastCycle(value.forecastCycle) && isPointSourceSet(value.sources) &&
-  oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]) && isPointProduct(value.product) && isRequestId(value.requestId);
+const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "product", "catalog", "requestId"] as const;
+const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && all(
+  hasExactKeys(value, POINT_ANSWER_KEYS), isAloftPointQuery(value.query), isPointWind(value.windFromDegTrue, value.windSpeedKt),
+  nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)), isPointAnswerTiming(value), isForecastCycle(value.forecastCycle),
+  isPointSourceSet(value.sources), oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]),
+  isPointProduct(value.product), isRecord(value.catalog) && hasExactKeys(value.catalog, ["cache"]),
+  isRecord(value.catalog) && isPointResourceCache(value.catalog.cache, "station-catalog:v1", "station-catalog", 86400), isRequestId(value.requestId),
+);
 
 const isMetarPayload = (value: unknown): value is MetarSuccessPayload =>
   isRecord(value) && isMetar(value.metar) && isMetarSourceProvenance(value.provenance) && isRequestId(value.requestId);
@@ -247,14 +289,14 @@ export class WorkerWindsClient implements MetarTransportClient, AloftPointTransp
     url.searchParams.set("lon", canonicalQuery.longitudeDeg.toString());
     url.searchParams.set("altitudeFeetMsl", String(canonicalQuery.altitudeFeetMsl));
     url.searchParams.set("plannedUtc", canonicalQuery.plannedUtc);
-    const payload = await this.requestJson(url);
+    const payload = await this.requestJson(url, WEATHER_REQUEST_TIMEOUT_MS);
     if (!isAloftPointAnswer(payload) || !samePointQuery(payload.query, canonicalQuery)) throw new WindsClientError("INVALID_RESPONSE", "Winds point response did not match the requested query and documented contract.");
     return payload;
   }
 
-  private async requestJson(url: URL): Promise<unknown> {
+  private async requestJson(url: URL, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let response: Response;
       try {

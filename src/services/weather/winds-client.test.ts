@@ -1,17 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery } from "../../../worker/api/contracts";
 import { completeFlightWeatherClient } from "../../test/fixtures/complete-flight";
 import { WorkerWindsClient } from "./winds-client";
 
 const query: AloftPointQuery = { latitudeDeg: 42, longitudeDeg: -88, altitudeFeetMsl: 4500, plannedUtc: "2026-09-21T22:00:00.000Z" };
 const id = "44444444-4444-4444-8444-444444444444";
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-21T21:30:00.000Z")); });
 function point(): AloftPointAnswer {
+  const cache = { status: "upstream_refresh" as const, source: "upstream" as const, ageSeconds: 0,
+    fetchedAt: "2026-09-21T21:30:00.000Z", expiresAt: "2026-09-21T22:30:00.000Z", freshnessRemainingSeconds: 3600,
+    servedAt: "2026-09-21T21:30:00.000Z", ttlSeconds: 3600, maxPayloadAgeSeconds: 3720,
+    key: "winds:us:06", resource: "winds-temps", checkedAt: "2026-09-21T21:30:00.000Z",
+    refreshAfter: "2026-09-21T22:30:00.000Z", staleUntil: "2026-09-21T22:32:00.000Z" };
   return {
     query, windFromDegTrue: 270, windSpeedKt: 12, temperatureC: 3,
     issuedAt: "2026-09-21T20:00:00.000Z", useFrom: "2026-09-21T21:00:00.000Z", useUntil: "2026-09-22T03:00:00.000Z",
     forecastCycle: "06", method: "station-level", requestId: id,
-    product: { region: "us", cycle: "06", cache: { status: "upstream_refresh", source: "upstream", ageSeconds: 0,
-      fetchedAt: "2026-09-21T21:30:00.000Z", expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: "2026-09-21T21:30:00.000Z" } },
+    product: { region: "us", cycle: "06", cache }, catalog: { cache: { ...cache, key: "station-catalog:v1", resource: "station-catalog", maxPayloadAgeSeconds: 86520, refreshAfter: "2026-09-22T21:30:00.000Z", expiresAt: "2026-09-22T21:30:00.000Z", staleUntil: "2026-09-22T21:32:00.000Z", ttlSeconds: 86400 } },
     sources: [{ stationId: "BRL", latitudeDeg: 42, longitudeDeg: -88, distanceNauticalMiles: 0, horizontalWeight: 1,
       lowerAltitudeFeet: 4500, upperAltitudeFeet: 4500, verticalWeight: 0, lowerWindFromDegTrue: 270, lowerWindSpeedKt: 12,
       upperWindFromDegTrue: 270, upperWindSpeedKt: 12, temperatureLowerAltitudeFeet: 4500, temperatureUpperAltitudeFeet: 4500,
@@ -61,7 +66,6 @@ describe("current worksheet weather transport", () => {
     { ...point(), sources: [] },
     { ...point(), sources: [{ ...point().sources[0]!, horizontalWeight: 0.5 }] },
     { ...point(), sources: [{ ...point().sources[0]!, temperatureVerticalWeight: 2 }] },
-    { ...point(), product: { ...point().product, cache: { ...point().product.cache, freshnessRemainingSeconds: 0 } } },
     { ...point(), extra: "unexpected" },
   ])("rejects mismatched, stale or malformed point evidence: %j", async (value) => {
     await expect(client(value).api.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
@@ -71,6 +75,49 @@ describe("current worksheet weather transport", () => {
       sources: [{ ...point().sources[0]!, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null,
         temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null }] };
     expect(await client(value).api.fetchPoint(query)).toEqual(value);
+  });
+  it("accepts rounded zero freshness while the explicit refresh deadline is still ahead", async () => {
+    vi.setSystemTime(new Date("2026-09-21T22:29:59.000Z"));
+    const value = { ...point(), product: { ...point().product, cache: { ...point().product.cache, freshnessRemainingSeconds: 0 } } };
+    await expect(client(value).api.fetchPoint(query)).resolves.toMatchObject({ product: { cache: { freshnessRemainingSeconds: 0 } } });
+  });
+  it("accepts exact-query product and catalog grace independently with zero freshness", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-21T22:30:30.000Z"));
+    const base = point();
+    const stale = { ...base.product.cache, status: "stale_on_error", source: "stale", freshnessRemainingSeconds: 0,
+      ageSeconds: 3630, servedAt: "2026-09-21T22:30:30.000Z" };
+    const value = { ...base, product: { ...base.product, cache: stale } };
+    await expect(client(value).api.fetchPoint(query)).resolves.toMatchObject({ product: { cache: { status: "stale_on_error" } } });
+    vi.setSystemTime(new Date("2026-09-22T21:30:30.000Z"));
+    const catalogStale = { ...base.catalog.cache, status: "stale_on_error", source: "stale", freshnessRemainingSeconds: 0, ageSeconds: 86430, maxPayloadAgeSeconds: 86520,
+      checkedAt: "2026-09-21T21:30:00.000Z", refreshAfter: "2026-09-22T21:30:00.000Z", expiresAt: "2026-09-22T21:30:00.000Z", staleUntil: "2026-09-22T21:32:00.000Z",
+      servedAt: "2026-09-22T21:30:30.000Z" };
+    const productFresh = { ...base.product.cache, checkedAt: "2026-09-22T21:30:30.000Z", refreshAfter: "2026-09-22T22:30:30.000Z",
+      staleUntil: "2026-09-22T22:32:30.000Z", expiresAt: "2026-09-22T22:30:30.000Z", freshnessRemainingSeconds: 3600,
+      ageSeconds: 86430, maxPayloadAgeSeconds: 90150, servedAt: "2026-09-22T21:30:30.000Z" };
+    await expect(client({ ...base, product: { ...base.product, cache: productFresh }, catalog: { cache: catalogStale } }).api.fetchPoint(query))
+      .resolves.toMatchObject({ catalog: { cache: { status: "stale_on_error" } } });
+  });
+  it("rejects grace at staleUntil and inconsistent catalog deadlines", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-21T22:32:00.000Z"));
+    const base = point();
+    const stale = { ...base.product.cache, status: "stale_on_error", source: "stale", freshnessRemainingSeconds: 0, ageSeconds: 3720,
+      servedAt: "2026-09-21T22:32:00.000Z" };
+    await expect(client({ ...base, product: { ...base.product, cache: stale } }).api.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(client({ ...base, catalog: { cache: { ...base.catalog.cache, refreshAfter: "2026-09-22T21:31:00.000Z" } } }).api.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+  it("rejects a grace response that crosses staleUntil before client receipt", async () => {
+    const base = point();
+    const stale = { ...base.product.cache, status: "stale_on_error", source: "stale", freshnessRemainingSeconds: 0,
+      ageSeconds: 3710, servedAt: "2026-09-21T22:31:50.000Z" };
+    vi.setSystemTime(new Date("2026-09-21T22:31:59.000Z"));
+    const api = new WorkerWindsClient({ fetch: async () => {
+      vi.setSystemTime(new Date("2026-09-21T22:32:01.000Z"));
+      return json({ ...base, product: { ...base.product, cache: stale } });
+    } }, "https://worksheet.invalid");
+    await expect(api.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
   it("retains structured API failure context without exposing response text", async () => {
     await expect(client({ code: "rate_limited", error: "not echoed", requestId: id }, 429).api.fetchPoint(query))
@@ -95,7 +142,7 @@ describe("current worksheet weather transport", () => {
       init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     }) }, "https://worksheet.invalid");
     const result = expect(stalled.fetchPoint(query)).rejects.toMatchObject({ code: "TRANSPORT_FAILURE" });
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(20000);
     await result;
     expect(vi.getTimerCount()).toBe(0);
   });

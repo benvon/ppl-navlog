@@ -17,6 +17,7 @@ import type { WaypointWorksheetRow } from "./waypoint-worksheet-row";
 
 const MAX_ROUTE_WAYPOINTS = MAX_CHECKPOINTS_PER_PLAN + 2;
 const MAX_METAR_AGE_MS = 2 * 60 * 60 * 1_000;
+const WEATHER_GRACE_WARNING = "Weather refresh is temporarily unavailable; using cached context within the two-minute grace period.";
 
 export interface RouteWeatherPointClient {
   fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer>;
@@ -107,13 +108,19 @@ export const resolveRouteWeather = async (
   validateWorksheetPlanningInputs(draft, profile);
   const prepared = prepareRouteWeatherInputs(draft, endpoints);
   const worksheet = await calculateWorksheetRoute(draft, profile, pointClient, prepared, endpoints);
+  recheckSampleFreshness(worksheet.samples, Date.now());
+  const usedProductGrace = worksheet.samples.some((sample) => sample.answer.product.cache.status === "stale_on_error");
+  const usedCatalogGrace = worksheet.samples.some((sample) => sample.answer.catalog.cache.status === "stale_on_error");
+  const warnings = usedProductGrace || usedCatalogGrace
+    ? [...worksheet.warnings, ...(worksheet.warnings.includes(WEATHER_GRACE_WARNING) ? [] : [WEATHER_GRACE_WARNING])]
+    : worksheet.warnings;
   return {
     calculationSnapshot: worksheet.snapshot,
     weatherSnapshotIds: [...new Set(worksheet.samples.map((sample) => sample.answer.requestId))],
-    warnings: worksheet.warnings,
+    warnings,
     departureMetarPayload: endpoints.departureMetar,
     routeWeatherSamples: worksheet.samples,
-    weatherProvenance: jsonValue({ source: "sequential-waypoint-worksheet-winds", eventCount: worksheet.samples.length, altitudeRule: "single route cruise altitude for TOC and checkpoint selections; destination cruise-altitude forecast for TOD placement" }),
+    weatherProvenance: jsonValue({ source: "sequential-waypoint-worksheet-winds", eventCount: worksheet.samples.length, altitudeRule: "single route cruise altitude for TOC and checkpoint selections; destination cruise-altitude forecast for TOD placement", resourceProvenance: worksheet.samples.map(({ plannedUtc, answer }) => ({ plannedUtc, product: answer.product.cache, catalog: answer.catalog.cache })) }),
     sampledPoints: worksheet.samples.map((sample) => sample.answer), iterations: 1,
   };
 };
@@ -195,6 +202,7 @@ const calculateWorksheetRoute = async (
   });
   if (!worksheet.ok) throw new RouteWeatherSamplingError(worksheet.error.message);
   warnings.push(...worksheet.value.warnings);
+  if (samples.some(({ answer }) => answer.product.cache.status === "stale_on_error" || answer.catalog.cache.status === "stale_on_error") && !warnings.includes(WEATHER_GRACE_WARNING)) warnings.push(WEATHER_GRACE_WARNING);
   const total = worksheet.value.route.totalRouteDistanceNauticalMiles;
   const rows = worksheet.value.rows.map((row, index) => worksheetNavlogRow(row, index, prepared, draft, profile, variationFor));
   const taxi = draft.fuelInputs.taxiRunupFuelGallons;
@@ -225,7 +233,7 @@ const calculateWorksheetRoute = async (
   }).filter((phase) => phase !== undefined);
   const snapshot = jsonValue({
     schema: "complete-navlog/v1", status: "calculated",
-    weather: { snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))], provenance: { source: "sequential-waypoint-worksheet", eventCount: samples.length, destinationForecastUtcRule: "departure UTC plus total charted distance divided by cruise TAS without wind; preliminary estimate" },
+    weather: { snapshotIds: [...new Set(samples.map((sample) => sample.answer.requestId))], provenance: { source: "sequential-waypoint-worksheet", eventCount: samples.length, destinationForecastUtcRule: "departure UTC plus total charted distance divided by cruise TAS without wind; preliminary estimate" }, resourceProvenance: samples.map(({ plannedUtc, answer }) => ({ plannedUtc, product: answer.product.cache, catalog: answer.catalog.cache })),
       endpointSources: { departureMetar: endpointMetarSource(endpoints.departureMetar), destinationCruiseAltitudeForecast: (() => {
         const answer = samples.find((sample) => sample.routeDistanceNauticalMiles === total)?.answer;
         return answer === undefined ? undefined : { requestId: answer.requestId, issuedAt: answer.issuedAt, plannedUtc: answer.query.plannedUtc, altitudeFeetMsl: answer.query.altitudeFeetMsl, method: answer.method, forecastCycle: answer.forecastCycle, validFrom: answer.useFrom, validUntil: answer.useUntil, cache: answer.product.cache };
@@ -373,6 +381,27 @@ const validateAnswer = (query: AloftPointQuery, answer: AloftPointAnswer): void 
   if (!matchesPointQuery(query, answer)) throw new RouteWeatherSamplingError("A point-weather response does not match its requested waypoint, altitude, and UTC.");
   if (!hasSupportedPointWind(answer)) throw new RouteWeatherSamplingError("A point-weather response contains an unsupported wind value.");
   if (!pointAnswerCoversQuery(query, answer)) throw new RouteWeatherSamplingError("A point-weather response does not cover its planned waypoint UTC.");
+  validateResourceCache(answer.product.cache, `winds:${answer.product.region}:${answer.product.cycle}`, "winds-temps", 3600, Date.now());
+  validateResourceCache(answer.catalog.cache, "station-catalog:v1", "station-catalog", 86400, Date.now());
+};
+const validateResourceCache = (cache: AloftPointAnswer["product"]["cache"], key: string, resource: string, ttl: number, now: number): void => {
+  const checked = Date.parse(cache.checkedAt), fetched = Date.parse(cache.fetchedAt), refresh = Date.parse(cache.refreshAfter), staleUntil = Date.parse(cache.staleUntil), served = Date.parse(cache.servedAt);
+  if (!all(cache.key === key, cache.resource === resource, cache.ttlSeconds === ttl, cache.maxPayloadAgeSeconds >= 0,
+      cache.maxPayloadAgeSeconds === Math.floor((staleUntil - fetched) / 1000), cache.expiresAt === cache.refreshAfter,
+      refresh - checked === ttl * 1000, staleUntil - refresh === 120_000, fetched <= checked, checked <= served, served < staleUntil,
+      served <= now, checked <= now, cache.ageSeconds === Math.floor((served - fetched) / 1000))) throw new RouteWeatherSamplingError(`The ${resource} weather provenance is missing or inconsistent.`);
+  if (cache.status === "stale_on_error") {
+    if (cache.source !== "stale" || cache.freshnessRemainingSeconds !== 0 || now < refresh || now >= staleUntil) throw new RouteWeatherSamplingError(`The ${resource} weather cache grace period is not currently valid.`);
+  } else if (!all(["edge_hit", "kv_hit", "upstream_refresh"].includes(cache.status), ["edge", "kv", "upstream"].includes(cache.source), cache.freshnessRemainingSeconds >= 0, now < refresh)) {
+    throw new RouteWeatherSamplingError(`The ${resource} weather cache is no longer fresh.`);
+  }
+};
+const all = (...conditions: readonly boolean[]): boolean => conditions.every(Boolean);
+const recheckSampleFreshness = (samples: readonly RouteWeatherSample[], now: number): void => {
+  for (const { answer } of samples) {
+    validateResourceCache(answer.product.cache, `winds:${answer.product.region}:${answer.product.cycle}`, "winds-temps", 3600, now);
+    validateResourceCache(answer.catalog.cache, "station-catalog:v1", "station-catalog", 86400, now);
+  }
 };
 const matchesPointQuery = (query: AloftPointQuery, answer: AloftPointAnswer): boolean =>
   answer.query.latitudeDeg === query.latitudeDeg && answer.query.longitudeDeg === query.longitudeDeg && answer.query.altitudeFeetMsl === query.altitudeFeetMsl && answer.query.plannedUtc === query.plannedUtc;
