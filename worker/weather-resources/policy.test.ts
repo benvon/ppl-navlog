@@ -56,6 +56,8 @@ describe('weather resource policy', () => {
     expect(parseRetryAfter('-1', NOW)).toBe(NOW + 60_000);
     expect(parseRetryAfter('bogus', NOW)).toBe(NOW + 60_000);
     expect(parseRetryAfter('999999999999999999999999999', NOW)).toBe('operator_required');
+    expect(parseRetryAfter('8640000000000', NOW)).toBe('operator_required');
     expect(parseRetryAfter(null, Number.MAX_SAFE_INTEGER - 10)).toBe('operator_required');
+    expect(parseRetryAfter(null, 8_640_000_000_000_000)).toBe('operator_required');
   });
 });

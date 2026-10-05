@@ -3,6 +3,7 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const GRACE_MS = 120_000;
+const isDateRepresentable = (timestamp: number): boolean => Number.isFinite(new Date(timestamp).getTime());
 export function resourceEligibility(metadata: WeatherCheckMetadata, nowMs: number): 'fresh' | 'grace' | 'expired' {
   const refreshAfter = Date.parse(metadata.refreshAfter);
   const staleUntil = Date.parse(metadata.staleUntil);
@@ -33,20 +34,22 @@ export function budgetDecision(key: WeatherResourceKey, attempts: readonly Budge
   }
   return deadlines.length ? { allowed: false, retryAtMs: Math.max(...deadlines) } : { allowed: true };
 }
-export function parseRetryAfter(value: string | null, nowMs: number): number | 'operator_required' {
-  const fallback = nowMs + MINUTE;
-  if (!Number.isFinite(nowMs) || !Number.isSafeInteger(nowMs) || !Number.isSafeInteger(fallback)) return 'operator_required';
-  if (value === null) return fallback;
-  let requested: number;
+function retryAfterTimestamp(value: string, nowMs: number): number | 'default' | 'operator_required' {
   if (/^\d+$/.test(value.trim())) {
     const seconds = Number(value.trim());
     if (!Number.isSafeInteger(seconds) || seconds > Math.floor((Number.MAX_SAFE_INTEGER - nowMs) / 1_000)) return 'operator_required';
-    requested = nowMs + seconds * 1_000;
-  } else {
-    const parsed = Date.parse(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    requested = parsed;
+    const requested = nowMs + seconds * 1_000;
+    return isDateRepresentable(requested) ? requested : 'operator_required';
   }
-  if (!Number.isSafeInteger(requested)) return 'operator_required';
-  return Math.max(fallback, requested);
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 'default';
+}
+export function parseRetryAfter(value: string | null, nowMs: number): number | 'operator_required' {
+  const fallback = nowMs + MINUTE;
+  if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(fallback) || !isDateRepresentable(nowMs) || !isDateRepresentable(fallback)) return 'operator_required';
+  if (value === null) return fallback;
+  const requested = retryAfterTimestamp(value, nowMs);
+  if (requested === 'operator_required') return requested;
+  const effectiveDeadline = requested === 'default' ? fallback : Math.max(fallback, requested);
+  return isDateRepresentable(effectiveDeadline) ? effectiveDeadline : 'operator_required';
 }
