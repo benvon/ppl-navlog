@@ -3,6 +3,8 @@ import worker, { type Env } from './index';
 import { runwayPickerAirportFixture, runwayPickerCacheFixture, runwayPickerMetarFixture } from './api/fixtures/runway-picker';
 import type { ServiceFetcher } from './api/adapters';
 import type { CacheStore } from './api/winds';
+import { decodeWindsProduct, parseStationCatalog } from './weather-resources/validation';
+import type { WeatherResourceKey } from './weather-resources/contracts';
 
 const FIXED_REQUEST_ID = 'e531d3ef-89b8-4cbe-a7e9-c42c7fad7de5';
 const FIXED_NOW = '2026-09-21T18:30:00.000Z';
@@ -21,13 +23,6 @@ ABQ              9900+16 9900+07 2310-08 2322-19 253535 264844 256654
 const STATION_CATALOG = [
   { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 },
 ];
-
-async function stationCatalogResponse(): Promise<Response> {
-  const encoded = new TextEncoder().encode(JSON.stringify(STATION_CATALOG));
-  const source = new ReadableStream<BufferSource>({ start(controller) { controller.enqueue(encoded); controller.close(); } });
-  const compressed = source.pipeThrough(new CompressionStream('gzip'));
-  return new Response(await new Response(compressed).arrayBuffer());
-}
 
 function memoryCache(): CacheStore {
   const entries = new Map<string, Response>();
@@ -51,31 +46,32 @@ function runwayPicker(fetches: Request[]): ServiceFetcher {
   };
 }
 
-function aviationWeatherFetch(fetches: Request[]): typeof globalThis.fetch {
-  return async (input) => {
-    const request = input instanceof Request ? input : new Request(input);
+function weatherCoordinator(fetches: Request[]): ServiceFetcher {
+  return { async fetch(request) {
     fetches.push(request);
-    const url = new URL(request.url);
-    if (url.origin !== 'https://aviationweather.gov') return new Response(null, { status: 500 });
-    if (url.pathname === '/api/data/windtemp') {
-      const cycle = url.searchParams.get('fcst');
-      const product = cycle === '12'
-        ? WINDS_PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
-        : cycle === '24'
-          ? WINDS_PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z')
-          : WINDS_PRODUCT;
-      return new Response(product, { headers: { 'Content-Type': 'text/plain' } });
+    if (request.url !== 'https://weather-coordinator.internal/resource' || request.method !== 'POST') return new Response(null, { status: 404 });
+    const body = await request.json() as { resource: WeatherResourceKey };
+    const checkedAt = FIXED_NOW;
+    const interval = body.resource === 'station-catalog:v1' ? 24 * 60 * 60_000 : 60 * 60_000;
+    const metadata = { fetchedAt: checkedAt, checkedAt, refreshAfter: new Date(Date.parse(checkedAt) + interval).toISOString(), staleUntil: new Date(Date.parse(checkedAt) + interval + 120_000).toISOString() };
+    if (body.resource === 'station-catalog:v1') {
+      const entries = parseStationCatalog(STATION_CATALOG, new Date(checkedAt)).entries;
+      return Response.json({ ok: true, state: 'fresh', resource: { kind: 'catalog', key: body.resource, metadata, entries } });
     }
-    if (url.pathname === '/api/data/taf') return Response.json([{ icaoId: 'KORD', issueTime: FIXED_NOW, validTimeFrom: Date.parse(FIXED_NOW) / 1000, validTimeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, mostRecent: 1, rawTAF: 'TAF KORD fixture', fcsts: [{ fcstChange: null, timeFrom: Date.parse(FIXED_NOW) / 1000, timeTo: Date.parse('2026-09-22T18:00:00.000Z') / 1000, wdir: 'VRB', wspd: 8, wgst: 18, raw: 'VRB08G18KT' }] }]);
-    if (url.pathname === '/data/cache/stations.cache.json.gz') return stationCatalogResponse();
-    return new Response(null, { status: 404 });
-  };
+    const cycle = body.resource.slice(-2) as '06' | '12' | '24';
+    const product = cycle === '12' ? WINDS_PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+      : cycle === '24' ? WINDS_PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : WINDS_PRODUCT;
+    return Response.json({ ok: true, state: 'fresh', resource: { kind: 'winds', key: body.resource, metadata, rawProduct: product, forecasts: decodeWindsProduct(product, cycle, new Date(checkedAt)) } });
+  } };
 }
 
 function env(overrides: Partial<Env> = {}): Env {
   return {
     APP_VERSION: 'v0.1.0',
     APP_COMMIT_SHA: 'abcdef1',
+    APP_ENV: 'development',
+    API_RATE_LIMITER: { async limit() { return { success: true }; } },
+    AWC_COORDINATOR_API: weatherCoordinator([]),
     ASSETS: { async fetch() { return new Response('asset'); } },
     ...overrides
   };
@@ -133,9 +129,8 @@ describe('Worker API functional contracts', () => {
   });
 
   it('discovers published winds stations and exposes provenance for every forecast product', async () => {
-    const awcRequests: Request[] = [];
-    vi.stubGlobal('fetch', aviationWeatherFetch(awcRequests));
-    const response = await api('/api/weather/winds/stations?route=42.6,-89.0', env({ WINDS_CACHE: memoryCache() }));
+    const coordinatorRequests: Request[] = [];
+    const response = await api('/api/weather/winds/stations?route=42.6,-89.0', env({ WINDS_CACHE: memoryCache(), AWC_COORDINATOR_API: weatherCoordinator(coordinatorRequests) }));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -154,14 +149,13 @@ describe('Worker API functional contracts', () => {
       ],
       requestId: FIXED_REQUEST_ID
     });
-    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
-    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
+    expect(coordinatorRequests).toHaveLength(4);
+    expect(coordinatorRequests.every((request) => request.url === 'https://weather-coordinator.internal/resource')).toBe(true);
   });
 
   it('serves the selected forecast and raw official product without a live network dependency', async () => {
-    const awcRequests: Request[] = [];
-    vi.stubGlobal('fetch', aviationWeatherFetch(awcRequests));
-    const response = await api('/api/weather/winds?station=ABQ&validTime=2026-09-22T00%3A00%3A00.000Z&region=us', env({ WINDS_CACHE: memoryCache() }));
+    const coordinatorRequests: Request[] = [];
+    const response = await api('/api/weather/winds?station=ABQ&validTime=2026-09-22T00%3A00%3A00.000Z&region=us', env({ WINDS_CACHE: memoryCache(), AWC_COORDINATOR_API: weatherCoordinator(coordinatorRequests) }));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -176,28 +170,25 @@ describe('Worker API functional contracts', () => {
       provenance: { adapter: 'aviationweather', cache: { status: 'upstream_refresh', source: 'upstream' } },
       requestId: FIXED_REQUEST_ID
     });
-    expect(awcRequests.every((request) => new URL(request.url).origin === 'https://aviationweather.gov')).toBe(true);
+    expect(coordinatorRequests.every((request) => request.url === 'https://weather-coordinator.internal/resource')).toBe(true);
   });
 
   it('serves a validated aloft point answer with the request id and no station discovery payload', async () => {
-    const awcRequests: Request[] = [];
-    vi.stubGlobal('fetch', aviationWeatherFetch(awcRequests));
-    const response = await api('/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z', env({ WINDS_CACHE: memoryCache() }));
+    const coordinatorRequests: Request[] = [];
+    const response = await api('/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z', env({ WINDS_CACHE: memoryCache(), AWC_COORDINATOR_API: weatherCoordinator(coordinatorRequests) }));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ query: { latitudeDeg: 35.0402, longitudeDeg: -106.609, altitudeFeetMsl: 9000 }, forecastCycle: '06', product: { region: 'us', cycle: '06', cache: { status: 'upstream_refresh', source: 'upstream' } }, windSpeedKt: 0, requestId: FIXED_REQUEST_ID });
-    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
-    expect(awcRequests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
+    expect(coordinatorRequests).toHaveLength(4);
+    expect(coordinatorRequests.every((request) => request.url === 'https://weather-coordinator.internal/resource')).toBe(true);
   });
 
-  it('serves an exact-station TAF with normalized VRB group and request evidence', async () => {
+  it('returns not found for the removed TAF route without coordinator calls', async () => {
     const requests: Request[] = [];
-    vi.stubGlobal('fetch', aviationWeatherFetch(requests));
-    const response = await api('/api/weather/taf/KORD', env());
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ stationIcao: 'KORD', groups: [{ windDirectionType: 'variable', windFromDegTrue: null, windSpeedKt: 8 }], requestId: FIXED_REQUEST_ID });
-    expect(requests).toHaveLength(1);
-    expect(new URL(requests[0]!.url).origin).toBe('https://aviationweather.gov');
+    const response = await api('/api/weather/taf/KORD', env({ AWC_COORDINATOR_API: weatherCoordinator(requests) }));
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ code: 'not_found', requestId: FIXED_REQUEST_ID });
+    expect(requests).toHaveLength(0);
   });
 
   it('returns browser-safe failures for invalid input, upstream failure, and rate limiting', async () => {

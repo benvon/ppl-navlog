@@ -6,7 +6,8 @@ export interface WindsResourceEnvelope { kind: 'winds'; key: `winds:${WindsRegio
 export interface CatalogResourceEnvelope { kind: 'catalog'; key: 'station-catalog:v1'; metadata: WeatherCheckMetadata; entries: readonly StationCatalogEntry[]; }
 export type WeatherResourceEnvelope = WindsResourceEnvelope | CatalogResourceEnvelope;
 export type WeatherResourceResult = { ok: true; resource: WeatherResourceEnvelope; state: 'fresh' | 'grace' } | { ok: false; code: 'service_unavailable' | 'upstream_unavailable'; retryAt: string };
-export interface WeatherResourcePort { getResource(key: WeatherResourceKey): Promise<WeatherResourceResult>; }
+export type WeatherResourceDelivery = WeatherResourceResult & { source?: 'edge' | 'coordinator' };
+export interface WeatherResourcePort { getResource(key: WeatherResourceKey): Promise<WeatherResourceDelivery>; }
 export type BudgetAttempt = { key: WeatherResourceKey; attemptedAtMs: number };
 export type BudgetDecision = { allowed: true } | { allowed: false; retryAtMs: number };
 export interface CachedWindsProduct { fetchedAt: string; freshUntil: string; staleUntil: string; region: WindsRegion; cycle: WindsForecastCycle; rawProduct: string; forecasts: Array<WindsForecastAvailability & { stationId: string; levels: WindsAloftLevel[] }>; }

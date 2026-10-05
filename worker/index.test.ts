@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import worker, { type Env } from './index';
 
 const env: Env = {
+  APP_ENV: 'development',
+  API_RATE_LIMITER: { limit: async () => ({ success: true }) },
   APP_VERSION: 'v0.1.0',
   APP_COMMIT_SHA: 'abcdef1',
   ASSETS: {
@@ -43,7 +45,9 @@ describe('Worker foundation', () => {
 
   it('fails closed when development rate limiting is absent or unavailable', async () => {
     const request = new Request('https://example.test/api/health');
-    const missing = await worker.fetch(request, { ...env, APP_ENV: 'development' });
+    const withoutLimiter = { ...env };
+    delete withoutLimiter.API_RATE_LIMITER;
+    const missing = await worker.fetch(request, { ...withoutLimiter, APP_ENV: 'development' });
     expect(missing.status).toBe(503);
     await expect(missing.json()).resolves.toMatchObject({ code: 'service_unavailable' });
 
@@ -54,6 +58,36 @@ describe('Worker foundation', () => {
     });
     expect(failed.status).toBe(503);
     await expect(failed.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+  });
+
+  it('fails closed for deployed production API requests when limiter or weather coordinator is missing', async () => {
+    const request = new Request('https://example.test/api/weather/winds/stations?route=42.6%2C-89');
+    const withoutLimiter = { ...env };
+    delete withoutLimiter.API_RATE_LIMITER;
+    const missingLimiter = await worker.fetch(request, { ...withoutLimiter, APP_ENV: 'production', AWC_COORDINATOR_API: { fetch: async () => Response.error() } });
+    expect(missingLimiter.status).toBe(503);
+    await expect(missingLimiter.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+    const missingCoordinator = await worker.fetch(request, { ...env, APP_ENV: 'production', API_RATE_LIMITER: { limit: async () => ({ success: true }) } });
+    expect(missingCoordinator.status).toBe(503);
+    await expect(missingCoordinator.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+    const developmentMissingCoordinator = await worker.fetch(request, { ...env, AWC_COORDINATOR_API: undefined });
+    expect(developmentMissingCoordinator.status).toBe(503);
+    await expect(developmentMissingCoordinator.json()).resolves.toMatchObject({ code: 'service_unavailable' });
+    const unknownEnvironment = await worker.fetch(request, { ...env, APP_ENV: 'preview' });
+    expect(unknownEnvironment.status).toBe(503);
+  });
+
+  it('returns not found for the removed TAF route without calling the coordinator', async () => {
+    let coordinatorCalls = 0;
+    const response = await worker.fetch(new Request('https://example.test/api/weather/taf/KORD'), {
+      ...env,
+      APP_ENV: 'development',
+      API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+      AWC_COORDINATOR_API: { fetch: async () => { coordinatorCalls += 1; return Response.error(); } }
+    });
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ code: 'not_found' });
+    expect(coordinatorCalls).toBe(0);
   });
 
   it('adds security headers to static asset responses', async () => {
