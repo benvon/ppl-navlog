@@ -61,6 +61,8 @@ describe("current worksheet weather transport", () => {
   });
   it.each([
     { ...point(), query: { ...query, longitudeDeg: -89 } },
+    { ...point(), query: undefined },
+    { ...point(), query: null },
     { ...point(), windSpeedKt: 200 }, { ...point(), windFromDegTrue: null },
     { ...point(), useUntil: query.plannedUtc }, { ...point(), issuedAt: "2026-09-22T01:00:00.000Z" },
     { ...point(), sources: [] },

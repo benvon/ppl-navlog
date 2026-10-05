@@ -179,9 +179,10 @@ const isPointAnswerTiming = (value: Record<string, unknown>): boolean => isUtcMi
   Date.parse(value.issuedAt) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse(value.useFrom) < Date.parse(value.useUntil) &&
   Date.parse(value.useFrom) <= Date.parse((value.query as AloftPointQuery).plannedUtc) && Date.parse((value.query as AloftPointQuery).plannedUtc) < Date.parse(value.useUntil);
 const POINT_ANSWER_KEYS = ["query", "windFromDegTrue", "windSpeedKt", "temperatureC", "issuedAt", "useFrom", "useUntil", "forecastCycle", "sources", "method", "product", "catalog", "requestId"] as const;
-const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && all(
-  hasExactKeys(value, POINT_ANSWER_KEYS), isAloftPointQuery(value.query), isPointWind(value.windFromDegTrue, value.windSpeedKt),
-  nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)), isPointAnswerTiming(value), isForecastCycle(value.forecastCycle),
+const isAloftPointAnswer = (value: unknown): value is AloftPointAnswer => isRecord(value) && hasExactKeys(value, POINT_ANSWER_KEYS) &&
+  isAloftPointQuery(value.query) && all(
+  isPointWind(value.windFromDegTrue, value.windSpeedKt), nullable(value.temperatureC, (n) => isBoundedNumber(n, -100, 100)),
+  isPointAnswerTiming(value), isForecastCycle(value.forecastCycle),
   isPointSourceSet(value.sources), oneOf(value.method, ["station-level", "vertical-vector", "horizontal-vector", "horizontal-vertical-vector"]),
   isPointProduct(value.product), isRecord(value.catalog) && hasExactKeys(value.catalog, ["cache"]),
   isRecord(value.catalog) && isPointResourceCache(value.catalog.cache, "station-catalog:v1", "station-catalog", 86400), isRequestId(value.requestId),
