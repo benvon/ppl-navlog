@@ -55,3 +55,24 @@ describe("production deployment configuration", () => {
     expect(production.ratelimits[0]?.namespace_id).not.toBe(config.env.development.ratelimits[0]?.namespace_id);
   });
 });
+
+
+describe("API environment configuration", () => {
+  it("cannot enable the local bypass in a default deploy and opts into it only for local dev", () => {
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "wrangler.jsonc"), "utf8")) as {
+      vars?: { APP_ENV?: string };
+      env: Record<string, { vars: { APP_ENV: string }; ratelimits: Array<{ name: string }> }>;
+    };
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(config.vars?.APP_ENV).not.toBe("local");
+    expect(pkg.scripts.dev).toContain("wrangler dev --local --var APP_ENV:local");
+    expect(pkg.scripts["dev:worker"]).toContain("wrangler dev --local --var APP_ENV:local");
+    for (const name of ["development", "production"]) {
+      const deployed = config.env[name]!;
+      expect(deployed.vars.APP_ENV).toBe(name);
+      expect(deployed.ratelimits.some(({ name }) => name === "API_RATE_LIMITER")).toBe(true);
+    }
+  });
+});

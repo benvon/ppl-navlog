@@ -47,7 +47,7 @@ export default {
 
     if (url.pathname.startsWith(API_PATH_PREFIX)) {
       const requestId = createRequestId(request);
-      if (env.APP_ENV === 'development' && !env.API_RATE_LIMITER) {
+      if (!env.API_RATE_LIMITER && env.APP_ENV !== 'local') {
         return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
       }
       if (env.API_RATE_LIMITER) {
