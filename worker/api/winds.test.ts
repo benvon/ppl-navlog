@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ApiError } from './errors';
 import { createAviationWeatherAdapter, regionForRoute, type CacheStore, type ServiceFetcher, type WindsDataAdapter } from './winds';
 import { decodeWindsProduct } from '../weather-resources/validation';
-import { resourcesFromFakeCoordinator, unusedFixtureCache } from './winds-test-resources';
+import { resourcesFromFakeCoordinator, resourcesWithUnchosenCycleExpiry, unusedFixtureCache } from './winds-test-resources';
 import type { AloftPointQuery } from './contracts';
 
 /** Captured from the official AWC US low-level FB product on 2026-09-21. */
@@ -214,6 +214,14 @@ describe('Aviation Weather Center adapter', () => {
     const result = await adapter.getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us');
     expect(result.forecast.station.id).toBe('ABQ');
     await expect(adapter.getWindsForecast('ABQ', '2026-09-22T01:00:00.000Z', 'us')).rejects.toMatchObject({ code: 'upstream_no_data' });
+  });
+
+  it('blocks a legacy forecast when an unchosen cycle expires during catalog loading', async () => {
+    let current = FIXED_NOW;
+    const source = fetcher().fetcher;
+    const port = resourcesWithUnchosenCycleExpiry(source, () => current, (value) => { current = value; });
+    await expect(createAviationWeatherAdapter(port, () => current).getWindsForecast('ABQ', '2026-09-22T00:00:00.000Z', 'us'))
+      .rejects.toMatchObject({ code: 'upstream_unavailable' });
   });
 
   it('keeps successful cycles usable and marks failed-cycle discovery incomplete', async () => {

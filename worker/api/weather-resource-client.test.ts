@@ -10,6 +10,58 @@ function cache(): CacheStore & { entries: Map<string, Response> } {
 }
 
 describe('weather resource client', () => {
+  it.each(['cache match', 'cache body', 'cache write', 'coordinator fetch', 'coordinator body'] as const)('bounds a hanging %s by the shared 15-second deadline', async (operation) => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise<never>(() => undefined);
+      let bodyCanceled = false;
+      const hangingBody = new Response(new ReadableStream({ pull: () => never, cancel: () => { bodyCanceled = true; } }));
+      let writeStarted = false;
+      const hangingCache: CacheStore = {
+        match: operation === 'cache match' ? () => never : async () => operation === 'cache body' ? hangingBody : undefined,
+        put: operation === 'cache write' ? () => { writeStarted = true; return never; } : async () => undefined,
+      };
+      const fetch = operation === 'coordinator fetch'
+        ? vi.fn(() => never)
+        : vi.fn(async () => operation === 'coordinator body' ? hangingBody : Response.json({ ok: true, state: 'fresh', resource: wind }));
+      const pending = createWeatherResourceClient({ fetch } as ServiceFetcher, hangingCache, 'production', () => new Date(checked)).getResource('winds:us:06');
+      if (operation === 'cache write') {
+        await expect(pending).resolves.toMatchObject({ ok: true, state: 'fresh' });
+        expect(writeStarted).toBe(true);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        return;
+      }
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable' });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await rejected;
+      expect(fetch).toHaveBeenCalledTimes(operation === 'coordinator fetch' || operation === 'coordinator body' ? 1 : 0);
+      if (operation === 'cache body' || operation === 'coordinator body') expect(bodyCanceled).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('aborts the coordinator call and cancels a response that arrives after the deadline', async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (response: Response) => void;
+    let requestSignal: AbortSignal | undefined;
+    const fetch = vi.fn((request: Request) => {
+      requestSignal = request.signal;
+      return new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    });
+    try {
+      const pending = createWeatherResourceClient({ fetch } as ServiceFetcher, undefined, 'production', () => new Date(checked)).getResource('winds:us:06');
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable' });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await rejected;
+      expect(requestSignal?.aborted).toBe(true);
+      const cancel = vi.fn();
+      resolveFetch(new Response(new ReadableStream({ cancel })));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('uses a fixed private POST request with only the resource key', async () => {
     const fetch = vi.fn(async (request: Request) => {
       expect(request.url).toBe('https://weather-coordinator.internal/resource');

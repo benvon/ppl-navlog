@@ -28,3 +28,20 @@ Before implementation, existing API behavior returned HTTP 502 for a production 
 - Runtime tests use the repository's Miniflare compatibility date; deployment compatibility date reconciliation remains Task 7. No deployment or live AWC calls were performed.
 - Public API request handlers require `APP_ENV` to be exactly `development` or `production`, `API_RATE_LIMITER`, and `AWC_COORDINATOR_API` for weather routes. Task 6 owns root-local wiring.
 - The returned cache provenance contract now requires `checkedAt`, `refreshAfter`, `staleUntil`, `ttlSeconds`, `maxPayloadAgeSeconds`, `key`, and `resource`; point answers also require `catalog.cache`. Task 5 should update test fixtures without making these fields optional.
+
+## Task 4 fix round 1
+
+### Regression evidence
+
+- RED before the fix: `mise exec -- npm test -- --run worker/api/weather-resource-client.test.ts worker/api/winds-point.test.ts worker/api/winds.test.ts` — 3 files, 6 regressions failed (48 other tests passed). The failures showed hanging `cache.match`, cache body reads, and ignored-abort coordinator fetches; point and legacy forecast returned successful answers after an unchosen cycle expired.
+- Cache-write fixture correction: the initial generic test did not enter the fresh-resource cache-write path. The corrected test asserts `writeStarted === true`; running it against the pre-fix committed client (`mise exec -- npm test -- --run worker/api/weather-resource-client.test.ts -t 'bounds a hanging cache write'`) failed by timing out at 5 seconds while awaiting the unresolved cache write.
+
+### Fix and verification
+
+- The 15-second request deadline now races each awaited cache lookup, cache body read, coordinator fetch, and coordinator body read against the same monotonic/wall deadline. Coordinator abort and stream cancellation are best-effort and non-blocking; late fetch responses have their bodies canceled. Fresh edge writes have a tracked race against that same deadline, consume/log failures, and attempt response-body cancellation on timeout without holding the public response open. `CacheStore.put` has no cancellation signal, so the underlying platform write can remain pending until the runtime settles it; the client stops waiting and owns its timeout cleanup only until the shared deadline.
+- Point and legacy forecast answer assembly now rechecks every successful cycle resource, not only the selected cycle. Returned age, remaining freshness, and served time are recomputed at assembly.
+- `mise exec -- npm test -- --run worker/api/weather-resource-client.test.ts worker/api/winds-point.test.ts worker/api/winds.test.ts` — 3 files, 57 tests passed after final cache-write ownership changes.
+- `mise exec -- npm run test:workers` — 4 runtime files, 30 tests passed after final cache-write ownership changes.
+- `mise exec -- npx eslint worker/api/weather-resource-client.ts worker/api/weather-resource-client.test.ts worker/api/winds.ts worker/api/winds-point.test.ts worker/api/winds.test.ts worker/api/winds-test-resources.ts --max-warnings=0 && git diff --check` — passed.
+- `mise exec -- npm run typecheck` — same three Task 5 frontend fixture errors as previously documented; no Worker TypeScript errors.
+- `git diff --check` — passed.

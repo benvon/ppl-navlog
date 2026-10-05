@@ -3,7 +3,7 @@ import { parseApiRoute } from './request';
 import { ApiError } from './errors';
 import { createAviationWeatherAdapter, type ServiceFetcher } from './winds';
 import { decodeWindsProduct } from '../weather-resources/validation';
-import { resourcesFromFakeCoordinator } from './winds-test-resources';
+import { resourcesFromFakeCoordinator, resourcesWithUnchosenCycleExpiry } from './winds-test-resources';
 
 const url = '/api/weather/winds/point?lat=42.6&lon=-89&altitudeFeetMsl=4500&plannedUtc=2026-09-22T01%3A00%3A00.000Z';
 
@@ -255,6 +255,39 @@ describe('winds point request', () => {
     } };
     await expect(createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
       .rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
+
+  it('blocks a point answer when an unchosen cycle expires during catalog loading', async () => {
+    let current = FIXED_NOW;
+    const upstream: ServiceFetcher = { async fetch(request) {
+      const parsed = new URL(request.url);
+      if (parsed.pathname.endsWith('/windtemp')) {
+        const cycle = parsed.searchParams.get('fcst');
+        return new Response(cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product);
+      }
+      return catalogResponse();
+    } };
+    const port = resourcesWithUnchosenCycleExpiry(upstream, () => current, (value) => { current = value; });
+    await expect(createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
+
+  it('recomputes displayed resource age and remaining freshness at answer assembly', async () => {
+    let current = FIXED_NOW;
+    const upstream: ServiceFetcher = { async fetch(request) {
+      const parsed = new URL(request.url);
+      if (parsed.pathname.endsWith('/windtemp')) {
+        const cycle = parsed.searchParams.get('fcst');
+        return new Response(cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product);
+      }
+      return catalogResponse();
+    } };
+    const port = resourcesWithUnchosenCycleExpiry(upstream, () => current, (value) => { current = value; }, 30 * 60_000);
+    const answer = await createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    expect(answer.product.cache).toMatchObject({ ageSeconds: 1800, freshnessRemainingSeconds: 1800, servedAt: current.toISOString() });
+    expect(answer.catalog.cache).toMatchObject({ ageSeconds: 1800, servedAt: current.toISOString() });
   });
 
   it('does not use a fresh cache fetch after its product use window or on stale-on-error fallback', async () => {

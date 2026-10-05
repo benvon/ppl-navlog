@@ -49,3 +49,23 @@ function metadata(checkedAt: Date, fetchedAt: string | undefined, intervalMs: nu
 }
 
 export function unusedFixtureCache(): CacheStore { return { match: async () => undefined, put: async () => undefined }; }
+
+export function resourcesWithUnchosenCycleExpiry(fetcher: ServiceFetcher, now: () => Date, advanceClock: (date: Date) => void, elapsedMs = 59 * 60_000): WeatherResourcePort {
+  const base = resourcesFromFakeCoordinator(fetcher, now);
+  return { async getResource(key) {
+    const result = await base.getResource(key);
+    if (!result.ok) return result;
+    if (key === 'station-catalog:v1') {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      advanceClock(new Date(FIXTURE_NOW.getTime() + elapsedMs));
+      return result;
+    }
+    if (key === 'winds:us:24') {
+      const refreshAfter = new Date(FIXTURE_NOW.getTime() + 59 * 60_000).toISOString();
+      return { ...result, resource: { ...result.resource, metadata: { ...result.resource.metadata, refreshAfter, staleUntil: new Date(Date.parse(refreshAfter) + 120_000).toISOString() } } };
+    }
+    return result;
+  } };
+}
+
+const FIXTURE_NOW = new Date('2026-09-21T18:30:00.000Z');

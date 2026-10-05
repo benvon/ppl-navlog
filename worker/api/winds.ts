@@ -257,6 +257,12 @@ function assertWeatherEligible(provenance: WeatherResourceCacheProvenance, curre
     throw new ApiError('Weather data is temporarily unavailable.', 503, 'upstream_unavailable');
   }
 }
+function provenanceAtAssembly(provenance: WeatherResourceCacheProvenance, current: Date): WeatherResourceCacheProvenance {
+  const fetchedAt = Date.parse(provenance.fetchedAt);
+  const refreshAfter = Date.parse(provenance.refreshAfter);
+  return { ...provenance, ageSeconds: Math.max(0, Math.floor((current.getTime() - fetchedAt) / 1_000)),
+    freshnessRemainingSeconds: Math.max(0, Math.floor((refreshAfter - current.getTime()) / 1_000)), servedAt: current.toISOString() };
+}
 export function createAviationWeatherAdapter(resources: WeatherResourcePort, now: () => Date = () => new Date()): WindsDataAdapter {
   function provenance(envelope: WeatherResourceEnvelope, state: 'fresh' | 'grace', source: 'edge' | 'coordinator' | undefined, key: WeatherResourceKey): WeatherResourceCacheProvenance {
     const current = now();
@@ -320,9 +326,10 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       const identities = pointStationInfo(catalog.product, ids, region);
       const stations = selectPointStations(query, chosen, identities);
       const assembledAt = now();
-      assertWeatherEligible(chosen.provenance, assembledAt);
+      products.forEach((item) => assertWeatherEligible(item.provenance, assembledAt));
       assertWeatherEligible(catalog.provenance, assembledAt);
-      return answerFromPointStations(query, chosen, stations, catalog.provenance);
+      const assembledChosen = { ...chosen, provenance: provenanceAtAssembly(chosen.provenance, assembledAt) };
+      return answerFromPointStations(query, assembledChosen, stations, provenanceAtAssembly(catalog.provenance, assembledAt));
     },
     async getWindsStations(route) {
       const region = regionForRoute(route); const [{ products, unavailableCycles }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
@@ -341,7 +348,7 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       const assembledAt = now();
       assertWeatherEligible(catalog.provenance, assembledAt);
       products.forEach((item) => assertWeatherEligible(item.provenance, assembledAt));
-      return { stations, forecasts, unavailableForecastCycles: unavailableCycles, provenance: products.map(({ provenance: item }) => item), catalog: catalog.provenance };
+      return { stations, forecasts, unavailableForecastCycles: unavailableCycles, provenance: products.map(({ provenance: item }) => provenanceAtAssembly(item, assembledAt)), catalog: provenanceAtAssembly(catalog.provenance, assembledAt) };
     },
     async getWindsForecast(station, validTime, region) {
       if (!/^[A-Z0-9]{3}$/.test(station)) throw new ApiError('Invalid Winds/Temps station identifier. Expected exactly three alphanumeric characters.', 400, 'invalid_request');
@@ -355,9 +362,9 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       if (!info) throw new ApiError('The requested winds station lacks verified coordinates.', 502, 'upstream_invalid_response');
       const assembledAt = now();
       assertWeatherEligible(catalog.provenance, assembledAt);
-      assertWeatherEligible(match.provenance, assembledAt);
+      products.forEach((item) => assertWeatherEligible(item.provenance, assembledAt));
       const windsStation: WindsStation = { id: station, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region: match.product.region, availableForecastCycles: [match.forecast.forecastCycle], source: 'aviationweather' };
-      return { forecast: { station: windsStation, forecastCycle: match.forecast.forecastCycle, issuedAt: match.forecast.issuedAt, validAt: match.forecast.validAt, useFrom: match.forecast.useFrom, useUntil: match.forecast.useUntil, levels: match.forecast.levels, rawProduct: match.product.rawProduct, source: 'aviationweather', fetchedAt: match.product.fetchedAt }, provenance: match.provenance, catalog: catalog.provenance };
+      return { forecast: { station: windsStation, forecastCycle: match.forecast.forecastCycle, issuedAt: match.forecast.issuedAt, validAt: match.forecast.validAt, useFrom: match.forecast.useFrom, useUntil: match.forecast.useUntil, levels: match.forecast.levels, rawProduct: match.product.rawProduct, source: 'aviationweather', fetchedAt: match.product.fetchedAt }, provenance: provenanceAtAssembly(match.provenance, assembledAt), catalog: provenanceAtAssembly(catalog.provenance, assembledAt) };
     }
   };
 }
