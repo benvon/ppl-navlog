@@ -158,6 +158,7 @@ export class WeatherBudgetCoordinator {
     const startedAt = Date.now();
     const reservation = await this.reserveDispatch(key, startedAt);
     if ('outcome' in reservation) return reservation.outcome;
+    this.emit(key, 'attempt_started', 0, 0);
     try {
       const resource = await fetchWeatherResource(key, { fetch: (request) => fetch(request) }, previous);
       const published = await this.store.publishResource(key, reservation.generation, resource, Date.now());

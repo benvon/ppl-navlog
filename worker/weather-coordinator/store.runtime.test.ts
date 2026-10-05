@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { build } from 'esbuild';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+await import('./runtime-tooling');
 const miniflarePackage = 'miniflare';
 const { Miniflare } = await import(miniflarePackage);
 
@@ -17,7 +18,7 @@ beforeAll(async () => {
   tempDir = await mkdtemp(join(process.cwd(), '.weather-budget-test-'));
   const outfile = join(tempDir, 'worker.mjs');
   await build({ entryPoints: ['worker/weather-coordinator/test-harness.ts'], outfile, bundle: true, format: 'esm', platform: 'browser', target: 'es2022' });
-  mf = new Miniflare({ scriptPath: outfile, modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-07-30', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
+  mf = new Miniflare({ scriptPath: outfile, modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-09-21', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
 });
 afterAll(async () => { await mf?.dispose(); if (tempDir) await rm(tempDir, { recursive: true, force: true }); });
 
@@ -33,7 +34,7 @@ describe('SQLite-backed weather budget in workerd', () => {
     const reservation = await call('reserve', 'winds:alaska:12');
     expect(reservation.generation).toBe(1);
     await mf.dispose();
-    mf = new Miniflare({ scriptPath: join(tempDir, 'worker.mjs'), modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-07-30', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
+    mf = new Miniflare({ scriptPath: join(tempDir, 'worker.mjs'), modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-09-21', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
     const busy = await call('reserve', 'winds:alaska:12', { now: 1_800_000_031_000 });
     expect(busy.allowed).toBe(false);
     expect(busy.retryAtMs).toBe(1_800_000_091_000);
@@ -127,7 +128,7 @@ describe('SQLite-backed weather budget in workerd', () => {
     await call('fail', 'winds:us:06', { now: start + 1, generation: Number(first.generation), providerRetryAt: start + 90_000, objectId });
     expect((await call('cooldown', 'winds:us:06', { objectId })).cooldown).toBe(start + 90_000);
     await mf.dispose();
-    mf = new Miniflare({ scriptPath: join(tempDir, 'worker.mjs'), modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-07-30', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
+    mf = new Miniflare({ scriptPath: join(tempDir, 'worker.mjs'), modules: true, durableObjects: { STORE: { className: 'WeatherBudgetTestHarness', useSQLite: true, unsafeUniqueKey: 'weather-test-v1' } }, compatibilityDate: '2026-09-21', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
     expect((await call('cooldown', 'winds:us:06', { objectId })).cooldown).toBe(start + 90_000);
     const denied = await call('reserve', 'winds:alaska:06', { now: start + 10_000, objectId });
     expect(denied.allowed).toBe(false);

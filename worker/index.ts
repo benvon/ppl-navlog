@@ -22,6 +22,8 @@ export interface Env {
   AWC_COORDINATOR_API?: ServiceFetcher;
 }
 
+interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; }
+
 const API_PATH_PREFIX = '/api/';
 
 const STATIC_SECURITY_HEADERS: Readonly<Record<string, string>> = {
@@ -58,7 +60,7 @@ async function admitApiRequest(request: Request, env: Env, requestId: string): P
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, context?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith(API_PATH_PREFIX)) {
@@ -70,7 +72,7 @@ export default {
         : undefined;
       const edgeCache = env.WINDS_CACHE ?? (globalThis as unknown as { caches?: { default?: CacheStore } }).caches?.default;
       const windsData = env.AWC_COORDINATOR_API
-        ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, env.APP_ENV as 'development' | 'production'))
+        ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, env.APP_ENV as 'development' | 'production', undefined, context?.waitUntil.bind(context)))
         : undefined;
       return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData });
     }

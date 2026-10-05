@@ -129,7 +129,8 @@ export function createWeatherResourceClient(
   fetcher: ServiceFetcher,
   cache: CacheStore | undefined,
   environment: 'development' | 'production',
-  now: () => Date = () => new Date()
+  now: () => Date = () => new Date(),
+  waitUntil?: (promise: Promise<unknown>) => void
 ): WeatherResourcePort {
   // The client is constructed once per public API request, so all resources
   // share the same absolute 15-second coordinator wait budget.
@@ -141,17 +142,17 @@ export function createWeatherResourceClient(
       const cached = await readEdgeResource(cache, cacheKey, resourceKey, deadline);
       if (cached?.ok) { recordOutcome(resourceKey, 'edge_hit'); return cached; }
       if (remainingMs(deadline) <= 0) throw deadlineError();
-      return fetchCoordinatorResource(fetcher, cache, cacheKey, resourceKey, deadline, now);
+      return fetchCoordinatorResource(fetcher, cache, cacheKey, resourceKey, deadline, now, waitUntil);
     }
   };
 }
 
-async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheStore | undefined, cacheKey: Request, key: WeatherResourceKey, deadline: RequestDeadline, now: () => Date): Promise<WeatherResourceDelivery> {
+async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheStore | undefined, cacheKey: Request, key: WeatherResourceKey, deadline: RequestDeadline, now: () => Date, waitUntil?: (promise: Promise<unknown>) => void): Promise<WeatherResourceDelivery> {
   const startedAt = now().getTime();
   try {
     const result = await requestCoordinator(fetcher, key, deadline);
     if (!result.ok) throw apiFailure(result);
-    if (result.state === 'fresh' && freshUntil(result.resource, now()) && cache) cacheFreshResource(cache, cacheKey, key, result.resource, deadline);
+    if (result.state === 'fresh' && freshUntil(result.resource, now()) && cache) cacheFreshResource(cache, cacheKey, key, result.resource, deadline, waitUntil);
     recordOutcome(key, result.state === 'grace' ? 'coordinator_grace' : 'coordinator_fresh', now().getTime() - startedAt);
     return { ...result, source: 'coordinator' };
   } catch (error) {
@@ -161,11 +162,14 @@ async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheSto
   }
 }
 
-function cacheFreshResource(cache: CacheStore, request: Request, key: WeatherResourceKey, resource: Extract<WeatherResourceResult, { ok: true }>['resource'], deadline: RequestDeadline): void {
-  const response = Response.json(resource, { headers: { 'Cache-Control': 'private, max-age=3600' } });
+function cacheFreshResource(cache: CacheStore, request: Request, key: WeatherResourceKey, resource: Extract<WeatherResourceResult, { ok: true }>['resource'], deadline: RequestDeadline, waitUntil?: (promise: Promise<unknown>) => void): void {
+  const maxAgeSeconds = Math.max(0, Math.floor((Date.parse(resource.metadata.refreshAfter) - deadline.now().getTime()) / 1_000));
+  const response = Response.json(resource, { headers: { 'Cache-Control': `public, max-age=${maxAgeSeconds}` } });
   try {
     const write = Promise.resolve().then(() => cache.put(request, response));
-    void beforeDeadline(write, deadline, () => { void response.body?.cancel().catch(() => undefined); })
+    const background = beforeDeadline(write, deadline, () => { void response.body?.cancel().catch(() => undefined); })
       .catch(() => { recordOutcome(key, 'cache_write_fault'); });
+    if (waitUntil) waitUntil(background);
+    else void background;
   } catch { recordOutcome(key, 'cache_write_fault'); }
 }

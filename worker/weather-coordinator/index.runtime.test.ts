@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { build } from 'esbuild';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+await import('./runtime-tooling');
 const miniflarePackage = 'miniflare';
 const { Miniflare } = await import(miniflarePackage);
 interface Runtime { dispatchFetch(url: string, init?: RequestInit): Promise<Response>; dispose(): Promise<void>; }
@@ -10,7 +11,7 @@ let tempDir: string;
 async function createRuntime(): Promise<Runtime> {
   const outfile = join(tempDir, 'worker.mjs');
   if (!(await stat(outfile).catch(() => undefined))) await build({ entryPoints: ['worker/weather-coordinator/runtime-harness.ts'], outfile, bundle: true, format: 'esm', platform: 'browser', target: 'es2022' });
-  return new Miniflare({ scriptPath: outfile, modules: true, durableObjects: { WEATHER_BUDGET: { className: 'WeatherBudgetCoordinator', useSQLite: true, unsafeUniqueKey: 'awc-budget-v1' } }, compatibilityDate: '2026-07-30', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
+  return new Miniflare({ scriptPath: outfile, modules: true, durableObjects: { WEATHER_BUDGET: { className: 'WeatherBudgetTestCoordinator', useSQLite: true, unsafeUniqueKey: 'awc-budget-v1' } }, compatibilityDate: '2026-09-21', durableObjectsPersist: join(tempDir, 'do') }) as Runtime;
 }
 beforeAll(async () => {
   tempDir = await mkdtemp(join(process.cwd(), '.weather-coordinator-test-'));
