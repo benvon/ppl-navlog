@@ -31,7 +31,7 @@ export default {
     if (url.pathname === '/_test/provider') { upstreamMode = url.searchParams.get('mode') as typeof upstreamMode; return new Response(null, { status: 204 }); }
     if (url.pathname === '/_test/release') { releaseFetch?.(); blockedFetch = undefined; return new Response(null, { status: 204 }); }
     if (url.pathname === '/_test/advance') { clock += Number(url.searchParams.get('ms') ?? 0); return Response.json({ now: clock }); }
-    if (url.pathname === '/_test/clock-sequence') { clockSequence = url.searchParams.has('first') ? [Number(url.searchParams.get('first')), ...(url.searchParams.has('second') ? [Number(url.searchParams.get('second'))] : [])] : []; return new Response(null, { status: 204 }); }
+    if (url.pathname === '/_test/clock-sequence') { clockSequence = url.searchParams.has('first') ? [Number(url.searchParams.get('first')), ...(url.searchParams.has('second') ? [Number(url.searchParams.get('second'))] : []), ...(url.searchParams.has('third') ? [Number(url.searchParams.get('third'))] : [])] : []; return new Response(null, { status: 204 }); }
     return coordinator.fetch(request, env);
   },
 };

@@ -23,14 +23,14 @@ function safeRetryAt(value: number | undefined): string {
 function unavailable(code: 'service_unavailable' | 'upstream_unavailable', retryAtMs?: number): WeatherResourceResult {
   return { ok: false, code, retryAt: safeRetryAt(retryAtMs) };
 }
-export async function waitForRefreshOwner(owner: Promise<Outcome>, signal?: AbortSignal): Promise<Outcome> {
+export async function waitForRefreshOwner(owner: Promise<Outcome>, signal?: AbortSignal, deadlineMs = Date.now() + CALLER_WAIT_MS): Promise<Outcome> {
   let abort!: () => void;
   let waitTimer: ReturnType<typeof setTimeout>;
   const callerEnded = new Promise<Outcome>((resolve) => {
     const finish = (): void => { clearTimeout(waitTimer); signal?.removeEventListener('abort', onAbort); resolve({ callerEnded: true, code: 'service_unavailable', retryAtMs: Date.now() + 60_000 }); };
     const onAbort = (): void => finish();
     abort = onAbort;
-    waitTimer = setTimeout(finish, CALLER_WAIT_MS);
+    waitTimer = setTimeout(finish, Math.max(0, deadlineMs - Date.now()));
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) finish();
   });
@@ -101,10 +101,17 @@ export class WeatherBudgetCoordinator {
   async fetch(request: Request): Promise<Response> {
     const key = await readResourceKey(request);
     if (key instanceof Response) return key;
-    try { return json(this.finalizeResponse(await this.getResource(key, request.signal))); }
+    try {
+      const deadlineMs = Date.now() + CALLER_WAIT_MS;
+      let result = await this.getResource(key, request.signal, deadlineMs);
+      if (result.ok && result.state === 'fresh' && Date.now() >= Date.parse(result.resource.metadata.refreshAfter)) {
+        result = await this.getResource(key, request.signal, deadlineMs);
+      }
+      return json(this.finalizeResponse(result));
+    }
     catch { return json(unavailable('service_unavailable', Date.now() + 60_000), 503); }
   }
-  async getResource(key: WeatherResourceKey, signal?: AbortSignal): Promise<WeatherResourceResult> {
+  async getResource(key: WeatherResourceKey, signal?: AbortSignal, deadlineMs = Date.now() + CALLER_WAIT_MS): Promise<WeatherResourceResult> {
     const observedAt = Date.now();
     if (!Number.isSafeInteger(observedAt)) return unavailable('service_unavailable', observedAt + 60_000);
     let previous: WeatherResourceEnvelope | undefined;
@@ -112,15 +119,15 @@ export class WeatherBudgetCoordinator {
     catch { return unavailable('service_unavailable', Date.now() + 60_000); }
     const now = Date.now();
     if (!Number.isSafeInteger(now)) return unavailable('service_unavailable', now + 60_000);
-    if (previous && Date.parse(previous.metadata.checkedAt) <= now && resourceEligibility(previous.metadata, now) === 'fresh') return this.finalizeResponse({ ok: true, resource: previous, state: 'fresh' });
+    if (previous && Date.parse(previous.metadata.checkedAt) <= now && resourceEligibility(previous.metadata, now) === 'fresh') return { ok: true, resource: previous, state: 'fresh' };
     if (signal?.aborted) return unavailable('service_unavailable', now + 60_000);
     if (this.totalWaiters >= MAX_WAITERS) { this.emit(key, 'waiter_denied', 0, 1); return unavailable('service_unavailable', now + 60_000); }
     const job = this.getOrStartJob(key, previous);
     this.totalWaiters += 1;
     this.waiters.set(key, (this.waiters.get(key) ?? 0) + 1);
-    const outcome = await waitForRefreshOwner(job, signal);
+    const outcome = await waitForRefreshOwner(job, signal, deadlineMs);
     this.releaseWaiter(key);
-    return this.finalizeResponse(assembleWaiterResult(outcome, previous, Date.now()));
+    return assembleWaiterResult(outcome, previous, Date.now());
   }
   private getOrStartJob(key: WeatherResourceKey, previous?: WeatherResourceEnvelope): Promise<Outcome> {
     let job = this.jobs.get(key);
@@ -142,7 +149,7 @@ export class WeatherBudgetCoordinator {
     const now = Date.now();
     if (Date.parse(result.resource.metadata.checkedAt) > now) return unavailable('service_unavailable', now + 60_000);
     const state = resourceEligibility(result.resource.metadata, now);
-    return state === 'expired' ? unavailable('upstream_unavailable', now + 60_000) : { ...result, state };
+    return state === 'expired' || (state === 'grace' && result.state === 'fresh') ? unavailable('upstream_unavailable', now + 60_000) : { ...result, state };
   }
   private emit(key: WeatherResourceKey, outcome: string, durationMs: number, denials: number): void {
     console.info('weather_coordinator', JSON.stringify({ resourceKind: key.startsWith('winds:') ? 'winds' : 'catalog', outcome, durationMs: Math.max(0, durationMs), joins: Math.max(0, (this.waiters.get(key) ?? 1) - 1), denials }));

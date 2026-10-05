@@ -59,14 +59,27 @@ describe('weather coordinator Worker and SQLite object in workerd', () => {
     const after = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
     expect(after.count).toBe(before.count + 1);
   });
+  it('refreshes instead of relabeling a fresh hit when response assembly crosses into grace', async () => {
+    const cached = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { resource: { metadata: { refreshAfter: string } } };
+    const deadline = Date.parse(cached.resource.metadata.refreshAfter);
+    const current = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=0')).json() as { now: number };
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/advance?ms=${deadline - current.now + 1}`);
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/clock-sequence?first=${deadline - 1}&second=${deadline - 1}&third=${deadline - 1}`);
+    const before = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    const response = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { ok: boolean; state?: string };
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/clock-sequence');
+    const after = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    expect(after.count).toBe(before.count + 1);
+    expect(response).toMatchObject({ ok: true, state: 'fresh' });
+  });
   it('rechecks cached eligibility at final response assembly', async () => {
     const currentResource = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { resource: { metadata: { refreshAfter: string; staleUntil: string } } };
     const beforeDeadline = Date.parse(currentResource.resource.metadata.refreshAfter) - 1;
     const current = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=0')).json() as { now: number };
     await mf.dispatchFetch(`https://weather-coordinator.internal/_test/advance?ms=${Date.parse(currentResource.resource.metadata.staleUntil) - current.now + 1}`);
     await mf.dispatchFetch(`https://weather-coordinator.internal/_test/clock-sequence?first=${beforeDeadline}&second=${beforeDeadline}`);
-    const response = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { ok: boolean };
-    expect(response.ok).toBe(false);
+    const response = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { ok: boolean; state?: string };
+    expect(response).toMatchObject({ ok: true, state: 'fresh' });
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/clock-sequence');
   });
   it('serves grace only inside its original deadline and preserves fetchedAt on identical revalidation', async () => {
