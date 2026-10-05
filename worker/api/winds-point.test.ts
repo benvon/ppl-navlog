@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { parseApiRoute } from './request';
 import { ApiError } from './errors';
-import { createAviationWeatherAdapter, decodeWindsProduct, type CacheStore, type ServiceFetcher } from './winds';
+import { createAviationWeatherAdapter, type CacheStore, type ServiceFetcher } from './winds';
+import { decodeWindsProduct } from '../weather-resources/validation';
 
 const url = '/api/weather/winds/point?lat=42.6&lon=-89&altitudeFeetMsl=4500&plannedUtc=2026-09-22T01%3A00%3A00.000Z';
 

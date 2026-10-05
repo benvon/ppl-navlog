@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ApiError } from './errors';
-import { createAviationWeatherAdapter, decodeWindsProduct, regionForRoute, type CacheStore, type ServiceFetcher, type WindsDataAdapter } from './winds';
+import { createAviationWeatherAdapter, regionForRoute, type CacheStore, type ServiceFetcher, type WindsDataAdapter } from './winds';
+import { decodeWindsProduct } from '../weather-resources/validation';
 import type { AloftPointQuery } from './contracts';
 
 /** Captured from the official AWC US low-level FB product on 2026-09-21. */
