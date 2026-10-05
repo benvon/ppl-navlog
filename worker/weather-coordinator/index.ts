@@ -13,7 +13,7 @@ const PRIVATE_BODY_LIMIT = 256;
 const PRIVATE_BODY_TIMEOUT_MS = 1_000;
 type CoordinatorState = { storage: StoreStorage; waitUntil(promise: Promise<unknown>): void };
 type CoordinatorEnv = Record<string, never>;
-type Outcome = { result?: WeatherResourceEnvelope; retryAtMs?: number; code?: 'service_unavailable' | 'upstream_unavailable' };
+export type Outcome = { result?: WeatherResourceEnvelope; retryAtMs?: number; code?: 'service_unavailable' | 'upstream_unavailable'; callerEnded?: true };
 const json = (value: unknown, status = 200): Response => Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } });
 function safeRetryAt(value: number | undefined): string {
   const fallback = Math.min(253_402_300_799_000, Date.now() + 86_400_000);
@@ -22,6 +22,30 @@ function safeRetryAt(value: number | undefined): string {
 }
 function unavailable(code: 'service_unavailable' | 'upstream_unavailable', retryAtMs?: number): WeatherResourceResult {
   return { ok: false, code, retryAt: safeRetryAt(retryAtMs) };
+}
+export async function waitForRefreshOwner(owner: Promise<Outcome>, signal?: AbortSignal): Promise<Outcome> {
+  let abort!: () => void;
+  let waitTimer: ReturnType<typeof setTimeout>;
+  const callerEnded = new Promise<Outcome>((resolve) => {
+    const finish = (): void => { clearTimeout(waitTimer); signal?.removeEventListener('abort', onAbort); resolve({ callerEnded: true, code: 'service_unavailable', retryAtMs: Date.now() + 60_000 }); };
+    const onAbort = (): void => finish();
+    abort = onAbort;
+    waitTimer = setTimeout(finish, CALLER_WAIT_MS);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) finish();
+  });
+  try { return await Promise.race([owner, callerEnded]); }
+  catch { return { code: 'service_unavailable', retryAtMs: Date.now() + 60_000 }; }
+  finally { clearTimeout(waitTimer!); signal?.removeEventListener('abort', abort); }
+}
+export function assembleWaiterResult(outcome: Outcome, previous: WeatherResourceEnvelope | undefined, now: number): WeatherResourceResult {
+  if (outcome.callerEnded) return unavailable(outcome.code ?? 'service_unavailable', outcome.retryAtMs);
+  const candidate = outcome.result ?? previous;
+  if (candidate && Date.parse(candidate.metadata.checkedAt) <= now) {
+    const state = resourceEligibility(candidate.metadata, now);
+    if (state !== 'expired') return { ok: true, resource: candidate, state };
+  }
+  return unavailable(outcome.code ?? 'upstream_unavailable', outcome.retryAtMs);
 }
 function validatePrivateRequest(request: Request): Response | undefined {
   const url = new URL(request.url);
@@ -77,24 +101,26 @@ export class WeatherBudgetCoordinator {
   async fetch(request: Request): Promise<Response> {
     const key = await readResourceKey(request);
     if (key instanceof Response) return key;
-    try { return json(await this.getResource(key, request.signal)); }
+    try { return json(this.finalizeResponse(await this.getResource(key, request.signal))); }
     catch { return json(unavailable('service_unavailable', Date.now() + 60_000), 503); }
   }
   async getResource(key: WeatherResourceKey, signal?: AbortSignal): Promise<WeatherResourceResult> {
-    const now = Date.now();
-    if (!Number.isSafeInteger(now)) return unavailable('service_unavailable', now + 60_000);
+    const observedAt = Date.now();
+    if (!Number.isSafeInteger(observedAt)) return unavailable('service_unavailable', observedAt + 60_000);
     let previous: WeatherResourceEnvelope | undefined;
     try { previous = await this.store.readResource(key); }
-    catch { return unavailable('service_unavailable', now + 60_000); }
-    if (previous && Date.parse(previous.metadata.checkedAt) <= now && resourceEligibility(previous.metadata, now) === 'fresh') return { ok: true, resource: previous, state: 'fresh' };
+    catch { return unavailable('service_unavailable', Date.now() + 60_000); }
+    const now = Date.now();
+    if (!Number.isSafeInteger(now)) return unavailable('service_unavailable', now + 60_000);
+    if (previous && Date.parse(previous.metadata.checkedAt) <= now && resourceEligibility(previous.metadata, now) === 'fresh') return this.finalizeResponse({ ok: true, resource: previous, state: 'fresh' });
     if (signal?.aborted) return unavailable('service_unavailable', now + 60_000);
     if (this.totalWaiters >= MAX_WAITERS) { this.emit(key, 'waiter_denied', 0, 1); return unavailable('service_unavailable', now + 60_000); }
     const job = this.getOrStartJob(key, previous);
     this.totalWaiters += 1;
     this.waiters.set(key, (this.waiters.get(key) ?? 0) + 1);
-    const outcome = await this.waitForJob(job, signal);
+    const outcome = await waitForRefreshOwner(job, signal);
     this.releaseWaiter(key);
-    return this.eligibleResult(outcome, previous);
+    return this.finalizeResponse(assembleWaiterResult(outcome, previous, Date.now()));
   }
   private getOrStartJob(key: WeatherResourceKey, previous?: WeatherResourceEnvelope): Promise<Outcome> {
     let job = this.jobs.get(key);
@@ -106,36 +132,17 @@ export class WeatherBudgetCoordinator {
     }
     return job;
   }
-  private async waitForJob(job: Promise<Outcome>, signal?: AbortSignal): Promise<Outcome> {
-    let abort!: () => void;
-    let waitTimer: ReturnType<typeof setTimeout>;
-    const canceled = new Promise<Outcome>((resolve) => {
-      const finish = (outcome: Outcome): void => { clearTimeout(waitTimer); signal?.removeEventListener('abort', onAbort); resolve(outcome); };
-      const onAbort = (): void => finish({ code: 'service_unavailable', retryAtMs: Date.now() + 60_000 });
-      abort = onAbort;
-      waitTimer = setTimeout(() => finish({ code: 'service_unavailable', retryAtMs: Date.now() + 60_000 }), CALLER_WAIT_MS);
-      signal?.addEventListener('abort', onAbort, { once: true });
-    });
-    try { return await Promise.race([job, canceled]); }
-    catch { return { code: 'service_unavailable', retryAtMs: Date.now() + 60_000 }; }
-    finally {
-      clearTimeout(waitTimer!);
-      signal?.removeEventListener('abort', abort);
-    }
-  }
   private releaseWaiter(key: WeatherResourceKey): void {
     this.totalWaiters -= 1;
     const remaining = (this.waiters.get(key) ?? 1) - 1;
     if (remaining > 0) this.waiters.set(key, remaining); else this.waiters.delete(key);
   }
-  private eligibleResult(outcome: Outcome, previous?: WeatherResourceEnvelope): WeatherResourceResult {
-    const completedAt = Date.now();
-    const candidate = outcome.result ?? previous;
-    if (candidate && Date.parse(candidate.metadata.checkedAt) <= completedAt) {
-      const state = resourceEligibility(candidate.metadata, completedAt);
-      if (state !== 'expired') return { ok: true, resource: candidate, state };
-    }
-    return unavailable(outcome.code ?? 'upstream_unavailable', outcome.retryAtMs);
+  private finalizeResponse(result: WeatherResourceResult): WeatherResourceResult {
+    if (!result.ok) return result;
+    const now = Date.now();
+    if (Date.parse(result.resource.metadata.checkedAt) > now) return unavailable('service_unavailable', now + 60_000);
+    const state = resourceEligibility(result.resource.metadata, now);
+    return state === 'expired' ? unavailable('upstream_unavailable', now + 60_000) : { ...result, state };
   }
   private emit(key: WeatherResourceKey, outcome: string, durationMs: number, denials: number): void {
     console.info('weather_coordinator', JSON.stringify({ resourceKind: key.startsWith('winds:') ? 'winds' : 'catalog', outcome, durationMs: Math.max(0, durationMs), joins: Math.max(0, (this.waiters.get(key) ?? 1) - 1), denials }));

@@ -4,9 +4,12 @@ import coordinator, { WeatherBudgetCoordinator } from './index';
 let upstreamCalls = 0;
 let upstreamMode: 'ok' | 'blocked' | 'blocked-fail' | '429' | 'fail' | 'race' = 'ok';
 let clock = Date.now();
+let clockSequence: number[] = [];
 let releaseFetch!: () => void;
 let blockedFetch: Promise<void> | undefined;
-Date.now = () => clock;
+Date.now = () => clockSequence.shift() ?? clock;
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0], timeout?: number, ...args: unknown[]) => nativeSetTimeout(handler, timeout === 5_000 ? 30_000 : timeout, ...args)) as typeof setTimeout;
 globalThis.fetch = async (input: RequestInfo | URL) => {
   upstreamCalls += 1;
   const mode = upstreamMode;
@@ -28,6 +31,7 @@ export default {
     if (url.pathname === '/_test/provider') { upstreamMode = url.searchParams.get('mode') as typeof upstreamMode; return new Response(null, { status: 204 }); }
     if (url.pathname === '/_test/release') { releaseFetch?.(); blockedFetch = undefined; return new Response(null, { status: 204 }); }
     if (url.pathname === '/_test/advance') { clock += Number(url.searchParams.get('ms') ?? 0); return Response.json({ now: clock }); }
+    if (url.pathname === '/_test/clock-sequence') { clockSequence = url.searchParams.has('first') ? [Number(url.searchParams.get('first')), ...(url.searchParams.has('second') ? [Number(url.searchParams.get('second'))] : [])] : []; return new Response(null, { status: 204 }); }
     return coordinator.fetch(request, env);
   },
 };

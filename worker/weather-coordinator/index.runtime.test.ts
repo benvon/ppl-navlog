@@ -30,16 +30,44 @@ describe('weather coordinator Worker and SQLite object in workerd', () => {
     expect((await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number }).count).toBe(0);
   });
   it('serves one upstream result to concurrent callers', async () => {
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=blocked');
     const requests = Array.from({ length: 6 }, () => privateRequest('{"resource":"winds:us:06"}'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const beforeRelease = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    expect(beforeRelease.count).toBe(1);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/release');
     const responses = await Promise.all(requests);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=ok');
     expect(responses.every((response) => response.status === 200)).toBe(true);
     expect(new Set(await Promise.all(responses.map(async (response) => await response.text()))).size).toBe(1);
     const before = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
-    expect(before.count).toBe(1);
     const cached = await privateRequest('{"resource":"winds:us:06"}');
     expect(cached.status).toBe(200);
     const after = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
     expect(after.count).toBe(before.count);
+  });
+  it('uses a fresh trusted clock after the awaited SQLite resource read', async () => {
+    const body = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { resource: { metadata: { refreshAfter: string } } };
+    const deadline = Date.parse(body.resource.metadata.refreshAfter);
+    const current = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=0')).json() as { now: number };
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/advance?ms=${deadline - current.now + 1}`);
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/clock-sequence?first=${deadline - 1}`);
+    const before = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    const checked = await privateRequest('{"resource":"winds:us:06"}');
+    expect((await checked.json() as { ok: boolean }).ok).toBe(true);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/clock-sequence');
+    const after = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    expect(after.count).toBe(before.count + 1);
+  });
+  it('rechecks cached eligibility at final response assembly', async () => {
+    const currentResource = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { resource: { metadata: { refreshAfter: string; staleUntil: string } } };
+    const beforeDeadline = Date.parse(currentResource.resource.metadata.refreshAfter) - 1;
+    const current = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=0')).json() as { now: number };
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/advance?ms=${Date.parse(currentResource.resource.metadata.staleUntil) - current.now + 1}`);
+    await mf.dispatchFetch(`https://weather-coordinator.internal/_test/clock-sequence?first=${beforeDeadline}&second=${beforeDeadline}`);
+    const response = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { ok: boolean };
+    expect(response.ok).toBe(false);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/clock-sequence');
   });
   it('serves grace only inside its original deadline and preserves fetchedAt on identical revalidation', async () => {
     const resourceKey = 'winds:hawaii:12';
@@ -103,7 +131,27 @@ describe('weather coordinator Worker and SQLite object in workerd', () => {
       await mf.dispatchFetch(`https://weather-coordinator.internal/_test/advance?ms=${expectedSeconds * 1_000 + 1}`);
     }
   });
-  it('bounds waiting callers at 64 and keeps owner work after the caller wait expires', async () => {
+  it('bounds the real HTTP queue to two starts and expires queued jobs after ten seconds', async () => {
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=86401000');
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=blocked');
+    const keys = ['winds:us:06', 'winds:us:12', 'winds:us:24', 'winds:alaska:06', 'winds:alaska:12', 'winds:alaska:24', 'winds:hawaii:06', 'winds:hawaii:12', 'winds:hawaii:24', 'station-catalog:v1'];
+    const before = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    const requests = keys.map((resource) => privateRequest(JSON.stringify({ resource })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const activeStarts = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    expect(activeStarts.count - before.count).toBe(2);
+    const queuedResults = await Promise.all(requests.slice(2));
+    expect(queuedResults.every((response) => response.status === 200)).toBe(true);
+    expect((await Promise.all(queuedResults.map(async (response) => await response.json() as { ok: boolean }))).every((result) => !result.ok)).toBe(true);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/release');
+    expect((await Promise.all(requests.slice(0, 2))).every((response) => response.status === 200)).toBe(true);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=ok');
+    const recovered = await privateRequest('{"resource":"winds:alaska:06"}');
+    expect((await recovered.json() as { ok: boolean }).ok).toBe(true);
+    const total = await (await mf.dispatchFetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number };
+    expect(total.count).toBe(activeStarts.count + 1);
+  }, 30_000);
+  it('bounds waiting callers at 64 and releases aborted waiters while owner work continues', async () => {
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/advance?ms=61000');
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=blocked');
     const callers = Array.from({ length: 64 }, () => privateRequest('{"resource":"winds:alaska:24"}'));
@@ -123,6 +171,7 @@ describe('weather coordinator Worker and SQLite object in workerd', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/release');
     expect((await Promise.all(remainingWaiters)).every((response) => response.status === 200)).toBe(true);
+    await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=ok');
     await new Promise((resolve) => setTimeout(resolve, 100));
     const fresh = await privateRequest('{"resource":"winds:hawaii:24"}');
     expect((await fresh.json() as { ok: boolean; state?: string })).toMatchObject({ ok: true, state: 'fresh' });
