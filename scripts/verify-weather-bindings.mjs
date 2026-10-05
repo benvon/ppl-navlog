@@ -13,8 +13,11 @@ function environment(config, name, role) {
 
 export function verifyWeatherBindings(navlogConfig, coordinatorConfig) {
   const coordinatorNames = new Set();
-  const namespaceIds = new Set();
   const limiterNamespaceIds = new Set();
+  if (hasPublicRoute(coordinatorConfig)) throw new Error('Weather coordinator must not define a public route.');
+  if (coordinatorConfig.workers_dev !== false || coordinatorConfig.preview_urls !== false) {
+    throw new Error('Weather coordinator base config must disable workers.dev and preview URLs.');
+  }
   for (const [envName, expected] of Object.entries(EXPECTED)) {
     const app = environment(navlogConfig, envName, 'Navlog');
     const coordinator = environment(coordinatorConfig, envName, 'Weather coordinator');
@@ -23,8 +26,11 @@ export function verifyWeatherBindings(navlogConfig, coordinatorConfig) {
     }
     if (coordinatorNames.has(coordinator.name)) throw new Error('Development and production coordinator targets must be isolated.');
     coordinatorNames.add(coordinator.name);
-    if (coordinator.routes?.length || coordinator.workers_dev !== false || coordinator.preview_urls !== false) {
+    if (hasPublicRoute(coordinator)) {
       throw new Error(`${envName} coordinator must have no public route, workers.dev, or preview URL.`);
+    }
+    if (coordinator.workers_dev !== false || coordinator.preview_urls !== false) {
+      throw new Error(`${envName} coordinator must disable workers.dev and preview URLs.`);
     }
     if (app.workers_dev !== false) throw new Error(`${envName} navlog must disable workers.dev.`);
     const services = app.services ?? [];
@@ -41,19 +47,23 @@ export function verifyWeatherBindings(navlogConfig, coordinatorConfig) {
     if (limiterNamespaceIds.has(String(rateLimiters[0].namespace_id))) throw new Error('Development and production must use distinct API_RATE_LIMITER namespaces.');
     limiterNamespaceIds.add(String(rateLimiters[0].namespace_id));
     const objects = coordinator.durable_objects?.bindings ?? [];
-    if (!objects.some((binding) => binding.name === 'WEATHER_BUDGET' && binding.class_name === 'WeatherBudgetCoordinator')) {
-      throw new Error(`${envName} requires the WEATHER_BUDGET control.`);
+    const weatherBudget = objects.filter((binding) => binding.name === 'WEATHER_BUDGET');
+    if (weatherBudget.length !== 1 || weatherBudget[0].class_name !== 'WeatherBudgetCoordinator' ||
+        weatherBudget[0].script_name != null || weatherBudget[0].environment != null) {
+      throw new Error(`${envName} requires exactly one local WEATHER_BUDGET binding to WeatherBudgetCoordinator.`);
     }
     const migration = (coordinator.migrations ?? []).flatMap((item) => item.new_sqlite_classes ?? []);
     if (!migration.includes('WeatherBudgetCoordinator')) throw new Error(`${envName} requires its own SQLite class migration.`);
-    for (const binding of objects) {
-      if (binding.namespace_id != null) {
-        if (namespaceIds.has(String(binding.namespace_id))) throw new Error('Development and production must use distinct Durable Object namespaces.');
-        namespaceIds.add(String(binding.namespace_id));
-      }
-    }
   }
   return true;
+}
+
+function hasPublicRoute(config) {
+  return hasRouteValue(config?.route) || hasRouteValue(config?.routes);
+}
+
+function hasRouteValue(route) {
+  return typeof route === 'string' ? route.length > 0 : Array.isArray(route) && route.length > 0;
 }
 
 if (process.argv[1]?.endsWith('/verify-weather-bindings.mjs')) {
