@@ -116,7 +116,6 @@ describe('public navlog winds route through coordinator service binding and SQLi
   it('dev_exhaustion_cannot_change_production_state', async () => {
     const route = 'https://navlog.test/api/weather/winds/stations?route=20%2C-155';
     const count = async (worker: WorkerFetcher) => (await (await worker.fetch('https://weather-coordinator.internal/_test/upstream-count')).json() as { count: number }).count;
-    const completedCount = async (worker: WorkerFetcher) => (await (await worker.fetch('https://weather-coordinator.internal/_test/upstream-completed-count')).json() as { count: number }).count;
     const attemptsBeforeCatalogFailures = await count(coordinator);
     await coordinator.fetch('https://weather-coordinator.internal/_test/provider?mode=429');
     const advance = async (ms: number) => coordinator.fetch(`https://weather-coordinator.internal/_test/advance?ms=${ms}`);

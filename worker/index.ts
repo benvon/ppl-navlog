@@ -48,6 +48,11 @@ function unavailableResponse(requestId: string): Response {
   return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
 }
 
+function weatherCacheEnvironment(appEnvironment: string | undefined): 'development' | 'production' | undefined {
+  if (appEnvironment === 'local') return 'development';
+  return appEnvironment === 'development' || appEnvironment === 'production' ? appEnvironment : undefined;
+}
+
 async function admitApiRequest(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
   if (!env.API_RATE_LIMITER) return env.APP_ENV === 'local' ? undefined : unavailableResponse(requestId);
   try {
@@ -70,7 +75,7 @@ export default {
         ? createRunwayPickerAdapter(env.RUNWAY_PICKER_API, env.RUNWAY_PICKER_ORIGIN ?? 'https://runway-picker.internal')
         : undefined;
       const edgeCache = env.WINDS_CACHE ?? (globalThis as unknown as { caches?: { default?: CacheStore } }).caches?.default;
-      const weatherEnvironment = env.APP_ENV === 'production' || env.APP_ENV === 'development' ? env.APP_ENV : env.APP_ENV === 'local' ? 'development' : undefined;
+      const weatherEnvironment = weatherCacheEnvironment(env.APP_ENV);
       const windsData = env.AWC_COORDINATOR_API && weatherEnvironment
         ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, weatherEnvironment, undefined, context?.waitUntil.bind(context)))
         : undefined;
