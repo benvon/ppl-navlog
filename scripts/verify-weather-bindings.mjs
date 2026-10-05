@@ -63,7 +63,11 @@ function hasPublicRoute(config) {
 }
 
 function hasRouteValue(route) {
-  return typeof route === 'string' ? route.length > 0 : Array.isArray(route) && route.length > 0;
+  if (route == null) return false;
+  if (typeof route === 'string') return route.trim().length > 0;
+  if (Array.isArray(route)) return route.length > 0;
+  if (typeof route === 'object') return Object.keys(route).length > 0;
+  return Boolean(route);
 }
 
 if (process.argv[1]?.endsWith('/verify-weather-bindings.mjs')) {

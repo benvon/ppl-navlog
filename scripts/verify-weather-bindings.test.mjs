@@ -49,6 +49,12 @@ describe('verifyWeatherBindings', () => {
     const baseSingular = config();
     baseSingular.coordinator.route = 'weather.example.com/*';
     expect(() => verifyWeatherBindings(baseSingular.navlog, baseSingular.coordinator)).toThrow(/public route/i);
+    const baseRouteObject = config();
+    baseRouteObject.coordinator.route = { pattern: 'weather.example.com/*', zone_name: 'example.com' };
+    expect(() => verifyWeatherBindings(baseRouteObject.navlog, baseRouteObject.coordinator)).toThrow(/public route/i);
+    const envRouteObject = config();
+    envRouteObject.coordinator.env.development.route = { pattern: 'weather.example.com/*', zone_name: 'example.com' };
+    expect(() => verifyWeatherBindings(envRouteObject.navlog, envRouteObject.coordinator)).toThrow(/public route/i);
   });
   it('rejects shared rate-limit namespaces', () => {
     const sharedLimiter = config();
