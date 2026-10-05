@@ -51,3 +51,8 @@ The following approved rulings are retained verbatim from the SDD progress ledge
 > Ruling: The Task7 integration review and whole-branch final review will be one review dispatch with both explicit verdicts and the full branch diff — Task7 is the integrated verification handoff, so this avoids duplicating the same final review while preserving whole-branch scrutiny — wrong choice costs a separate review pass if the combined gate misses task-specific evidence.
 
 The handoff reports from Tasks 2, 4, and 5 were scratch process records, not durable design artifacts; their relevant runtime, deadline, browser-injection, and TDD limitations are summarized above. They are removed from the tracked tree after transferring this evidence. The parent-owned modified Task 5 report remains physically untouched for parent cleanup.
+
+
+## Base integration: PR #54 limiter-required policy
+
+The final branch includes `origin/main` PR #54 as a merge commit. API admission preserves its exact local-only exception while retaining the stricter accepted environment policy: only `APP_ENV=local` with no configured limiter bypasses admission; unknown/missing environment values fail closed; development/production require their own limiter; and any configured limiter is enforced even in local mode. Local navlog startup passes `APP_ENV=local` to the development navlog process while retaining the named development environment and its separate coordinator on port 8788. No deployed environment receives the local override.

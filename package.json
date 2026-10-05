@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names ui,worker --prefix name \"vite --host 0.0.0.0 --port 5173\" \"npm run dev:worker\"",
-    "dev:worker": "npm run build && concurrently --kill-others-on-fail --names navlog,coordinator --prefix name \"wrangler dev --local --env development --port 8787 --config wrangler.jsonc\" \"npm run dev:coordinator\"",
+    "dev:worker": "npm run build && concurrently --kill-others-on-fail --names navlog,coordinator --prefix name \"wrangler dev --local --env development --var APP_ENV:local --port 8787 --config wrangler.jsonc\" \"npm run dev:coordinator\"",
     "dev:coordinator": "wrangler dev --local --env development --port 8788 --config wrangler.weather-coordinator.jsonc",
     "build": "vite build && node scripts/write-version-manifest.mjs && node scripts/verify-build-artifacts.mjs",
     "preview": "vite preview --host 0.0.0.0",

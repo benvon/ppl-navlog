@@ -49,8 +49,7 @@ function unavailableResponse(requestId: string): Response {
 }
 
 async function admitApiRequest(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
-  if (env.APP_ENV !== 'development' && env.APP_ENV !== 'production') return unavailableResponse(requestId);
-  if (!env.API_RATE_LIMITER) return unavailableResponse(requestId);
+  if (!env.API_RATE_LIMITER) return env.APP_ENV === 'local' ? undefined : unavailableResponse(requestId);
   try {
     const sourceKey = request.headers.get('CF-Connecting-IP') ?? 'unattributed';
     const decision = await env.API_RATE_LIMITER.limit({ key: sourceKey });
@@ -71,8 +70,9 @@ export default {
         ? createRunwayPickerAdapter(env.RUNWAY_PICKER_API, env.RUNWAY_PICKER_ORIGIN ?? 'https://runway-picker.internal')
         : undefined;
       const edgeCache = env.WINDS_CACHE ?? (globalThis as unknown as { caches?: { default?: CacheStore } }).caches?.default;
-      const windsData = env.AWC_COORDINATOR_API
-        ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, env.APP_ENV as 'development' | 'production', undefined, context?.waitUntil.bind(context)))
+      const weatherEnvironment = env.APP_ENV === 'production' || env.APP_ENV === 'development' ? env.APP_ENV : env.APP_ENV === 'local' ? 'development' : undefined;
+      const windsData = env.AWC_COORDINATOR_API && weatherEnvironment
+        ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, weatherEnvironment, undefined, context?.waitUntil.bind(context)))
         : undefined;
       return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData });
     }

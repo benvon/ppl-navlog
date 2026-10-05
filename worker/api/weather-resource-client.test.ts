@@ -32,7 +32,7 @@ describe('weather resource client', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
         return;
       }
-      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable' });
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable', retryAt: expect.any(Number) });
       await vi.advanceTimersByTimeAsync(15_000);
       await rejected;
       expect(fetch).toHaveBeenCalledTimes(operation === 'coordinator fetch' || operation === 'coordinator body' ? 1 : 0);
@@ -50,7 +50,7 @@ describe('weather resource client', () => {
     });
     try {
       const pending = createWeatherResourceClient({ fetch } as ServiceFetcher, undefined, 'production', () => new Date(checked)).getResource('winds:us:06');
-      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable' });
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'service_unavailable', retryAt: expect.any(Number) });
       await vi.advanceTimersByTimeAsync(15_000);
       await rejected;
       expect(requestSignal?.aborted).toBe(true);
@@ -60,6 +60,12 @@ describe('weather resource client', () => {
       await Promise.resolve();
       expect(cancel).toHaveBeenCalledTimes(1);
     } finally { vi.useRealTimers(); }
+  });
+
+  it('adds a bounded Retry-After for coordinator transport errors', async () => {
+    const fetch = vi.fn(async () => { throw new TypeError('service binding unavailable'); });
+    const client = createWeatherResourceClient({ fetch } as ServiceFetcher, undefined, 'production');
+    await expect(client.getResource('winds:us:06')).rejects.toMatchObject({ code: 'service_unavailable', retryAt: expect.any(Number) });
   });
 
   it('uses a fixed private POST request with only the resource key', async () => {

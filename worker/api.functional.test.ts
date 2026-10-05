@@ -24,10 +24,10 @@ const STATION_CATALOG = [
   { iataId: 'ABQ', faaId: 'ABQ', icaoId: 'KABQ', site: 'Albuquerque', lat: 35.0402, lon: -106.609, elev: 5355 },
 ];
 
-function memoryCache(): CacheStore {
+function memoryCache(observedKeys?: string[]): CacheStore {
   const entries = new Map<string, Response>();
   return {
-    async match(request) { return entries.get(request.url)?.clone(); },
+    async match(request) { observedKeys?.push(request.url); return entries.get(request.url)?.clone(); },
     async put(request, response) { entries.set(request.url, response.clone()); }
   };
 }
@@ -67,9 +67,9 @@ function weatherCoordinator(fetches: Request[]): ServiceFetcher {
 
 function env(overrides: Partial<Env> = {}): Env {
   return {
+    APP_ENV: 'development',
     APP_VERSION: 'v0.1.0',
     APP_COMMIT_SHA: 'abcdef1',
-    APP_ENV: 'development',
     API_RATE_LIMITER: { async limit() { return { success: true }; } },
     AWC_COORDINATOR_API: weatherCoordinator([]),
     ASSETS: { async fetch() { return new Response('asset'); } },
@@ -130,7 +130,8 @@ describe('Worker API functional contracts', () => {
 
   it('discovers published winds stations and exposes provenance for every forecast product', async () => {
     const coordinatorRequests: Request[] = [];
-    const response = await api('/api/weather/winds/stations?route=42.6,-89.0', env({ WINDS_CACHE: memoryCache(), AWC_COORDINATOR_API: weatherCoordinator(coordinatorRequests) }));
+    const edgeKeys: string[] = [];
+    const response = await api('/api/weather/winds/stations?route=42.6,-89.0', env({ APP_ENV: 'local', WINDS_CACHE: memoryCache(edgeKeys), AWC_COORDINATOR_API: weatherCoordinator(coordinatorRequests) }));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -151,6 +152,8 @@ describe('Worker API functional contracts', () => {
     });
     expect(coordinatorRequests).toHaveLength(4);
     expect(coordinatorRequests.every((request) => request.url === 'https://weather-coordinator.internal/resource')).toBe(true);
+    expect(edgeKeys).toHaveLength(4);
+    expect(edgeKeys.every((key) => key.includes('/development/'))).toBe(true);
   });
 
   it('serves the selected forecast and raw official product without a live network dependency', async () => {
@@ -189,6 +192,35 @@ describe('Worker API functional contracts', () => {
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({ code: 'not_found', requestId: FIXED_REQUEST_ID });
     expect(requests).toHaveLength(0);
+  });
+
+  it('preserves per-resource retry deadlines through point, station, and legacy forecast aggregation', async () => {
+    const retryAt = new Date(Date.parse(FIXED_NOW) + 5 * 60_000).toISOString();
+    const catalog = weatherCoordinator([]);
+    const coordinator: ServiceFetcher = { async fetch(request) {
+      const body = await request.clone().json() as { resource: WeatherResourceKey };
+      if (body.resource === 'station-catalog:v1') return catalog.fetch(request);
+      return Response.json({ ok: false, code: 'upstream_unavailable', retryAt }, { status: 503 });
+    } };
+    const routes = [
+      '/api/weather/winds/point?lat=35.0402&lon=-106.609&altitudeFeetMsl=9000&plannedUtc=2026-09-22T01%3A00%3A00.000Z',
+      '/api/weather/winds/stations?route=42.6,-89.0',
+      '/api/weather/winds?station=ABQ&validTime=2026-09-22T00%3A00%3A00.000Z&region=us'
+    ];
+
+    for (const route of routes) {
+      const response = await api(route, env({ AWC_COORDINATOR_API: coordinator }));
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Retry-After')).toBe('300');
+    }
+  });
+
+  it('sets a bounded retry deadline for coordinator transport failures', async () => {
+    const coordinator: ServiceFetcher = { async fetch() { throw new TypeError('service binding unavailable'); } };
+    const response = await api('/api/weather/winds/stations?route=42.6,-89.0', env({ AWC_COORDINATOR_API: coordinator }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Retry-After')).toBe('60');
   });
 
   it('returns browser-safe failures for invalid input, upstream failure, and rate limiting', async () => {

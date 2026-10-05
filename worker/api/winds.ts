@@ -61,13 +61,23 @@ function isHawaii(point: AirportCoordinates): boolean { return point.latitudeDeg
 function isContiguousUs(point: AirportCoordinates): boolean { return point.latitudeDeg >= 24 && point.latitudeDeg <= 50 && point.longitudeDeg >= -130 && point.longitudeDeg <= -60; }
 
 
+function unavailableRetryAt(failures: readonly unknown[]): number | undefined {
+  const deadlines = failures.flatMap((failure) => failure instanceof ApiError && failure.retryAt !== undefined ? [failure.retryAt] : []);
+  return deadlines.length > 0 ? Math.max(...deadlines) : undefined;
+}
+
+function unavailableWindsError(message: string, failures: readonly unknown[] = []): ApiError {
+  return new ApiError(message, 503, 'upstream_unavailable', undefined, unavailableRetryAt(failures));
+}
+
 function requireUniqueForecastMatch(
   matches: readonly { readonly forecast: DecodedForecast; readonly product: CachedProduct; readonly provenance: WeatherResourceCacheProvenance }[],
   unavailableCycles: readonly WindsForecastCycle[],
+  failures: readonly unknown[] = [],
 ): void {
   if (matches.length === 1) return;
   if (matches.length > 1) throw new ApiError('The requested Winds/Temps station and valid time match multiple forecast cycles.', 502, 'upstream_invalid_response');
-  if (unavailableCycles.length > 0) throw new ApiError('The requested forecast is inconclusive because one or more supported cycles are unavailable.', 503, 'upstream_unavailable');
+  if (unavailableCycles.length > 0) throw unavailableWindsError('The requested forecast is inconclusive because one or more supported cycles are unavailable.', failures);
   throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
 }
 
@@ -182,7 +192,7 @@ function validateAloftPointQuery(query: AloftPointQuery, current: Date): WindsRe
 function chooseApplicableProduct(products: ProductEntry[], unavailableCycles: WindsForecastCycle[], failures: unknown[], query: AloftPointQuery, current: Date): ApplicableProduct {
   const boundedFailure = failures.find((failure): failure is ApiError => failure instanceof ApiError && failure.diagnostic !== undefined);
   if (boundedFailure) throw new ApiError('Aviation Weather Center returned an invalid Winds/Temps response.', 502, 'upstream_invalid_response', boundedFailure.diagnostic);
-  if (unavailableCycles.length > 0) throw new ApiError('The point forecast is inconclusive because a supported forecast cycle could not be checked.', 503, 'upstream_unavailable');
+  if (unavailableCycles.length > 0) throw unavailableWindsError('The point forecast is inconclusive because a supported forecast cycle could not be checked.', failures);
   const plannedMs = Date.parse(query.plannedUtc);
   const candidates = products.flatMap((entry) => entry.product.forecasts
     .filter((forecast) => Date.parse(forecast.issuedAt) <= current.getTime() && Date.parse(forecast.issuedAt) <= plannedMs && Date.parse(forecast.useFrom) <= plannedMs && plannedMs < Date.parse(forecast.useUntil))
@@ -332,8 +342,8 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       return answerFromPointStations(query, assembledChosen, stations, provenanceAtAssembly(catalog.provenance, assembledAt));
     },
     async getWindsStations(route) {
-      const region = regionForRoute(route); const [{ products, unavailableCycles }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
-      if (products.length === 0) throw new ApiError('Winds forecast availability is temporarily unavailable.', 503, 'upstream_unavailable');
+      const region = regionForRoute(route); const [{ products, unavailableCycles, failures }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
+      if (products.length === 0) throw unavailableWindsError('Winds forecast availability is temporarily unavailable.', failures);
       const stationCycles = new Map<string, Set<WindsForecastCycle>>(); const availability = new Map<string, WindsForecastAvailability>();
       for (const { product: item } of products) for (const forecast of item.forecasts) {
         const cycles = stationCycles.get(forecast.stationId) ?? new Set<WindsForecastCycle>(); cycles.add(forecast.forecastCycle); stationCycles.set(forecast.stationId, cycles);
@@ -344,7 +354,7 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       if (stations.length === 0) throw new ApiError('No verified winds station has usable forecast data.', 404, 'upstream_no_data');
       const selectableIds = new Set(stations.map((station) => station.id));
       const forecasts = [...availability.values()].filter((forecast) => selectableIds.has(forecast.stationId)).sort((left, right) => left.validAt.localeCompare(right.validAt) || left.forecastCycle.localeCompare(right.forecastCycle) || left.stationId.localeCompare(right.stationId));
-      if (forecasts.length === 0) throw unavailableCycles.length > 0 ? new ApiError('Winds forecast availability is temporarily unavailable.', 503, 'upstream_unavailable') : new ApiError('No verified winds station has a usable forecast period.', 404, 'upstream_no_data');
+      if (forecasts.length === 0) throw unavailableCycles.length > 0 ? unavailableWindsError('Winds forecast availability is temporarily unavailable.', failures) : new ApiError('No verified winds station has a usable forecast period.', 404, 'upstream_no_data');
       const assembledAt = now();
       assertWeatherEligible(catalog.provenance, assembledAt);
       products.forEach((item) => assertWeatherEligible(item.provenance, assembledAt));
@@ -354,10 +364,10 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       if (!/^[A-Z0-9]{3}$/.test(station)) throw new ApiError('Invalid Winds/Temps station identifier. Expected exactly three alphanumeric characters.', 400, 'invalid_request');
       const requestedMs = Date.parse(validTime);
       if (!Number.isFinite(requestedMs) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(validTime)) throw new ApiError('Invalid winds validTime. Expected a canonical UTC ISO timestamp.', 400, 'invalid_request');
-      const [{ products, unavailableCycles }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
+      const [{ products, unavailableCycles, failures }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
       const matches: Array<{ forecast: DecodedForecast; product: CachedProduct; provenance: WeatherResourceCacheProvenance }> = [];
       for (const item of products) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
-      requireUniqueForecastMatch(matches, unavailableCycles); const match = matches[0]!;
+      requireUniqueForecastMatch(matches, unavailableCycles, failures); const match = matches[0]!;
       const info = stationInfo(catalog.product, [station], region).get(station);
       if (!info) throw new ApiError('The requested winds station lacks verified coordinates.', 502, 'upstream_invalid_response');
       const assembledAt = now();

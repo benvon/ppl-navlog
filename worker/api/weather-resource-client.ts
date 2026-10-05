@@ -7,13 +7,18 @@ const PRIVATE_COORDINATOR_URL = 'https://weather-coordinator.internal/resource';
 const EDGE_CACHE_ROOT = 'https://ppl-navlog-cache.invalid/weather-resource/v1';
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const COORDINATOR_TIMEOUT_MS = 15_000;
+const RETRY_AFTER_FALLBACK_MS = 60_000;
 interface RequestDeadline { readonly wallAt: number; readonly monotonicAt: number; readonly now: () => Date; }
 
 function remainingMs(deadline: RequestDeadline): number {
   return Math.min(deadline.wallAt - deadline.now().getTime(), deadline.monotonicAt - performance.now());
 }
 
-function deadlineError(): ApiError { return new ApiError('Weather coordinator is temporarily unavailable.', 503, 'service_unavailable'); }
+function unavailableError(retryAt = Date.now() + RETRY_AFTER_FALLBACK_MS): ApiError {
+  return new ApiError('Weather coordinator is temporarily unavailable.', 503, 'service_unavailable', undefined, retryAt);
+}
+
+function deadlineError(): ApiError { return unavailableError(); }
 
 async function beforeDeadline<T>(operation: Promise<T>, deadline: RequestDeadline, onTimeout?: () => void): Promise<T> {
   const observed = Promise.resolve(operation);
@@ -21,7 +26,10 @@ async function beforeDeadline<T>(operation: Promise<T>, deadline: RequestDeadlin
   if (remaining <= 0) { void observed.catch(() => undefined); try { onTimeout?.(); } catch { /* Deadline cleanup is best effort. */ } throw deadlineError(); }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { try { onTimeout?.(); } catch { /* Deadline cleanup is best effort. */ } reject(deadlineError()); }, remaining);
+    timer = setTimeout(() => {
+      reject(deadlineError());
+      try { onTimeout?.(); } catch { /* Deadline cleanup is best effort. */ }
+    }, remaining);
   });
   try { return await Promise.race([observed, timeout]); }
   finally { if (timer !== undefined) clearTimeout(timer); }
@@ -158,7 +166,7 @@ async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheSto
   } catch (error) {
     recordOutcome(key, 'coordinator_failure', now().getTime() - startedAt);
     if (error instanceof ApiError) throw error;
-    throw new ApiError('Weather coordinator is temporarily unavailable.', 503, 'service_unavailable');
+    throw unavailableError(now().getTime() + RETRY_AFTER_FALLBACK_MS);
   }
 }
 
