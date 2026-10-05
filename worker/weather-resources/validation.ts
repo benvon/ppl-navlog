@@ -1,6 +1,6 @@
 import { ApiError } from '../api/errors';
 import type { AirportCoordinates, WindsAloftLevel, WindsForecastAvailability, WindsForecastCycle, WindsRegion } from '../api/contracts';
-import type { CachedStationCatalog, CachedWindsProduct, StationCatalogEntry, WeatherCheckMetadata, WeatherResourceKey, WeatherResourceResult } from './contracts';
+import type { CachedStationCatalog, CachedWindsProduct, StationCatalogEntry, WeatherCheckMetadata, WeatherResourceEnvelope, WeatherResourceKey, WeatherResourceResult } from './contracts';
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PRODUCT_STATIONS = 10_000;
 const MAX_PRODUCT_LINES = 12_000;
@@ -46,14 +46,14 @@ function isWindsEnvelope(value: Record<string, unknown>, metadata: WeatherCheckM
   if (key === 'station-catalog:v1') return false;
   return Date.parse(metadata.refreshAfter) - Date.parse(metadata.checkedAt) === 60 * 60 * 1_000 && Date.parse(metadata.staleUntil) - Date.parse(metadata.refreshAfter) === 120_000 && hasOnlyKeys(value, ['kind', 'key', 'metadata', 'rawProduct', 'forecasts']) && typeof value.rawProduct === 'string' && new TextEncoder().encode(value.rawProduct).byteLength <= MAX_RESPONSE_BYTES && Array.isArray(value.forecasts) && value.forecasts.length > 0 && value.forecasts.length <= MAX_PRODUCT_STATIONS && value.forecasts.every((forecast) => isForecast(forecast) && forecast.forecastCycle === key.slice(-2));
 }
-function isWeatherEnvelope(value: unknown): boolean {
+export function isWeatherResourceEnvelope(value: unknown): value is WeatherResourceEnvelope {
   if (!isRecord(value) || !isMetadata(value.metadata)) return false;
   if (value.kind === 'catalog') return isCatalogEnvelope(value, value.metadata);
   if (value.kind === 'winds') return isWindsEnvelope(value, value.metadata);
   return false;
 }
 function isWeatherSuccess(value: Record<string, unknown>): boolean {
-  return hasOnlyKeys(value, ['ok', 'resource', 'state']) && (value.state === 'fresh' || value.state === 'grace') && isWeatherEnvelope(value.resource);
+  return hasOnlyKeys(value, ['ok', 'resource', 'state']) && (value.state === 'fresh' || value.state === 'grace') && isWeatherResourceEnvelope(value.resource);
 }
 export function isWeatherResourceResult(value: unknown): value is WeatherResourceResult {
   if (!isRecord(value)) return false;
