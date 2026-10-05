@@ -7,8 +7,8 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names ui,worker --prefix name \"vite --host 0.0.0.0 --port 5173\" \"wrangler dev --local --port 8787\"",
-    "dev:worker": "npm run build && wrangler dev --local --port 8787",
+    "dev": "concurrently --kill-others-on-fail --names ui,worker --prefix name \"vite --host 0.0.0.0 --port 5173\" \"wrangler dev --local --env development --port 8787\"",
+    "dev:worker": "npm run build && wrangler dev --local --env development --port 8787",
     "build": "vite build && node scripts/write-version-manifest.mjs && node scripts/verify-build-artifacts.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
@@ -22,7 +22,10 @@
     "security": "npm run security:secrets && npm run lint:workflows && npm run security:audit",
     "ci": "npm run typecheck && npm run lint && npm run lint:boundaries && npm run test:coverage && npm run build && npm run security",
     "cf:typegen": "wrangler types --env-interface Env",
-    "test:workers": "vitest run --config vitest.workers.config.ts"
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "weather:bindings": "node scripts/verify-weather-bindings.mjs wrangler.jsonc wrangler.weather-coordinator.jsonc",
+    "weather:build": "node scripts/build-weather-coordinator.mjs",
+    "weather:artifact": "node scripts/verify-weather-coordinator-artifact.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

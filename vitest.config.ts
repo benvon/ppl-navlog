@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'jsdom',
-    exclude: ['**/*.runtime.test.ts', 'node_modules/**', 'dist/**'],
+    exclude: ['**/*.runtime.test.ts', 'node_modules/**', 'dist/**', 'release-artifact/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],

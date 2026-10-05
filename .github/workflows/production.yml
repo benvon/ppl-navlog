@@ -62,8 +62,14 @@ jobs:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
         run: |
           set -euo pipefail
-          gh run download "$CI_RUN_ID" --name "$ARTIFACT_NAME" --dir dist
+          gh run download "$CI_RUN_ID" --name "$ARTIFACT_NAME" --dir .
           GITHUB_SHA="$CANDIDATE_SHA" node scripts/verify-deployment-artifact.mjs
+          RELEASE_VERSION="$RELEASE_VERSION" CANDIDATE_SHA="$CANDIDATE_SHA" npm run weather:artifact
+
+      - name: Deploy verified production coordinator
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.commit_sha }}
+        run: npx wrangler deploy release-artifact/weather-coordinator/worker.js --no-bundle --config wrangler.weather-coordinator.jsonc --env production
 
       - name: Deploy to production
         env:
