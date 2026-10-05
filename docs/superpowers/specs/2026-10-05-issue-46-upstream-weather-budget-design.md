@@ -8,7 +8,7 @@ Protect Aviation Weather Center (AWC) availability and limit upstream requests r
 
 Confirmed decisions:
 
-- One authoritative coordinator owns direct AWC retrieval for development and production together.
+- Each environment is a separate application with its own authoritative coordinator, infrastructure, and upstream budgets. Development and production do not share runtime resources or reserve portions of a combined allowance.
 - Provider-wide limits and resource-specific limits count actual attempted upstream HTTP requests, including failures.
 - Winds have comfortable capacity for refresh checks and upstream variability; the daily station catalog has a small budget.
 - Cull the unused public TAF endpoint and its adapter. Do not replace it with another TAF retrieval path.
@@ -37,7 +37,7 @@ The consulted sources do not establish a guaranteed availability timestamp for e
 
 ## Architecture and trust boundary
 
-Deploy a dedicated, private coordinator Worker containing a SQLite-backed Durable Object. Both navlog environments use service bindings to that same coordinator deployment and a fixed, versioned object identity. Do not create separate environment namespaces that silently double the allowance. The coordinator has no public route and workers.dev is disabled. Public clients cannot select its object name or policy configuration.
+Deploy a dedicated, private coordinator Worker containing a SQLite-backed Durable Object for each environment. Each navlog environment binds only to its corresponding coordinator deployment, with a separate Durable Object namespace and a fixed, versioned object identity within that namespace. Isolate stored resources, edge caches, budget counters, refresh leases, cooldowns, and deployment configuration. Share source code and policy definitions, not runtime infrastructure or state. Each coordinator has no public route and workers.dev is disabled. Public clients cannot select its object name, environment, or policy configuration.
 
 The coordinator owns retrieval, validated immutable resource storage, refresh eligibility, budgets, failure state, and fixed upstream request construction. Navlog retains route validation, geographic selection, interpolation, and response assembly. Its edge Cache API remains an optional acceleration layer, never a refresh authority. An edge miss or fault goes to the coordinator; no public Worker path may fall back to a direct AWC fetch.
 
@@ -54,7 +54,7 @@ No cross-request response streams, AbortControllers, or fetch promises are share
 
 ## Proposed hard budgets
 
-All windows are exact rolling windows, with persisted attempt timestamps pruned to bounded retention. Check/debit every applicable window atomically before dispatch. Time is coordinator-owned; caller timestamps are ignored. A failed/aborted request consumes its slot. Storage failure denies dispatch. A debit followed by process failure may conservatively consume an unused slot; never refund an ambiguous attempt.
+The following limits apply independently and in full to each application/environment. There is no cross-environment counter, reservation, borrowing, or admission dependency. All windows are exact rolling windows, with persisted attempt timestamps pruned to bounded retention. Check/debit every applicable window atomically before dispatch. Time is coordinator-owned; caller timestamps are ignored. A failed/aborted request consumes its slot. Storage failure denies dispatch. A debit followed by process failure may conservatively consume an unused slot; never refund an ambiguous attempt.
 
 | Scope | Limit | Basis |
 | --- | --- | --- |
@@ -66,6 +66,8 @@ All windows are exact rolling windows, with persisted attempt timestamps pruned 
 Worst normal continuous demand across all regions: approximately 216 winds checks plus one catalog check per day (nine × 24 + one). Quiet resources perform no checks. Cold start can fetch all nine winds resources plus the catalog within the minute allowance. Client-driven region changes cannot create additional keys. Existing supported legacy winds routes consume the same resources/budgets.
 
 Resource limits cannot borrow from another resource's allowance. The overall ceiling applies even when individual limits permit work. A catalog refresh cannot exhaust winds capacity. These are proposed operating limits, not claims about AWC's enforcement scope. The bound covers this coordinator's traffic only; other applications contacting AWC remain outside it.
+
+**Accepted cross-application risk:** the two applications can together attempt up to 40 requests per rolling minute and 600 per rolling day under the stated overall ceilings. These are arithmetic upper bounds, not a jointly enforced budget. AWC may group callers under an enforcement scope broader than an application; its documented guidance does not establish that separate deployments receive separate quotas. Development cannot consume production's local allowance or modify its infrastructure, but development traffic may contribute to provider-side throttling or blocking that affects production. The maintainer accepts this risk; do not introduce shared infrastructure or a reserved dev/prod budget to eliminate it.
 
 On denial, calculate the earliest eligible retry from exhausted windows and cooldowns. Do not queue unbounded callers until quota resets. Return an explicit resource-unavailable outcome with a bounded retry indication; serve eligible grace data only under the rules below.
 
@@ -111,19 +113,20 @@ API response caching remains no-store in this work unless an implementation plan
 
 Warm edge hits bypass coordinator requests. Edge misses incur a service-bound coordinator request and Durable Object invocation/storage work, but no additional upstream request while the authoritative resource remains fresh. Joining refreshes bounds upstream I/O, not total public request executions. A malicious caller can still cause Worker/coordinator execution within admission limits; deployment WAF/bot policy and #47/#55 address separate cost layers.
 
-Document the private coordinator deployment order, shared bindings/object identity, SQLite migration, restart behavior, rollback, and policy version. Updating navlog alone must not provision a second authority. Rollback must not restore unbudgeted direct fetches. Operator cache invalidation retains attempt history and does not bypass policy. Budget increases require reviewed configuration and never exceed the documented provider ceiling.
+Document each environment's private coordinator deployment order, environment-specific bindings/namespace/object identity, SQLite migration, restart behavior, rollback, and policy version. Updating navlog alone must not provision a second authority within that environment. Development deployment, invalidation, or failure must not modify production state or bindings. Rollback must not restore unbudgeted direct fetches. Operator cache invalidation retains that environment's attempt history and does not bypass policy. Budget increases require reviewed configuration and never exceed the documented provider ceiling for an individual application; explicitly reassess the accepted cross-application throttling risk when changing limits.
 
 Emit aggregate resource-kind counts for attempts, budget denials, refresh joins, success/failure class, cooldowns, cache/grace use, coordinator latency, and storage failures. No client IP, full route query, planning payload, raw weather body, or secret logs. Alert on sustained cooldown/budget exhaustion or coordinator failure. Report measured coordinator invocations, storage work, and request CPU during deployment validation; do not claim a currency estimate without current account pricing/usage evidence.
 
 ## Ordinary and boundary walkthroughs
 
-Ordinary: two users at different edges request different points in CONUS. Both map to the same three winds resources and catalog. Empty edges ask the shared coordinator; each resource refresh dispatches once, consumes one budget slot, validates, persists, and answers both callers. Subsequent requests use edge resources until their refresh deadlines. Point interpolation remains specific to each request. If a later check returns identical valid data, checked deadlines advance but data timestamps/applicability do not.
+Ordinary: two production users at different edges request different points in CONUS. Both map to the same three winds resources and catalog. Empty edges ask the production coordinator; each resource refresh dispatches once, consumes one production budget slot, validates, persists, and answers both callers. Subsequent requests use production edge resources until their refresh deadlines. Point interpolation remains specific to each request. If a later check returns identical valid data, checked deadlines advance but data timestamps/applicability do not. A development request independently uses the development coordinator and its own cache/budget, even for identical resources.
 
 Boundary: a product becomes due at 12:00. The shared refresh fails at 12:00:05; all callers can use the prior applicable resource until 12:02, with stale provenance. At 12:01:05 an admitted caller may trigger the next attempt if all budgets allow. At 12:02 no caller can use grace, even if the forecast use window lasts several more hours. A successful check at 12:03 restores service. If the FOR USE window ended at 12:01, applicability rejects that forecast earlier, independently of grace. Repeated callers, edge misses, restarts, and cache-write failures never reset these deadlines or budget history.
 
 ## Acceptance and validation
 
-- Independent clients/IPs and simulated edge caches share the same authoritative object and cannot exceed any rolling window, including just before/after boundaries, concurrent dispatch, restart, and storage faults.
+- Independent clients/IPs and simulated edge caches within an environment share that environment's authoritative object and cannot exceed any rolling window, including just before/after boundaries, concurrent dispatch, restart, and storage faults.
+- Within each environment, all callers use its one authority. Exhausting development budgets leaves production counters, cached resources, leases, and admission unchanged. Tests cover separate namespaces/bindings, independent identical-key refreshes, and development deployment/failure isolation; provider-side throttling remains an explicitly accepted external risk.
 - All nine winds keys plus catalog have documented finite storage and queue bounds; arbitrary point parameters never increase resource cardinality. Catalog activity cannot consume winds allowance beyond the overall shared accounting.
 - Cold concurrent callers refresh each key once; warm authoritative/edge hits consume no upstream budget. Cache read/write failures do not open a direct-fetch bypass.
 - Tests cover failed/aborted fetch accounting, no-data, invalid/regressed payloads, 429 and Retry-After, provider-wide cooldown, queue/wait limits, abandoned leases, rejected waiters, and subsequent recovery.
@@ -131,5 +134,5 @@ Boundary: a product becomes due at 12:00. The shared refresh fails at 12:00:05; 
 - Removed TAF route performs zero provider calls; remove its adapter/tests and obsolete claims while retaining unrelated TAF presentation types only if current consumers require them.
 - No security controls, source validation, payload bounds, interpolation, pilot-input persistence, or runway-picker behavior regress.
 - Run `mise exec -- npm run ci`, production/development Wrangler dry-runs, and coordinator tests using the Workers/Durable Objects runtime. Unit mocks alone do not establish cross-request I/O correctness.
-- Deployment verification confirms both environments target the same private coordinator and fail closed without it. Exercise concurrency/outage/recovery with a mock provider in a controlled environment; do not load-test AWC. A small admitted live smoke verifies actual provider parsing and binding behavior, with attempt counts recorded.
+- Deployment verification confirms each environment targets its own private coordinator and distinct namespace, and fails closed without its required binding. Exercise concurrency/outage/recovery with a mock provider in a controlled environment; do not load-test AWC. A small admitted live smoke verifies actual provider parsing and binding behavior, with attempt counts recorded separately per environment.
 - Report validation limitations and measured execution overhead. Maintainer review of this spec precedes implementation planning.
