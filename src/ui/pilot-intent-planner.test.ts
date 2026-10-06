@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { IndexedDbPilotInputRepository } from "../services/storage/pilot-input-repository";
 import { createLocalStudyAirportLookup } from "../application/airport-lookup";
 import type { AirportLookup } from "../application/airport-lookup";
 import type { AircraftProfile } from "../domain/aircraft";
@@ -125,10 +127,11 @@ function edit(root: HTMLElement, name: string, value: string): void {
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-async function mount(repository: MemoryInputs, client = winds(), airportLookup: AirportLookup = createLocalStudyAirportLookup()): Promise<HTMLElement> {
+async function mount(repository: PilotInputRepository, client = winds(), airportLookup: AirportLookup = createLocalStudyAirportLookup()): Promise<HTMLElement> {
   const root = document.createElement("div");
   renderPilotIntentPlanner(root, { repository, airportLookup, winds: client, ids, clock });
   await settle();
+  if (repository instanceof IndexedDbPilotInputRepository) await vi.waitFor(() => expect(root.querySelector("[name='plan-title']")).not.toBeNull());
   return root;
 }
 
@@ -1168,6 +1171,92 @@ describe("pilot intent planner", () => {
     await settle();
     expect(lookupSpy).toHaveBeenCalledWith("KORD");
     expect(lookupSpy).toHaveBeenCalledWith("KJVL");
+  });
+
+  it("saves and reopens every supported editor field through IndexedDB", async () => {
+    const repository = new IndexedDbPilotInputRepository({ indexedDbFactory: new IDBFactory(), now: () => clock.now() });
+    await repository.saveProfile(profile);
+    // Seed only the route shape; every checkpoint, TAS and reason is edited below.
+    // Repeated add/reveal actions each render and save, obscuring this persistence test.
+    await repository.saveWorkingCopy({
+      schemaVersion: 1, id: "boundary-draft", title: "Boundary draft",
+      rawFields: { "plan-title": "Boundary draft", ...Object.fromEntries(Array.from({ length: 26 }, (_, index) => [`override-tas-${index}`, "90"])) },
+      selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: Array.from({ length: 25 }, () => ({ name: "", coordinateText: "" })),
+      cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: clock.now().toISOString(),
+    });
+    const fetchMetar = winds().fetchMetar;
+    const client = winds({ fetchMetar: async (icao) => {
+      const stored = (await repository.listPlans())[0]!;
+      expect(stored.checkpoints).toHaveLength(25);
+      expect(stored.overrideReasons["tas-25"]).toBe(" Reason 25 ");
+      expect(stored.rawFields["override-tas-25"]).toBe(" 95 ");
+      expect(Object.keys(stored.rawFields)).toHaveLength(35);
+      return fetchMetar(icao);
+    } });
+    const root = await mount(repository, client);
+    await makeLocallyValid(root);
+    await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved."), { interval: 5 });
+    for (let index = 0; index < 25; index++) {
+      edit(root, `checkpoint-name-${index}`, ` Point ${index} `);
+      edit(root, `checkpoint-coordinate-${index}`, ` ${41.99 + index * 0.02}, -88.1 `);
+    }
+    for (let index = 0; index < 26; index++) {
+      edit(root, `override-tas-${index}`, " 95 ");
+      edit(root, `override-reason-${index}`, ` Reason ${index} `);
+    }
+    button(root, "Update navlog").click();
+    await vi.waitFor(() => expect(root.querySelector(".calculated-navlog")).not.toBeNull(), { timeout: 5000 });
+
+    const profileFields = [...root.querySelectorAll<HTMLInputElement>(".profile-form input")].map((field) => field.name);
+    for (const name of profileFields) edit(root, name, ` unfinished ${name} `);
+    button(root, "Save changes").click();
+    await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Changes saved."));
+    const saved = (await repository.listPlans())[0]!;
+    expect(Object.keys(saved.rawFields)).toHaveLength(46);
+    expect(saved.checkpoints).toHaveLength(25);
+    expect(Object.keys(saved.overrideReasons)).toHaveLength(26);
+
+    const reopened = await mount(repository);
+    for (let index = 0; index < 25; index++) {
+      expect(input(reopened, `checkpoint-name-${index}`).value).toBe(` Point ${index} `);
+      expect(input(reopened, `checkpoint-coordinate-${index}`).value).toBe(` ${41.99 + index * 0.02}, -88.1 `);
+    }
+    for (let index = 0; index < 26; index++) {
+      expect(input(reopened, `override-tas-${index}`).value).toBe(" 95 ");
+      expect(input(reopened, `override-reason-${index}`).value).toBe(` Reason ${index} `);
+    }
+    for (const name of profileFields) expect(input(reopened, name).value).toBe(` unfinished ${name} `);
+    edit(reopened, "plan-title", "Boundary draft");
+    button(reopened, "New plan").click();
+    await vi.waitFor(() => expect(input(reopened, "plan-title").value).toBe("New study route"));
+    choosePlan(reopened, "Boundary draft");
+    await vi.waitFor(() => expect(input(reopened, "plan-title").value).toBe("Boundary draft"));
+    expect(input(reopened, "override-reason-25").value).toBe(" Reason 25 ");
+  }, 15_000);
+
+  it("removes obsolete raw copies while retaining current checkpoint text and unrelated fields", async () => {
+    const repository = new MemoryInputs();
+    repository.plans.push({ schemaVersion: 1, id: "legacy-copies", title: "Legacy draft",
+      rawFields: { "plan-title": "Legacy draft", "checkpoint-name-0": "old name", "checkpoint-coordinate-0": "old coordinate",
+        "checkpoint-name-24": "removed", "override-reason-0": "old reason", "override-tas-0": " 95 ", "custom-field": " keep " },
+      checkpoints: [{ name: " First ", coordinateText: "41." }, { name: " Second ", coordinateText: "42." }],
+      cruiseAltitudeTexts: ["4500"], overrideReasons: { "tas-0": " current reason " }, updatedAt: clock.now().toISOString() });
+    const root = await mount(repository);
+    expect(input(root, "checkpoint-name-0").value).toBe(" First ");
+    expect(input(root, "override-reason-0").value).toBe(" current reason ");
+    button(root, "Remove checkpoint 1").click();
+    await settle();
+    edit(root, "checkpoint-coordinate-0", " incomplete ");
+    button(root, "Save changes").click();
+    await settle();
+    const saved = repository.plans[0]!;
+    expect(saved.checkpoints).toEqual([{ name: " Second ", coordinateText: " incomplete " }]);
+    expect(saved.rawFields["custom-field"]).toBe(" keep ");
+    expect(Object.keys(saved.rawFields).filter((key) => /^(checkpoint-|override-)/.test(key))).toEqual([]);
+    expect(saved.overrideReasons).toEqual({});
+    const reopened = await mount(repository);
+    expect(input(reopened, "checkpoint-coordinate-0").value).toBe(" incomplete ");
   });
 
   it("limits checkpoint creation to 25 and blocks a stored plan with 26", async () => {

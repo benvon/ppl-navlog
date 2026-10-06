@@ -321,7 +321,7 @@ class PilotIntentPlanner {
     profileLabel.append(profile);
     form.append(groups.identity, groups.timing, this.renderRouteCollections(), groups.fuel, groups.weather);
     form.querySelectorAll<HTMLInputElement>("input[type='text']").forEach((input) => {
-      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.setField(input.name, input.value); this.captureStructured(form); this.updateTextboxMarker(input); this.invalidate(); this.refreshUpdateGate(); });
+      input.addEventListener("input", () => { if (this.result) this.activateStage("route"); this.touchedFields.add(input.name); this.captureStructured(form); this.updateTextboxMarker(input); this.invalidate(); this.refreshUpdateGate(); });
     });
     const update = document.createElement("button"); update.type = "button"; update.dataset.updatePlan = "true"; update.textContent = "Update navlog"; update.addEventListener("click", () => void this.update());
     const feedback = document.createElement("p"); feedback.dataset.localError = "true"; feedback.setAttribute("aria-live", "polite"); feedback.textContent = this.localError() ? `Unavailable: ${this.localError()}` : "";
@@ -657,7 +657,7 @@ class PilotIntentPlanner {
   private setField(name: string, value: string): void {
     const current = this.current;
     if (!current) return;
-    this.planState.edit({ ...current, rawFields: { ...current.rawFields, [name]: value }, title: name === "plan-title" ? value : current.title, updatedAt: this.dependencies.clock.now().toISOString() });
+    this.planState.edit({ ...current, rawFields: { ...this.fields, [name]: value }, title: name === "plan-title" ? value : current.title, updatedAt: this.dependencies.clock.now().toISOString() });
   }
   private newPlan(): void {
     if (this.updating || this.savingProfile) return;
@@ -929,7 +929,12 @@ function buildWeatherSelection(departureMetarIcao: string | undefined) {
   };
 }
 function restorePilotFields(rawFields: Readonly<Record<string, string>>): Record<string, string> {
-  return { ...initialFields, ...rawFields };
+  // Structured collections own current checkpoint text and override reasons.
+  // Ignore redundant copies left by earlier editors, including removed points.
+  const currentFields = Object.fromEntries(Object.entries(rawFields).filter(([key]) =>
+    !/^(?:checkpoint-(?:name|coordinate)|override-reason)-\d+$/.test(key),
+  ));
+  return { ...initialFields, ...currentFields };
 }
 function weatherSelectionFromInputs(
   raw: Readonly<Record<string, string>>,
