@@ -81,6 +81,11 @@ jobs:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run weather:artifact
 
+      - name: Verify coordinator artifact deployment in both environments
+        run: |
+          npx wrangler deploy release-artifact/weather-coordinator/worker.js --no-bundle --dry-run --config wrangler.weather-coordinator.jsonc --env development
+          npx wrangler deploy release-artifact/weather-coordinator/worker.js --no-bundle --dry-run --config wrangler.weather-coordinator.jsonc --env production
+
       - name: Security checks
         env:
           CI: true
