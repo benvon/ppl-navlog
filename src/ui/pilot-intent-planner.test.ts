@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import { IndexedDbPilotInputRepository } from "../services/storage/pilot-input-repository";
@@ -2028,3 +2029,61 @@ describe("pilot intent planner", () => {
     expect(input(root, "plan-title").dataset.unsaved).toBe("true");
   });
 });
+
+it("edits textbox values without cloning inactive saved payloads", async () => {
+  const repository = new MemoryInputs();
+  const active: PilotInputPlan = {
+    schemaVersion: 1, id: "active", title: "Active", rawFields: { "plan-title": "Active" },
+    checkpoints: [{ name: "Point", coordinateText: "42, -88" }],
+    cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: clock.now().toISOString(),
+  };
+  repository.plans.push(active, { ...active, id: "saved", title: "Saved", rawFields: { notes: "inactive-payload-sentinel" } });
+  const root = await mount(repository);
+  const clone = globalThis.structuredClone;
+  let copiedInactivePayload = false;
+  const guard = vi.spyOn(globalThis, "structuredClone").mockImplementation((value) => {
+    if (JSON.stringify(value).includes("inactive-payload-sentinel")) copiedInactivePayload = true;
+    return clone(value);
+  });
+  try {
+    edit(root, "plan-title", " literal - ");
+    edit(root, "checkpoint-coordinate-0", " 42, - ");
+    expect(input(root, "plan-title").value).toBe(" literal - ");
+    expect(input(root, "checkpoint-coordinate-0").value).toBe(" 42, - ");
+    expect(copiedInactivePayload).toBe(false);
+    expect(input(root, "plan-title").dataset.unsaved).toBe("true");
+    expect([...planSelector(root).options].map((option) => option.textContent)).toEqual(["Choose saved plan", "Active", "Saved"]);
+  } finally { guard.mockRestore(); }
+});
+
+// Opt-in measurement: no timing threshold is suitable for shared CI machines.
+it.runIf(process.env.PLANNER_INPUT_BENCHMARK === "1")("measures input events with controlled saved-history payloads", async () => {
+  const results: object[] = [];
+  for (const count of [1, 100, 1000]) {
+    for (const payloadBytes of [2048, 32768]) {
+      const repository = new MemoryInputs();
+      repository.profiles.push(profile);
+      const active: PilotInputPlan = {
+        schemaVersion: 1, id: "active", title: "Active", rawFields: { "plan-title": "Active" },
+        selectedProfileId: profile.id, profileSnapshot: profile,
+        checkpoints: Array.from({ length: 25 }, (_, i) => ({ name: `Point ${i}`, coordinateText: "42, -88" })),
+        cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: clock.now().toISOString(),
+      };
+      repository.plans.push(active);
+      for (let i = 1; i < count; i++) repository.plans.push({ ...active, id: `saved-${i}`, title: `Saved ${i}`, rawFields: { "plan-title": `Saved ${i}`, ...Object.fromEntries(Array.from({ length: 4 }, (_, part) => [`notes-${part}`, "x".repeat(payloadBytes / 4)])) } });
+      const root = await mount(repository);
+      for (const name of ["plan-title", "checkpoint-name-24"]) {
+        for (let i = 0; i < 3; i++) edit(root, name, ` warm ${i} `);
+        const samples: number[] = [];
+        for (let i = 0; i < 12; i++) {
+          const start = performance.now();
+          edit(root, name, ` measured ${i} `);
+          samples.push(performance.now() - start);
+        }
+        samples.sort((a, b) => a - b);
+        results.push({ count, payloadBytes, checkpoints: 25, name, samples: samples.length, medianMs: samples[6], p95Ms: samples[11] });
+      }
+    }
+  }
+  writeFileSync("/tmp/ppl-navlog-input-benchmark.json", JSON.stringify(results, null, 2));
+}, 120000);
