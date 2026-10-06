@@ -1173,17 +1173,21 @@ describe("pilot intent planner", () => {
     expect(lookupSpy).toHaveBeenCalledWith("KJVL");
   });
 
-  it("saves and reopens every supported editor field through IndexedDB", async () => {
+  it("saves and reopens representative edits in a maximum-size plan through IndexedDB", async () => {
     const repository = new IndexedDbPilotInputRepository({ indexedDbFactory: new IDBFactory(), now: () => clock.now() });
     await repository.saveProfile(profile);
-    // Seed only the route shape; every checkpoint, TAS and reason is edited below.
-    // Repeated add/reveal actions each render and save, obscuring this persistence test.
+    // Exercise shared indexed handlers at the first, middle and final rows.
+    // Seed the other rows and verify all of them survive save/reopen unchanged;
+    // dispatching every edit repeatedly rescans the maximum-size form.
+    const editedCheckpoints = [0, 12, 24];
+    const editedLegs = [0, 13, 25];
+    const seededCheckpoints = Array.from({ length: 25 }, (_, index) => ({ name: ` Seed ${index} `, coordinateText: ` ${41.99 + index * 0.02}, -88.1 ` }));
     await repository.saveWorkingCopy({
       schemaVersion: 1, id: "boundary-draft", title: "Boundary draft",
       rawFields: { "plan-title": "Boundary draft", ...Object.fromEntries(Array.from({ length: 26 }, (_, index) => [`override-tas-${index}`, "90"])) },
       selectedProfileId: profile.id, profileSnapshot: profile,
-      checkpoints: Array.from({ length: 25 }, () => ({ name: "", coordinateText: "" })),
-      cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: clock.now().toISOString(),
+      checkpoints: seededCheckpoints,
+      cruiseAltitudeTexts: ["4500"], overrideReasons: Object.fromEntries(Array.from({ length: 26 }, (_, index) => [`tas-${index}`, ` Seed reason ${index} `])), updatedAt: clock.now().toISOString(),
     });
     const fetchMetar = winds().fetchMetar;
     const client = winds({ fetchMetar: async (icao) => {
@@ -1197,11 +1201,11 @@ describe("pilot intent planner", () => {
     const root = await mount(repository, client);
     await makeLocallyValid(root);
     await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved."), { interval: 5 });
-    for (let index = 0; index < 25; index++) {
+    for (const index of editedCheckpoints) {
       edit(root, `checkpoint-name-${index}`, ` Point ${index} `);
-      edit(root, `checkpoint-coordinate-${index}`, ` ${41.99 + index * 0.02}, -88.1 `);
+      edit(root, `checkpoint-coordinate-${index}`, ` ${42 + index * 0.02}, -88.1 `);
     }
-    for (let index = 0; index < 26; index++) {
+    for (const index of editedLegs) {
       edit(root, `override-tas-${index}`, " 95 ");
       edit(root, `override-reason-${index}`, ` Reason ${index} `);
     }
@@ -1219,12 +1223,12 @@ describe("pilot intent planner", () => {
 
     const reopened = await mount(repository);
     for (let index = 0; index < 25; index++) {
-      expect(input(reopened, `checkpoint-name-${index}`).value).toBe(` Point ${index} `);
-      expect(input(reopened, `checkpoint-coordinate-${index}`).value).toBe(` ${41.99 + index * 0.02}, -88.1 `);
+      expect(input(reopened, `checkpoint-name-${index}`).value).toBe(editedCheckpoints.includes(index) ? ` Point ${index} ` : seededCheckpoints[index]!.name);
+      expect(input(reopened, `checkpoint-coordinate-${index}`).value).toBe(editedCheckpoints.includes(index) ? ` ${42 + index * 0.02}, -88.1 ` : seededCheckpoints[index]!.coordinateText);
     }
     for (let index = 0; index < 26; index++) {
-      expect(input(reopened, `override-tas-${index}`).value).toBe(" 95 ");
-      expect(input(reopened, `override-reason-${index}`).value).toBe(` Reason ${index} `);
+      expect(input(reopened, `override-tas-${index}`).value).toBe(editedLegs.includes(index) ? " 95 " : "90");
+      expect(input(reopened, `override-reason-${index}`).value).toBe(editedLegs.includes(index) ? ` Reason ${index} ` : ` Seed reason ${index} `);
     }
     for (const name of profileFields) expect(input(reopened, name).value).toBe(` unfinished ${name} `);
     edit(reopened, "plan-title", "Boundary draft");
