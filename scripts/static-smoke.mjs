@@ -7,7 +7,7 @@ const securityHeaders = new Map([
 ]);
 
 const immutablePolicy = 'public, max-age=31536000, immutable';
-const assetPathPattern = /^\/assets\/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)$/;
+const assetPathPattern = /^\/assets\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:js|css)$/;
 
 export function assertStaticResponse(path, response, { revalidate = false, noStore = false, immutable = false, contentType, status = 200 } = {}) {
   if (response.status !== status) throw new Error(`static ${path} returned HTTP ${response.status}, expected ${status}`);
@@ -60,7 +60,8 @@ export function discoverStaticAssets(html) {
   const seen = new Set();
   for (const { src, kind } of collectReferences(html)) {
     const expectedExtension = kind === 'javascript' ? /\.js$/ : /\.css$/;
-    if (!assetPathPattern.test(src) || !expectedExtension.test(src)) throw new Error('unsafe static asset reference');
+    if (!assetPathPattern.test(src) || !expectedExtension.test(src)
+      || src.split('/').some((segment) => segment === '.' || segment === '..')) throw new Error('unsafe static asset reference');
     if (!seen.has(src)) assets[kind].push(src);
     seen.add(src);
     if (seen.size > 32) throw new Error('too many built assets in static entrypoint');

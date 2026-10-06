@@ -85,6 +85,25 @@ describe('production deployment smoke', () => {
     }
   });
 
+  it('checks nested JS and CSS assets on both production hosts', async () => {
+    const requested = [];
+    const task = run(async (url, options) => {
+      const parsed = new URL(url);
+      requested.push(url);
+      const fixture = fixtureResponse(parsed.hostname, parsed.pathname.replace('/assets/chunks/', '/assets/'), {}, options);
+      if (parsed.pathname === '/' && fixture.status === 200) {
+        return { ...fixture, text: async () => (await fixture.text()).replaceAll('/assets/', '/assets/chunks/') };
+      }
+      return fixture;
+    }, fakeClock());
+    await drive(task);
+    for (const host of hosts) {
+      expect(requested).toEqual(expect.arrayContaining([
+        `${host}/assets/chunks/app-Xy34.js`, `${host}/assets/chunks/app-Ab12.css`,
+      ]));
+    }
+  });
+
   it.each([
     ['HEAD', { method: 'HEAD' }, 405],
     ['conditional GET', { headers: { 'If-None-Match': '"fixture-root"' } }, 200],

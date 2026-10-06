@@ -53,11 +53,22 @@ describe('static deployment smoke policy', () => {
       .toEqual({ javascript: ['/assets/app-Xy34.js'], css: ['/assets/app-Ab12.css'] });
   });
 
+  it('discovers nested built assets using the same path characters as the build', () => {
+    expect(discoverStaticAssets('<link rel="stylesheet" href="/assets/styles/theme.v1/app-a1b2c3d4.css"><script src="/assets/chunks/_vendor/app-a1b2c3d4.js"></script>'))
+      .toEqual({ javascript: ['/assets/chunks/_vendor/app-a1b2c3d4.js'], css: ['/assets/styles/theme.v1/app-a1b2c3d4.css'] });
+  });
+
   it.each([
     '<script src="https://evil.example/app.js"></script>',
     '<script src="//evil.example/app.js"></script>',
     '<script src="data:text/javascript,alert(1)"></script>',
     '<link rel="stylesheet" href="/assets/../evil.css">',
+    '<script src="/assets/chunks/../app-a1b2c3d4.js"></script>',
+    '<script src="/assets/chunks/./app-a1b2c3d4.js"></script>',
+    '<script src="/assets/chunks//app-a1b2c3d4.js"></script>',
+    '<script src="/assets/%2e%2e/app-a1b2c3d4.js"></script>',
+    '<script src="/assets/chunks%2fapp-a1b2c3d4.js"></script>',
+    '<script src="/assets/chunks\\app-a1b2c3d4.js"></script>',
   ])('refuses unsafe HTML asset references without interpreting them as URLs: %s', (html) => {
     expect(() => discoverStaticAssets(html)).toThrow('unsafe static asset reference');
   });
