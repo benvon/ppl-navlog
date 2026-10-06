@@ -130,7 +130,8 @@ describe('weather coordinator Worker and SQLite object in workerd', () => {
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/release');
     expect((await success).status).toBe(200);
     await mf.dispatchFetch('https://weather-coordinator.internal/_test/provider?mode=ok');
-    const blocked = await (await privateRequest('{"resource":"winds:us:06"}')).json() as { ok: boolean };
+    // Probe an uncached resource: fresh cache hits are allowed during provider cooldown.
+    const blocked = await (await privateRequest('{"resource":"winds:alaska:24"}')).json() as { ok: boolean };
     expect(blocked.ok).toBe(false);
   });
   it('advances per-resource failure cooldown through 60, 120, then 300 seconds', async () => {
