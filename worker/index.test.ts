@@ -56,13 +56,19 @@ describe('Worker foundation', () => {
     await expect(failed.json()).resolves.toMatchObject({ code: 'service_unavailable' });
   });
 
-  it('adds security headers to static asset responses', async () => {
+  it('passes non-API asset responses through unchanged', async () => {
+    const assetResponse = new Response('<!doctype html><title>PPL Navlog</title>', {
+      headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache', 'X-Asset-Marker': 'preserved' }
+    });
+    const assetEnv = { ...env, ASSETS: { fetch: async () => assetResponse } };
     const response = await worker.fetch(new Request('https://example.test/'), env);
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
-    expect(response.headers.get('X-Request-Id')).toMatch(UUID_PATTERN);
+    expect(response.headers.get('X-Request-Id')).toBeNull();
+    expect(response.headers.get('X-Asset-Marker')).toBeNull();
+    const passthrough = await worker.fetch(new Request('https://example.test/missing'), assetEnv);
+    expect(passthrough.headers.get('X-Request-Id')).toBeNull();
+    expect(passthrough.headers.get('X-Asset-Marker')).toBe('preserved');
+    expect(passthrough.headers.get('Cache-Control')).toBe('no-cache');
   });
 });
-
-const UUID_PATTERN = /^[0-9a-f]{8}-/;

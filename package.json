@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names ui,worker --prefix name \"vite --host 0.0.0.0 --port 5173\" \"wrangler dev --local --port 8787\"",
     "dev:worker": "npm run build && wrangler dev --local --port 8787",
-    "build": "vite build && node scripts/write-version-manifest.mjs && node scripts/verify-build-artifacts.mjs",
+    "build": "vite build && node scripts/write-version-manifest.mjs && node scripts/write-asset-headers.mjs && node scripts/verify-build-artifacts.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
@@ -20,8 +20,9 @@
     "security:secrets": "node scripts/scan-secrets.mjs",
     "security:audit": "node scripts/run-audit.mjs",
     "security": "npm run security:secrets && npm run lint:workflows && npm run security:audit",
-    "ci": "npm run typecheck && npm run lint && npm run lint:boundaries && npm run test:coverage && npm run build && npm run security",
-    "cf:typegen": "wrangler types --env-interface Env"
+    "ci": "npm run typecheck && npm run lint && npm run lint:boundaries && npm run test:coverage && npm run build && npm run verify:static-routing && npm run security",
+    "cf:typegen": "wrangler types --env-interface Env",
+    "verify:static-routing": "node scripts/verify-static-routing.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

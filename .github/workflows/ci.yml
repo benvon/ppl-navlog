@@ -57,6 +57,9 @@ jobs:
           VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run build
 
+      - name: Verify static asset routing
+        run: npm run verify:static-routing
+
       - name: Security checks
         env:
           CI: true
