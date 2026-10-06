@@ -1176,6 +1176,15 @@ describe("pilot intent planner", () => {
   it("saves and reopens every supported editor field through IndexedDB", async () => {
     const repository = new IndexedDbPilotInputRepository({ indexedDbFactory: new IDBFactory(), now: () => clock.now() });
     await repository.saveProfile(profile);
+    // Seed only the route shape; every checkpoint, TAS and reason is edited below.
+    // Repeated add/reveal actions each render and save, obscuring this persistence test.
+    await repository.saveWorkingCopy({
+      schemaVersion: 1, id: "boundary-draft", title: "Boundary draft",
+      rawFields: { "plan-title": "Boundary draft", ...Object.fromEntries(Array.from({ length: 26 }, (_, index) => [`override-tas-${index}`, "90"])) },
+      selectedProfileId: profile.id, profileSnapshot: profile,
+      checkpoints: Array.from({ length: 25 }, () => ({ name: "", coordinateText: "" })),
+      cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: clock.now().toISOString(),
+    });
     const fetchMetar = winds().fetchMetar;
     const client = winds({ fetchMetar: async (icao) => {
       const stored = (await repository.listPlans())[0]!;
@@ -1189,14 +1198,10 @@ describe("pilot intent planner", () => {
     await makeLocallyValid(root);
     await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved."), { interval: 5 });
     for (let index = 0; index < 25; index++) {
-      button(root, "Add checkpoint").click();
-      await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved."), { interval: 5 });
       edit(root, `checkpoint-name-${index}`, ` Point ${index} `);
       edit(root, `checkpoint-coordinate-${index}`, ` ${41.99 + index * 0.02}, -88.1 `);
     }
     for (let index = 0; index < 26; index++) {
-      button(root, `Override TAS for leg ${index + 1}`).click();
-      await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toContain("Pilot inputs saved."), { interval: 5 });
       edit(root, `override-tas-${index}`, " 95 ");
       edit(root, `override-reason-${index}`, ` Reason ${index} `);
     }
