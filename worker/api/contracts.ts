@@ -24,6 +24,12 @@ export interface CacheProvenance {
   resource: string;
 }
 
+export interface WeatherResourceCacheProvenance extends CacheProvenance {
+  checkedAt: string;
+  refreshAfter: string;
+  staleUntil: string;
+}
+
 export interface AirportCoordinates { latitudeDeg: number; longitudeDeg: number; }
 export interface AirportRunwayEnd { id: string; headingDegTrue: number; isClosed: boolean; lengthFt: number | null; }
 export interface AirportFrequency { type: string; description: string; frequencyMhz: string; }
@@ -93,7 +99,8 @@ export interface AloftPointAnswer {
   useFrom: string;
   useUntil: string;
   forecastCycle: WindsForecastCycle;
-  product: { region: WindsRegion; cycle: WindsForecastCycle; cache: Pick<CacheProvenance, 'status' | 'source' | 'ageSeconds' | 'fetchedAt' | 'expiresAt' | 'freshnessRemainingSeconds' | 'servedAt'> };
+  product: { region: WindsRegion; cycle: WindsForecastCycle; cache: WeatherResourceCacheProvenance };
+  catalog: { cache: WeatherResourceCacheProvenance };
   sources: AloftSourceWeight[];
   method: 'station-level' | 'vertical-vector' | 'horizontal-vector' | 'horizontal-vertical-vector';
   requestId: string;
@@ -146,7 +153,7 @@ export interface WindsSourceProvenance {
   region: WindsRegion;
   endpoint: 'https://aviationweather.gov/api/data/windtemp';
   fetchedAt: string;
-  cache: CacheProvenance;
+  cache: WeatherResourceCacheProvenance;
 }
 
 export interface WindsStationsSuccessPayload {
@@ -156,10 +163,11 @@ export interface WindsStationsSuccessPayload {
   unavailableForecastCycles: WindsForecastCycle[];
   requestedRoute: WindsRoutePoint[];
   provenance: WindsSourceProvenance[];
+  catalog: { cache: WeatherResourceCacheProvenance };
   requestId: string;
 }
 
-export interface WindsForecastSuccessPayload { forecast: WindsForecast; provenance: WindsSourceProvenance; requestId: string; }
+export interface WindsForecastSuccessPayload { forecast: WindsForecast; provenance: WindsSourceProvenance; catalog: { cache: WeatherResourceCacheProvenance }; requestId: string; }
 
 export interface TafWindGroup { kind: 'prevailing' | 'FM' | 'TEMPO' | 'PROB'; fromUtc: string; untilUtc: string; windDirectionType: 'fixed' | 'variable' | 'missing'; windFromDegTrue: number | null; windSpeedKt: number | null; gustKt: number | null; probabilityPercent: number | null; raw: string; }
 export interface TafAnswer { stationIcao: string; issuedAt: string; validFrom: string; validUntil: string; rawTaf: string; groups: TafWindGroup[]; requestId: string; }

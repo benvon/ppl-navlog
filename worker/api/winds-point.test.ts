@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { parseApiRoute } from './request';
 import { ApiError } from './errors';
-import { createAviationWeatherAdapter, decodeWindsProduct, type CacheStore, type ServiceFetcher } from './winds';
+import { createAviationWeatherAdapter, type ServiceFetcher } from './winds';
+import { decodeWindsProduct } from '../weather-resources/validation';
+import { resourcesFromFakeCoordinator, resourcesWithUnchosenCycleExpiry } from './winds-test-resources';
 
 const url = '/api/weather/winds/point?lat=42.6&lon=-89&altitudeFeetMsl=4500&plannedUtc=2026-09-22T01%3A00%3A00.000Z';
 
@@ -17,16 +19,7 @@ async function catalogResponse(entries = catalog): Promise<Response> {
   const input = new ReadableStream<BufferSource>({ start(controller) { controller.enqueue(bytes); controller.close(); } });
   return new Response(await new Response(input.pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
 }
-function cache(capturedProducts: string[] = []): CacheStore {
-  const entries = new Map<string, Response>();
-  return { async match(request) { return entries.get(request.url)?.clone(); }, async put(request, response) {
-    const copy = response.clone();
-    const body = await copy.json() as { rawProduct?: unknown };
-    if (typeof body.rawProduct === 'string') capturedProducts.push(body.rawProduct);
-    entries.set(request.url, response.clone());
-  } };
-}
-function adapterFor(overrides: { product?: (cycle: string) => Promise<Response>; failedCycle?: string; upstreamState?: { fail: boolean }; current?: () => Date; cacheProducts?: string[]; catalog?: () => Promise<Response> } = {}) {
+function adapterFor(overrides: { product?: (cycle: string) => Promise<Response>; failedCycle?: string; upstreamState?: { fail: boolean }; current?: () => Date; catalog?: () => Promise<Response> } = {}) {
   const upstream: ServiceFetcher = { async fetch(request) {
     const parsed = new URL(request.url);
     if (parsed.pathname.endsWith('/windtemp')) {
@@ -40,7 +33,8 @@ function adapterFor(overrides: { product?: (cycle: string) => Promise<Response>;
     if (parsed.pathname.endsWith('.gz')) return overrides.catalog ? overrides.catalog() : catalogResponse();
     return new Response(null, { status: 404 });
   } };
-  return createAviationWeatherAdapter(upstream, cache(overrides.cacheProducts), overrides.current ?? (() => FIXED_NOW));
+  const current = overrides.current ?? (() => FIXED_NOW);
+  return createAviationWeatherAdapter(resourcesFromFakeCoordinator(upstream, current), current);
 }
 
 describe('winds point request', () => {
@@ -61,8 +55,8 @@ describe('winds point request', () => {
     expect(answer.windFromDegTrue).toBeCloseTo(0, 0);
     expect(answer.windSpeedKt).toBeGreaterThan(19);
     expect(answer.temperatureC).toBe(12.5);
-    expect(answer.product).toMatchObject({ region: 'us', cycle: answer.forecastCycle, cache: { status: 'upstream_refresh', source: 'upstream', freshnessRemainingSeconds: 1200 } });
-    expect(Object.keys(answer.product.cache).sort()).toEqual(['ageSeconds', 'expiresAt', 'fetchedAt', 'freshnessRemainingSeconds', 'servedAt', 'source', 'status']);
+    expect(answer.product).toMatchObject({ region: 'us', cycle: answer.forecastCycle, cache: { status: 'upstream_refresh', source: 'upstream', freshnessRemainingSeconds: 3600, checkedAt: FIXED_NOW.toISOString(), staleUntil: '2026-09-21T19:32:00.000Z' } });
+    expect(answer.catalog.cache.refreshAfter).toBe('2026-09-22T18:30:00.000Z');
     expect(answer.sources).toHaveLength(2);
     expect(answer.sources.reduce((sum, source) => sum + source.horizontalWeight, 0)).toBeCloseTo(1);
     expect(answer.sources[0]).toMatchObject({ lowerAltitudeFeet: 6000, upperAltitudeFeet: 9000, verticalWeight: 0.5, lowerWindFromDegTrue: 350, lowerWindSpeedKt: 20, upperWindFromDegTrue: 350, upperWindSpeedKt: 20, temperatureLowerAltitudeFeet: 6000, temperatureUpperAltitudeFeet: 9000, temperatureVerticalWeight: 0.5, temperatureLowerC: 15, temperatureUpperC: 10 });
@@ -210,15 +204,101 @@ describe('winds point request', () => {
     await expect(adapterFor().getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T10:00:00.000Z' })).rejects.toMatchObject({ code: 'upstream_no_data' });
   });
 
+  it('does not let retrieval grace extend the published forecast use window', async () => {
+    let current = FIXED_NOW;
+    const upstreamState = { fail: false };
+    const adapter = adapterFor({ current: () => current, upstreamState });
+    await adapter.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    current = new Date(FIXED_NOW.getTime() + 61 * 60_000);
+    upstreamState.fail = true;
+    await expect(adapter.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T10:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_no_data' });
+  });
+
+  it('blocks a point answer when the station catalog grace deadline expired while product data remains fresh', async () => {
+    let catalogCalls = 0;
+    const current = FIXED_NOW;
+    const nowText = current.toISOString();
+    const catalogExpired = new Date(current.getTime() - 1).toISOString();
+    const port = { async getResource(key: `winds:${'us' | 'alaska' | 'hawaii'}:${'06' | '12' | '24'}` | 'station-catalog:v1') {
+      if (key === 'station-catalog:v1') {
+        catalogCalls += 1;
+        return { ok: true as const, state: 'grace' as const, source: 'coordinator' as const, resource: { kind: 'catalog' as const, key, entries: [], metadata: { fetchedAt: catalogExpired, checkedAt: catalogExpired, refreshAfter: catalogExpired, staleUntil: catalogExpired } } };
+      }
+      const cycle = key.slice(-2) as '06' | '12' | '24';
+      const rawProduct = cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+        : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product;
+      return { ok: true as const, state: 'fresh' as const, source: 'coordinator' as const, resource: { kind: 'winds' as const, key, rawProduct, forecasts: decodeWindsProduct(rawProduct, cycle, current), metadata: { fetchedAt: nowText, checkedAt: nowText, refreshAfter: '2026-09-21T19:30:00.000Z', staleUntil: '2026-09-21T19:32:00.000Z' } } };
+    } };
+    await expect(createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_unavailable' });
+    expect(catalogCalls).toBe(1);
+  });
+
+  it('does not serve a fresh product when its deadline passes during catalog loading', async () => {
+    let current = FIXED_NOW;
+    const windRefreshAfter = new Date(FIXED_NOW.getTime() + 60 * 60_000).toISOString();
+    const port = { async getResource(key: `winds:${'us' | 'alaska' | 'hawaii'}:${'06' | '12' | '24'}` | 'station-catalog:v1') {
+      if (key === 'station-catalog:v1') {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        current = new Date(windRefreshAfter);
+        const checked = current.toISOString();
+        return { ok: true as const, state: 'fresh' as const, source: 'coordinator' as const, resource: { kind: 'catalog' as const, key,
+          entries: catalog.map((entry) => ({ iataId: entry.iataId, info: { name: entry.site, coordinates: { latitudeDeg: entry.lat, longitudeDeg: entry.lon }, elevationFt: entry.elev } })),
+          metadata: { fetchedAt: checked, checkedAt: checked, refreshAfter: new Date(current.getTime() + 24 * 60 * 60_000).toISOString(), staleUntil: new Date(current.getTime() + 24 * 60 * 60_000 + 120_000).toISOString() } } };
+      }
+      const cycle = key.slice(-2) as '06' | '12' | '24';
+      const rawProduct = cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+        : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product;
+      return { ok: true as const, state: 'fresh' as const, source: 'coordinator' as const, resource: { kind: 'winds' as const, key, rawProduct,
+        forecasts: decodeWindsProduct(rawProduct, cycle, current), metadata: { fetchedAt: FIXED_NOW.toISOString(), checkedAt: FIXED_NOW.toISOString(), refreshAfter: windRefreshAfter, staleUntil: new Date(Date.parse(windRefreshAfter) + 120_000).toISOString() } } };
+    } };
+    await expect(createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
+
+  it('blocks a point answer when an unchosen cycle expires during catalog loading', async () => {
+    let current = FIXED_NOW;
+    const upstream: ServiceFetcher = { async fetch(request) {
+      const parsed = new URL(request.url);
+      if (parsed.pathname.endsWith('/windtemp')) {
+        const cycle = parsed.searchParams.get('fcst');
+        return new Response(cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product);
+      }
+      return catalogResponse();
+    } };
+    const port = resourcesWithUnchosenCycleExpiry(upstream, () => current, (value) => { current = value; });
+    await expect(createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
+
+  it('recomputes displayed resource age and remaining freshness at answer assembly', async () => {
+    let current = FIXED_NOW;
+    const upstream: ServiceFetcher = { async fetch(request) {
+      const parsed = new URL(request.url);
+      if (parsed.pathname.endsWith('/windtemp')) {
+        const cycle = parsed.searchParams.get('fcst');
+        return new Response(cycle === '12' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+          : cycle === '24' ? product.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : product);
+      }
+      return catalogResponse();
+    } };
+    const port = resourcesWithUnchosenCycleExpiry(upstream, () => current, (value) => { current = value; }, 30 * 60_000);
+    const answer = await createAviationWeatherAdapter(port, () => current).getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' });
+    expect(answer.product.cache).toMatchObject({ ageSeconds: 1800, freshnessRemainingSeconds: 1800, servedAt: current.toISOString() });
+    expect(answer.catalog.cache).toMatchObject({ ageSeconds: 1800, servedAt: current.toISOString() });
+  });
+
   it('does not use a fresh cache fetch after its product use window or on stale-on-error fallback', async () => {
     let current = FIXED_NOW;
     const state = { fail: false };
     const adapter = adapterFor({ upstreamState: state, current: () => current });
     const query = { latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' };
     await expect(adapter.getWindsPoint(query)).resolves.toMatchObject({ forecastCycle: '06' });
-    current = new Date(FIXED_NOW.getTime() + 21 * 60 * 1_000);
+    current = new Date(FIXED_NOW.getTime() + 61 * 60 * 1_000);
     state.fail = true;
-    await expect(adapter.getWindsPoint(query)).rejects.toMatchObject({ code: 'upstream_unavailable' });
+    await expect(adapter.getWindsPoint(query)).resolves.toMatchObject({ product: { cache: { status: 'stale_on_error', source: 'stale', freshnessRemainingSeconds: 0 } }, catalog: { cache: { status: 'edge_hit' } } });
   });
 
   it('accepts and caches a valid source over 512 KiB while rejecting one over its finite cap', async () => {
@@ -232,18 +312,16 @@ describe('winds point request', () => {
     const largeCatalog = [...catalog, ...extraEntries];
     const large = `000\nFBUS31 KWNO 212000\nFD1US1\nDATA BASED ON 211800Z\nVALID 220000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000\n\nFT  3000    6000    9000   12000   18000   24000  30000  34000  39000\n${row('ABQ', '3520')}\n${row('ATL', '0120')}\n${extraEntries.map((entry) => row(entry.faaId, '3520')).join('\n')}\n`;
     expect(new TextEncoder().encode(large).byteLength).toBeGreaterThan(512 * 1024);
-    const cachedProducts: string[] = [];
     const cycleProduct = (cycle: string) => cycle === '12' ? large.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
       : cycle === '24' ? large.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : large;
-    const bigAdapter = adapterFor({ product: async (cycle) => new Response(cycleProduct(cycle)), catalog: () => catalogResponse(largeCatalog), cacheProducts: cachedProducts });
+    const bigAdapter = adapterFor({ product: async (cycle) => new Response(cycleProduct(cycle)), catalog: () => catalogResponse(largeCatalog) });
     await expect(bigAdapter.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).resolves.toMatchObject({ forecastCycle: '06' });
-    expect(cachedProducts.some((cached) => cached === large)).toBe(true);
     const tooLarge = adapterFor({ product: async () => new Response(large + 'x'.repeat(1024 * 1024)) });
-    await expect(tooLarge.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).rejects.toMatchObject({ diagnostic: 'winds_response_byte_limit' });
+    await expect(tooLarge.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).rejects.toMatchObject({ code: 'upstream_unavailable' });
   });
 
-  it('keeps unreadable stream diagnostics distinct from the byte-limit diagnostic', async () => {
+  it('maps unreadable upstream response streams to bounded unavailability', async () => {
     const unreadable = adapterFor({ product: async () => new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error('source read failed')); } })) });
-    await expect(unreadable.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).rejects.toMatchObject({ diagnostic: 'winds_response_unreadable' });
+    await expect(unreadable.getWindsPoint({ latitudeDeg: 42.6, longitudeDeg: -89, altitudeFeetMsl: 7500, plannedUtc: '2026-09-22T01:00:00.000Z' })).rejects.toMatchObject({ code: 'upstream_unavailable' });
   });
 });

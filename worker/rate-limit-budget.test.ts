@@ -67,8 +67,10 @@ describe("API environment configuration", () => {
       scripts: Record<string, string>;
     };
     expect(config.vars?.APP_ENV).not.toBe("local");
-    expect(pkg.scripts.dev).toContain("wrangler dev --local --var APP_ENV:local");
-    expect(pkg.scripts["dev:worker"]).toContain("wrangler dev --local --var APP_ENV:local");
+    expect(pkg.scripts.dev).toContain("npm run dev:worker");
+    expect(pkg.scripts["dev:worker"]).toContain("--env development --var APP_ENV:local --port 8787 --config wrangler.jsonc");
+    expect(pkg.scripts["dev:worker"]).toContain("npm run dev:coordinator");
+    expect(pkg.scripts["dev:coordinator"]).toContain("--env development --port 8788 --config wrangler.weather-coordinator.jsonc");
     for (const name of ["development", "production"]) {
       const deployed = config.env[name]!;
       expect(deployed.vars.APP_ENV).toBe(name);

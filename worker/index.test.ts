@@ -141,6 +141,17 @@ describe.each([...environmentValues, 'local'])('configured limiter with APP_ENV=
   });
 });
 
+it('does not assign an edge cache identity to unknown environments even with an admitted limiter', async () => {
+  const coordinator = { fetch: vi.fn(async () => Response.json({ ok: false, code: 'upstream_unavailable', retryAt: new Date(Date.now() + 60_000).toISOString() }, { status: 503 })) };
+  const response = await worker.fetch(request('/api/weather/winds/stations?route=40,-100'), {
+    ...env, APP_ENV: 'LOCAL', AWC_COORDINATOR_API: coordinator,
+    API_RATE_LIMITER: { async limit() { return { success: true }; } }
+  });
+
+  expect(response.status).toBe(503);
+  expect(coordinator.fetch).not.toHaveBeenCalled();
+});
+
 it('permits provider calls without a limiter only in explicit local mode', async () => {
   const providers = providerSpies();
   const response = await worker.fetch(request('/api/airports/KJVL'), {

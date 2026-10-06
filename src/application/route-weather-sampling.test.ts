@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery, MetarSuccessPayload } from "../../worker/api/contracts";
 import { calculateGreatCircleDistanceAndInitialCourse, pointAlongGreatCircle } from "../domain/distance-course";
 import { nauticalMiles, trueCourse } from "../domain/units";
@@ -31,9 +31,27 @@ const metar = (windDirection = 270): MetarSuccessPayload => ({
   metar: { icao: "KORD", metarRaw: `METAR KORD 211200Z ${windDirection}10KT`, wind: { raw: `${windDirection}10KT`, directionType: "fixed", directionDegTrue: windDirection, directionVariation: null, speedKt: 10, gustKt: null }, source: "aviationweather", fetchedAt: departure, observedAt: departure },
   provenance: { adapter: "runway-picker", fetchedAt: departure, cache: { status: "upstream_refresh", freshnessRemainingSeconds: 300 } as never }, requestId: "metar-request",
 });
-const answer = (query: AloftPointQuery, direction: number, speed: number): AloftPointAnswer => ({
+const cache = (kind: "product" | "catalog" = "product", stale = false) => {
+  const now = Date.now();
+  const ttlSeconds = kind === "product" ? 3600 : 86400;
+  const resource = kind === "product" ? "winds-temps" : "station-catalog";
+  const key = kind === "product" ? "winds:us:06" : "station-catalog:v1";
+  const maxPayloadAgeSeconds = ttlSeconds + 120;
+  const refreshAfter = stale ? now : now + ttlSeconds * 1000;
+  const checkedAt = refreshAfter - ttlSeconds * 1000;
+  const fetchedAt = checkedAt;
+  const servedAt = now;
+  const status = stale ? "stale_on_error" as const : "kv_hit" as const;
+  const source = stale ? "stale" as const : "kv" as const;
+  const freshnessRemainingSeconds = stale ? 0 : Math.floor((refreshAfter - now) / 1000);
+  return { status, source,
+    ageSeconds: Math.floor((servedAt - fetchedAt) / 1000), fetchedAt: new Date(fetchedAt).toISOString(), checkedAt: new Date(checkedAt).toISOString(), refreshAfter: new Date(refreshAfter).toISOString(), staleUntil: new Date(refreshAfter + 120_000).toISOString(),
+    expiresAt: new Date(refreshAfter).toISOString(), freshnessRemainingSeconds, servedAt: new Date(servedAt).toISOString(),
+    ttlSeconds, maxPayloadAgeSeconds, key, resource };
+};
+const answer = (query: AloftPointQuery, direction: number, speed: number, stale = false): AloftPointAnswer => ({
   query, windFromDegTrue: direction, windSpeedKt: speed, temperatureC: null, issuedAt: departure, useFrom: departure, useUntil: periodEnd,
-  forecastCycle: "06", product: { region: "us", cycle: "06", cache: { status: "kv_hit", source: "kv", ageSeconds: 60, fetchedAt: departure, expiresAt: departure, freshnessRemainingSeconds: 300, servedAt: departure } },
+  forecastCycle: "06", product: { region: "us", cycle: "06", cache: cache("product", stale) }, catalog: { cache: cache("catalog", stale) },
   sources: [{ stationId: "BRL", latitudeDeg: 40.7, longitudeDeg: -91.1, distanceNauticalMiles: 30, horizontalWeight: 1, lowerAltitudeFeet: query.altitudeFeetMsl, upperAltitudeFeet: query.altitudeFeetMsl, verticalWeight: 1, lowerWindFromDegTrue: direction, lowerWindSpeedKt: speed, upperWindFromDegTrue: direction, upperWindSpeedKt: speed, temperatureLowerAltitudeFeet: null, temperatureUpperAltitudeFeet: null, temperatureVerticalWeight: null, temperatureLowerC: null, temperatureUpperC: null }],
   method: "station-level", requestId: `point-${query.latitudeDeg.toFixed(3)}-${query.longitudeDeg.toFixed(3)}`,
 });
@@ -69,6 +87,25 @@ const routeDistance = (draft: ReturnType<typeof directEastboundDraft>): number =
 
 
 describe("route weather sampling for the waypoint worksheet", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2029-09-21T12:00:00.000Z")); });
+  afterEach(() => vi.useRealTimers());
+  it("accepts eligible grace and exposes its warning and independent resource provenance", async () => {
+    vi.setSystemTime(new Date("2029-09-21T12:00:30.000Z"));
+    const draft = directEastboundDraft();
+    const solution = await resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) { return answer(query, 270, 15, true); } }, { departureMetar: metar() });
+    expect(solution.warnings).toContain("Weather refresh is temporarily unavailable; using cached context within the two-minute grace period.");
+    expect(solution.sampledPoints[0]).toHaveProperty("catalog.cache.status", "stale_on_error");
+    expect(solution.calculationSnapshot).toHaveProperty("weather.resourceProvenance");
+    const rendered = renderCalculatedNavlog({ ...planRevision(), calculationSnapshot: solution.calculationSnapshot, warnings: solution.warnings });
+    expect(rendered?.textContent).toContain("Weather refresh is temporarily unavailable; using cached context within the two-minute grace period.");
+  });
+  it("keeps rounded zero freshness usable before its explicit resource deadline", async () => {
+    const draft = directEastboundDraft();
+    await expect(resolveRouteWeather(draft, aircraftProfile(), { async fetchPoint(query) {
+      const fresh = answer(query, 270, 15);
+      return { ...fresh, product: { ...fresh.product, cache: { ...fresh.product.cache, freshnessRemainingSeconds: 0 } } };
+    } }, { departureMetar: metar() })).resolves.toMatchObject({ warnings: [] });
+  });
   it("validates a recent same-station METAR and requests preliminary destination and sequential TOC winds", async () => {
     const { draft, queries, solution, snapshot } = await run();
     const distance = routeDistance(draft);

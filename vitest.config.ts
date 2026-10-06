@@ -3,11 +3,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'jsdom',
+    exclude: ['**/*.runtime.test.ts', 'node_modules/**', 'dist/**', 'release-artifact/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
       include: ['src/domain/**/*.ts', 'src/application/**/*.ts', 'src/services/**/*.ts', 'src/ui/**/*.ts', 'worker/**/*.ts'],
-      exclude: ['src/main.ts', '**/*.test.ts'],
+      exclude: ['src/main.ts', '**/*.test.ts', 'worker/**/runtime-harness.ts', 'worker/**/runtime-tooling.ts', 'worker/**/test-harness.ts', 'worker/weather-coordinator/fixtures.ts'],
       thresholds: {
         lines: 80,
         functions: 80,

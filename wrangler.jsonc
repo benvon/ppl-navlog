@@ -10,7 +10,8 @@
     "run_worker_first": true
   },
   "services": [
-    { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" }
+    { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
+    { "binding": "AWC_COORDINATOR_API", "service": "ppl-navlog-weather-development" }
   ],
   "vars": {
     "APP_VERSION": "v0.0.0-dev",
@@ -21,6 +22,7 @@
   },
   "env": {
     "development": {
+      "name": "ppl-navlog-development",
       "workers_dev": false,
       "routes": [{ "pattern": "navlog.benvon.dev", "custom_domain": true }],
       "assets": {
@@ -30,7 +32,8 @@
         "run_worker_first": true
       },
       "services": [
-        { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" }
+        { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
+        { "binding": "AWC_COORDINATOR_API", "service": "ppl-navlog-weather-development" }
       ],
       "ratelimits": [
         { "name": "API_RATE_LIMITER", "namespace_id": "90221001", "simple": { "limit": 60, "period": 60 } }
@@ -43,6 +46,7 @@
       "observability": { "enabled": true }
     },
     "production": {
+      "name": "ppl-navlog-production",
       "workers_dev": false,
       "routes": [
         { "pattern": "navlog.benvon.net", "custom_domain": true },
@@ -55,7 +59,8 @@
         "run_worker_first": true
       },
       "services": [
-        { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" }
+        { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
+        { "binding": "AWC_COORDINATOR_API", "service": "ppl-navlog-weather-production" }
       ],
       "ratelimits": [
         { "name": "API_RATE_LIMITER", "namespace_id": "90221002", "simple": { "limit": 60, "period": 60 } }

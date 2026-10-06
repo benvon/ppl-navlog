@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ppl-navlog-weather-coordinator",
+  "main": "worker/weather-coordinator/index.ts",
+  "compatibility_date": "2026-09-21",
+  "workers_dev": false,
+  "preview_urls": false,
+  "env": {
+    "development": {
+      "name": "ppl-navlog-weather-development",
+      "workers_dev": false,
+      "preview_urls": false,
+      "durable_objects": { "bindings": [{ "name": "WEATHER_BUDGET", "class_name": "WeatherBudgetCoordinator" }] },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WeatherBudgetCoordinator"] }]
+    },
+    "production": {
+      "name": "ppl-navlog-weather-production",
+      "workers_dev": false,
+      "preview_urls": false,
+      "durable_objects": { "bindings": [{ "name": "WEATHER_BUDGET", "class_name": "WeatherBudgetCoordinator" }] },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WeatherBudgetCoordinator"] }]
+    }
+  }
+}
