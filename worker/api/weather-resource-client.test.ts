@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createWeatherResourceClient } from './weather-resource-client';
+import { createSharedWeatherResourceStore } from './weather-resource-store';
 import type { CacheStore, ServiceFetcher } from './winds';
 
 const checked = '2026-10-05T12:00:00.000Z';
@@ -93,6 +94,32 @@ describe('weather resource client', () => {
     expect(productionFetch).toHaveBeenCalledTimes(1);
     expect(developmentFetch).toHaveBeenCalledTimes(1);
     expect(edge.entries.size).toBe(2);
+  });
+
+  it('reuses immutable fresh completed data across recreated resource clients', async () => {
+    const edge = cache();
+    let reads = 0;
+    const originalMatch = edge.match;
+    edge.match = async (request) => { reads += 1; return originalMatch(request); };
+    const coordinator = vi.fn(async () => Response.json({ ok: true, state: 'fresh', resource: wind }));
+    const shared = createSharedWeatherResourceStore();
+    const first = createWeatherResourceClient({ fetch: coordinator } as ServiceFetcher, edge, 'production', () => new Date(checked), undefined, shared);
+    const loaded = await first.getResource('winds:us:06');
+    expect(loaded).toMatchObject({ ok: true, state: 'fresh', source: 'coordinator' });
+    expect(coordinator).toHaveBeenCalledOnce();
+    expect(reads).toBe(1);
+
+    const second = createWeatherResourceClient({ fetch: coordinator } as ServiceFetcher, edge, 'production', () => new Date(checked), undefined, shared);
+    const reused = await second.getResource('winds:us:06');
+    expect(reused).toMatchObject({ ok: true, state: 'fresh', source: 'edge', resource: { rawProduct: 'raw' } });
+    expect(coordinator).toHaveBeenCalledOnce();
+    expect(reads).toBe(1);
+    expect(shared.snapshot('production')).toMatchObject({ entries: 1, retainedBytes: expect.any(Number) });
+    if (reused.ok) expect(Reflect.set(reused.resource, 'rawProduct', 'changed')).toBe(false);
+    const third = await createWeatherResourceClient({ fetch: coordinator } as ServiceFetcher, edge, 'production', () => new Date(checked), undefined, shared).getResource('winds:us:06');
+    expect(third).toMatchObject({ ok: true, resource: { rawProduct: 'raw' } });
+    shared.reset();
+    expect(shared.snapshot('production')).toEqual({ entries: 0, retainedBytes: 0 });
   });
 
   it('falls through malformed or failed cache reads to coordinator and never contacts AWC directly', async () => {
