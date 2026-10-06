@@ -68,6 +68,23 @@ describe("input-only pilot repository", () => {
     expect(await store.listProfiles()).toEqual([]);
   });
 
+  it.each(["rawFields", "overrideReasons", "document"] as const)("rejects an over-budget %s without replacing saved inputs or profile", async (budget) => {
+    const store = repo();
+    const original = plan();
+    await store.saveWorkingCopy(original);
+    const overLimitMap = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`field-${index}`, "text"]));
+    const invalid = { ...original, profileSnapshot: { ...original.profileSnapshot!, name: "Changed profile" },
+      ...(budget === "document" ? {
+        rawFields: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`field-${index}`, "x".repeat(10_000)])),
+        checkpoints: [{ name: "x".repeat(10_000), coordinateText: "x".repeat(10_000) }],
+        overrideReasons: Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`tas-${index}`, "x".repeat(10_000)])),
+      } : { [budget]: overLimitMap }),
+    };
+    await expect(store.saveWorkingCopy(invalid)).rejects.toThrow(budget === "document" ? "plan exceeds size limit" : "at most 100 entries");
+    expect(await store.getPlan(original.id)).toEqual(original);
+    expect(await store.listProfiles()).toEqual([original.profileSnapshot]);
+  });
+
   it("continues to reject calculated and external weather fields", async () => {
     const store = repo(); await store.initialize();
     const invalid = { ...plan(), calculated: { groundspeed: 100 }, weather: { metar: "KORD" } };
