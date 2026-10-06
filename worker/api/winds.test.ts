@@ -1,7 +1,9 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ApiError } from './errors';
 import { createAviationWeatherAdapter, regionForRoute, type CacheStore, type ServiceFetcher, type WindsDataAdapter } from './winds';
-import { decodeWindsProduct } from '../weather-resources/validation';
+import { decodeWindsProduct, parseStationCatalog } from '../weather-resources/validation';
+import type { WeatherResourceEnvelope, WeatherResourceKey, WeatherResourcePort } from '../weather-resources/contracts';
+import { createSharedWeatherResourceStore } from './weather-resource-store';
 import { resourcesFromFakeCoordinator, resourcesWithUnchosenCycleExpiry, unusedFixtureCache } from './winds-test-resources';
 import type { AloftPointQuery } from './contracts';
 
@@ -113,6 +115,39 @@ describe('Aviation Weather Center adapter', () => {
     await adapter.getWindsStations([{ latitudeDeg: 42.6, longitudeDeg: -89.0 }]);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/api/data/windtemp')).toHaveLength(3);
     expect(requestLog.requests.filter((request) => new URL(request.url).pathname === '/data/cache/stations.cache.json.gz')).toHaveLength(1);
+  });
+
+  it('uses the retained catalog index for duplicate detection and replaces it on refresh', async () => {
+    let current = FIXED_NOW;
+    const shared = createSharedWeatherResourceStore();
+    const catalogMetadata = (checkedAt: Date) => ({ fetchedAt: checkedAt.toISOString(), checkedAt: checkedAt.toISOString(),
+      refreshAfter: new Date(checkedAt.getTime() + 24 * 60 * 60_000).toISOString(), staleUntil: new Date(checkedAt.getTime() + 24 * 60 * 60_000 + 120_000).toISOString() });
+    const parsedCatalog = parseStationCatalog(STATION_CATALOG, FIXED_NOW);
+    const abq = parsedCatalog.entries.find((entry) => entry.iataId === 'ABQ')!;
+    const duplicateCatalog: WeatherResourceEnvelope = { kind: 'catalog', key: 'station-catalog:v1', metadata: catalogMetadata(FIXED_NOW),
+      entries: [...parsedCatalog.entries, { ...abq, info: { ...abq.info, name: 'Conflicting Albuquerque' } }] };
+    shared.publish('production', duplicateCatalog, FIXED_NOW);
+
+    for (const cycle of ['06', '12', '24'] as const) {
+      const productText = cycle === '12' ? PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 220600Z   FOR USE 0200-0900Z')
+        : cycle === '24' ? PRODUCT.replace('VALID 220000Z   FOR USE 2000-0300Z', 'VALID 221800Z   FOR USE 1400-2100Z') : PRODUCT;
+      const checkedAt = FIXED_NOW;
+      shared.publish('production', { kind: 'winds', key: `winds:us:${cycle}`, metadata: { fetchedAt: checkedAt.toISOString(), checkedAt: checkedAt.toISOString(),
+        refreshAfter: new Date(checkedAt.getTime() + 60 * 60_000).toISOString(), staleUntil: new Date(checkedAt.getTime() + 60 * 60_000 + 120_000).toISOString() },
+        rawProduct: productText, forecasts: decodeWindsProduct(productText, cycle, checkedAt) }, checkedAt);
+    }
+    const resources: WeatherResourcePort = { async getResource(key: WeatherResourceKey) {
+      const resource = shared.get('production', key, current);
+      return resource ? { ok: true, state: 'fresh', source: 'edge', resource } : { ok: false, code: 'upstream_unavailable', retryAt: new Date(current.getTime() + 60_000).toISOString() };
+    } };
+    const adapter = createAviationWeatherAdapter(resources, () => current, shared);
+    const route = [{ latitudeDeg: 42.6, longitudeDeg: -89 }];
+    await expect(adapter.getWindsStations(route)).rejects.toMatchObject({ code: 'upstream_invalid_response' });
+
+    current = new Date(FIXED_NOW.getTime() + 60_000);
+    const refreshed = { kind: 'catalog' as const, key: 'station-catalog:v1' as const, metadata: catalogMetadata(current), entries: parsedCatalog.entries };
+    shared.publish('production', refreshed, current);
+    await expect(adapter.getWindsStations(route)).resolves.toMatchObject({ stations: expect.arrayContaining([expect.objectContaining({ id: 'ABQ', name: 'Albuquerque' })]) });
   });
 
   it('maps Alaska and Hawaii FB station IDs through the official station catalog', async () => {

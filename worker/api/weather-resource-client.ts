@@ -2,6 +2,7 @@ import { ApiError } from './errors';
 import type { ServiceFetcher, CacheStore } from './winds';
 import { isWeatherResourceEnvelope, isWeatherResourceResult, parseResourceKey } from '../weather-resources/validation';
 import type { WeatherResourceDelivery, WeatherResourceKey, WeatherResourcePort, WeatherResourceResult } from '../weather-resources/contracts';
+import { createSharedWeatherResourceStore, type SharedWeatherResourceStore } from './weather-resource-store';
 
 const PRIVATE_COORDINATOR_URL = 'https://weather-coordinator.internal/resource';
 const EDGE_CACHE_ROOT = 'https://ppl-navlog-cache.invalid/weather-resource/v1';
@@ -138,7 +139,8 @@ export function createWeatherResourceClient(
   cache: CacheStore | undefined,
   environment: 'development' | 'production',
   now: () => Date = () => new Date(),
-  waitUntil?: (promise: Promise<unknown>) => void
+  waitUntil?: (promise: Promise<unknown>) => void,
+  shared: SharedWeatherResourceStore = createSharedWeatherResourceStore()
 ): WeatherResourcePort {
   // The client is constructed once per public API request, so all resources
   // share the same absolute 15-second coordinator wait budget.
@@ -146,23 +148,36 @@ export function createWeatherResourceClient(
   return {
     async getResource(key) {
       const resourceKey = parseResourceKey(key);
+      if (remainingMs(deadline) <= 0) throw deadlineError();
+      const retained = shared.get(environment, resourceKey, now());
+      if (retained) { recordOutcome(resourceKey, 'edge_hit'); return { ok: true, resource: retained, state: 'fresh', source: 'edge' }; }
       const cacheKey = edgeRequest(environment, resourceKey);
       const cached = await readEdgeResource(cache, cacheKey, resourceKey, deadline);
-      if (cached?.ok) { recordOutcome(resourceKey, 'edge_hit'); return cached; }
+      if (cached?.ok) {
+        shared.publish(environment, cached.resource, now());
+        const retainedEdge = shared.get(environment, resourceKey, now());
+        recordOutcome(resourceKey, 'edge_hit');
+        return retainedEdge ? { ok: true, resource: retainedEdge, state: 'fresh', source: 'edge' } : cached;
+      }
       if (remainingMs(deadline) <= 0) throw deadlineError();
-      return fetchCoordinatorResource(fetcher, cache, cacheKey, resourceKey, deadline, now, waitUntil);
+      return fetchCoordinatorResource(fetcher, cache, cacheKey, resourceKey, deadline, now, waitUntil, environment, shared);
     }
   };
 }
 
-async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheStore | undefined, cacheKey: Request, key: WeatherResourceKey, deadline: RequestDeadline, now: () => Date, waitUntil?: (promise: Promise<unknown>) => void): Promise<WeatherResourceDelivery> {
+async function fetchCoordinatorResource(fetcher: ServiceFetcher, cache: CacheStore | undefined, cacheKey: Request, key: WeatherResourceKey, deadline: RequestDeadline, now: () => Date, waitUntil: ((promise: Promise<unknown>) => void) | undefined, environment: 'development' | 'production', shared: SharedWeatherResourceStore): Promise<WeatherResourceDelivery> {
   const startedAt = now().getTime();
   try {
     const result = await requestCoordinator(fetcher, key, deadline);
     if (!result.ok) throw apiFailure(result);
-    if (result.state === 'fresh' && freshUntil(result.resource, now()) && cache) cacheFreshResource(cache, cacheKey, key, result.resource, deadline, waitUntil);
+    const checkedAt = now();
+    if (result.state === 'fresh' && freshUntil(result.resource, checkedAt)) {
+      shared.publish(environment, result.resource, checkedAt);
+      if (cache) cacheFreshResource(cache, cacheKey, key, result.resource, deadline, waitUntil);
+    }
     recordOutcome(key, result.state === 'grace' ? 'coordinator_grace' : 'coordinator_fresh', now().getTime() - startedAt);
-    return { ...result, source: 'coordinator' };
+    const retained = result.state === 'fresh' ? shared.get(environment, key, now()) : undefined;
+    return { ...result, ...(retained ? { resource: retained } : {}), source: 'coordinator' };
   } catch (error) {
     recordOutcome(key, 'coordinator_failure', now().getTime() - startedAt);
     if (error instanceof ApiError) throw error;

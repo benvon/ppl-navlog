@@ -15,6 +15,7 @@ import { ApiError } from './errors';
 import { decodeWindsProduct } from '../weather-resources/validation';
 export { decodeWindsProduct };
 import type { CachedStationCatalog, CachedWindsProduct, WeatherResourcePort, WeatherResourceEnvelope, WeatherResourceKey } from '../weather-resources/contracts';
+import type { SharedWeatherResourceStore, StationCatalogIdentityIndex } from './weather-resource-store';
 
 const MAX_POINT_DISTANCE_NM = 100;
 const MAX_POINT_SOURCES = 3;
@@ -81,17 +82,23 @@ function requireUniqueForecastMatch(
   throw new ApiError('The requested Winds/Temps station and valid time are not available. Select one of the published valid times.', 404, 'upstream_no_data');
 }
 
-function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
+function stationMatches(catalog: CachedStationCatalog, stationIds: readonly string[], identityIndex?: StationCatalogIdentityIndex): Map<string, StationInfo[]> {
+  if (identityIndex) return new Map(stationIds.map((id) => [id, (identityIndex[id] ?? []).map((entry) => ({ id, ...entry.info }))]));
   const requestedIds = new Set(stationIds);
   const matches = new Map<string, StationInfo[]>();
   for (const entry of catalog.entries) {
-    const identifier = entry.iataId;
-    if (identifier && requestedIds.has(identifier)) {
-      const records = matches.get(identifier) ?? [];
-      records.push({ id: identifier, ...entry.info });
-      matches.set(identifier, records);
+    if (requestedIds.has(entry.iataId)) {
+      const records = matches.get(entry.iataId) ?? [];
+      records.push({ id: entry.iataId, ...entry.info });
+      matches.set(entry.iataId, records);
     }
   }
+  return matches;
+}
+
+function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion, identityIndex?: StationCatalogIdentityIndex): Map<string, StationInfo> {
+  const requestedIds = new Set(stationIds);
+  const matches = stationMatches(catalog, stationIds, identityIndex);
   const result = new Map<string, StationInfo>();
   for (const identifier of requestedIds) {
     const records = matches.get(identifier) ?? [];
@@ -107,17 +114,9 @@ function stationInfo(catalog: CachedStationCatalog, stationIds: readonly string[
 }
 
 /** Point interpolation only uses exact, unique, catalog-verified identities in the product region. */
-function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion): Map<string, StationInfo> {
+function pointStationInfo(catalog: CachedStationCatalog, stationIds: readonly string[], expectedRegion: WindsRegion, identityIndex?: StationCatalogIdentityIndex): Map<string, StationInfo> {
   const requestedIds = new Set(stationIds);
-  const matches = new Map<string, StationInfo[]>();
-  for (const entry of catalog.entries) {
-    const identifier = entry.iataId;
-    if (identifier && requestedIds.has(identifier)) {
-      const records = matches.get(identifier) ?? [];
-      records.push({ id: identifier, ...entry.info });
-      matches.set(identifier, records);
-    }
-  }
+  const matches = stationMatches(catalog, stationIds, identityIndex);
   const result = new Map<string, StationInfo>();
   for (const identifier of requestedIds) {
     const records = matches.get(identifier) ?? [];
@@ -273,7 +272,7 @@ function provenanceAtAssembly(provenance: WeatherResourceCacheProvenance, curren
   return { ...provenance, ageSeconds: Math.max(0, Math.floor((current.getTime() - fetchedAt) / 1_000)),
     freshnessRemainingSeconds: Math.max(0, Math.floor((refreshAfter - current.getTime()) / 1_000)), servedAt: current.toISOString() };
 }
-export function createAviationWeatherAdapter(resources: WeatherResourcePort, now: () => Date = () => new Date()): WindsDataAdapter {
+export function createAviationWeatherAdapter(resources: WeatherResourcePort, now: () => Date = () => new Date(), shared?: SharedWeatherResourceStore): WindsDataAdapter {
   function provenance(envelope: WeatherResourceEnvelope, state: 'fresh' | 'grace', source: 'edge' | 'coordinator' | undefined, key: WeatherResourceKey): WeatherResourceCacheProvenance {
     const current = now();
     const status = state === 'grace' ? 'stale_on_error' : source === 'edge' ? 'edge_hit' : 'upstream_refresh';
@@ -305,10 +304,10 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
     return { envelope: result.resource, state: result.state, provenance: provenance(result.resource, result.state, result.source, key) };
   }
 
-  async function stationCatalog(): Promise<{ product: CachedStationCatalog; provenance: WeatherResourceCacheProvenance }> {
+  async function stationCatalog(): Promise<{ product: CachedStationCatalog; provenance: WeatherResourceCacheProvenance; identityIndex?: StationCatalogIdentityIndex }> {
     const loaded = await resource('station-catalog:v1');
     if (loaded.envelope.kind !== 'catalog') throw new ApiError('Weather coordinator returned an invalid catalog.', 503, 'service_unavailable');
-    return { product: { fetchedAt: loaded.envelope.metadata.fetchedAt, freshUntil: loaded.envelope.metadata.refreshAfter, staleUntil: loaded.envelope.metadata.staleUntil, entries: loaded.envelope.entries }, provenance: loaded.provenance };
+    return { product: { fetchedAt: loaded.envelope.metadata.fetchedAt, freshUntil: loaded.envelope.metadata.refreshAfter, staleUntil: loaded.envelope.metadata.staleUntil, entries: loaded.envelope.entries }, provenance: loaded.provenance, identityIndex: shared?.getCatalogIdentityIndex(loaded.envelope.entries) };
   }
 
   async function product(region: WindsRegion, cycle: WindsForecastCycle): Promise<ProductEntry> {
@@ -333,7 +332,7 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       const [{ products, unavailableCycles, failures }, catalog] = await Promise.all([allProducts(region), stationCatalog()]);
       const chosen = chooseApplicableProduct(products, unavailableCycles, failures, query, now());
       const ids = [...new Set(chosen.product.forecasts.map((forecast) => forecast.stationId))].sort();
-      const identities = pointStationInfo(catalog.product, ids, region);
+      const identities = pointStationInfo(catalog.product, ids, region, catalog.identityIndex);
       const stations = selectPointStations(query, chosen, identities);
       const assembledAt = now();
       products.forEach((item) => assertWeatherEligible(item.provenance, assembledAt));
@@ -349,7 +348,7 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
         const cycles = stationCycles.get(forecast.stationId) ?? new Set<WindsForecastCycle>(); cycles.add(forecast.forecastCycle); stationCycles.set(forecast.stationId, cycles);
         const key = `${forecast.stationId}:${forecast.validAt}`; if (availability.has(key)) throw new ApiError('Winds product returned ambiguous station and valid-time forecasts.', 502, 'upstream_invalid_response'); availability.set(key, forecast);
       }
-      const stationsById = stationInfo(catalog.product, [...stationCycles.keys()].sort(), region);
+      const stationsById = stationInfo(catalog.product, [...stationCycles.keys()].sort(), region, catalog.identityIndex);
       const stations = [...stationCycles.entries()].flatMap(([id, cycles]) => { const info = stationsById.get(id); return info ? [{ id, name: info.name, coordinates: info.coordinates, elevationFt: info.elevationFt, region, availableForecastCycles: [...cycles].sort() as WindsForecastCycle[], source: 'aviationweather' as const }] : []; }).sort((left, right) => left.id.localeCompare(right.id));
       if (stations.length === 0) throw new ApiError('No verified winds station has usable forecast data.', 404, 'upstream_no_data');
       const selectableIds = new Set(stations.map((station) => station.id));
@@ -368,7 +367,7 @@ export function createAviationWeatherAdapter(resources: WeatherResourcePort, now
       const matches: Array<{ forecast: DecodedForecast; product: CachedProduct; provenance: WeatherResourceCacheProvenance }> = [];
       for (const item of products) for (const forecast of item.product.forecasts) if (forecast.stationId === station && forecast.validAt === validTime) matches.push({ forecast, product: item.product, provenance: item.provenance });
       requireUniqueForecastMatch(matches, unavailableCycles, failures); const match = matches[0]!;
-      const info = stationInfo(catalog.product, [station], region).get(station);
+      const info = stationInfo(catalog.product, [station], region, catalog.identityIndex).get(station);
       if (!info) throw new ApiError('The requested winds station lacks verified coordinates.', 502, 'upstream_invalid_response');
       const assembledAt = now();
       assertWeatherEligible(catalog.provenance, assembledAt);
