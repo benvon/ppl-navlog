@@ -1,6 +1,6 @@
 # Issue #46: authoritative AWC budgets and refresh ownership
 
-Status: proposed specification for maintainer review; implementation is not included.
+Status: approved design. Tasks 1–7 implementation and local verification are recorded in [issue-46-validation.md](../../issue-46-validation.md); independent whole-branch review and protected-release evidence remain pending. No deployment is claimed.
 
 ## Intent and agreed scope
 

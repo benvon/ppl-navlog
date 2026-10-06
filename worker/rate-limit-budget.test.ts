@@ -55,3 +55,26 @@ describe("production deployment configuration", () => {
     expect(production.ratelimits[0]?.namespace_id).not.toBe(config.env.development.ratelimits[0]?.namespace_id);
   });
 });
+
+
+describe("API environment configuration", () => {
+  it("cannot enable the local bypass in a default deploy and opts into it only for local dev", () => {
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "wrangler.jsonc"), "utf8")) as {
+      vars?: { APP_ENV?: string };
+      env: Record<string, { vars: { APP_ENV: string }; ratelimits: Array<{ name: string }> }>;
+    };
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(config.vars?.APP_ENV).not.toBe("local");
+    expect(pkg.scripts.dev).toContain("npm run dev:worker");
+    expect(pkg.scripts["dev:worker"]).toContain("--env development --var APP_ENV:local --port 8787 --config wrangler.jsonc");
+    expect(pkg.scripts["dev:worker"]).toContain("npm run dev:coordinator");
+    expect(pkg.scripts["dev:coordinator"]).toContain("--env development --port 8788 --config wrangler.weather-coordinator.jsonc");
+    for (const name of ["development", "production"]) {
+      const deployed = config.env[name]!;
+      expect(deployed.vars.APP_ENV).toBe(name);
+      expect(deployed.ratelimits.some(({ name }) => name === "API_RATE_LIMITER")).toBe(true);
+    }
+  });
+});

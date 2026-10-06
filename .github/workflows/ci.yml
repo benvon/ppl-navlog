@@ -39,6 +39,15 @@ jobs:
       - name: Test release version logic
         run: npx vitest run scripts/rc-version.test.mjs
 
+      - name: Verify isolated weather bindings
+        run: npm run weather:bindings
+
+      - name: Test weather deployment configuration and artifact verification
+        run: npx vitest run scripts/verify-weather-bindings.test.mjs scripts/weather-coordinator-artifact.test.mjs
+
+      - name: Test coordinator in Workers runtime
+        run: npm run test:workers
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -60,17 +69,31 @@ jobs:
       - name: Verify static asset routing
         run: npm run verify:static-routing
 
+      - name: Build coordinator release bundle
+        env:
+          APP_VERSION: ${{ steps.release.outputs.version || format('pr-{0}', github.event.pull_request.number) }}
+          APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run weather:build
+
+      - name: Verify bundled coordinator release identity
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version || format('pr-{0}', github.event.pull_request.number) }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run weather:artifact
+
       - name: Security checks
         env:
           CI: true
         run: npm run security
 
-      - name: Upload validated static artifact
+      - name: Upload validated release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: static-assets-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
-          path: dist/
+          path: |
+            dist/**
+            release-artifact/**
           retention-days: 14
 
   deploy_development:
@@ -118,10 +141,16 @@ jobs:
       - name: Download validated artifact from this CI run
         env:
           ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
-        run: gh run download "$GITHUB_RUN_ID" --name "$ARTIFACT_NAME" --dir dist
+        run: gh run download "$GITHUB_RUN_ID" --name "$ARTIFACT_NAME" --dir .
 
       - name: Verify artifact identity
         run: node scripts/verify-deployment-artifact.mjs
+
+      - name: Verify coordinator artifact identity and bytes
+        run: npm run weather:artifact
+
+      - name: Deploy verified development coordinator
+        run: npx wrangler deploy release-artifact/weather-coordinator/worker.js --no-bundle --config wrangler.weather-coordinator.jsonc --env development
 
       - name: Deploy to development
         run: npx wrangler deploy --env development --var "APP_ENV:development" --var "APP_VERSION:$RELEASE_VERSION" --var "APP_COMMIT_SHA:$GITHUB_SHA"

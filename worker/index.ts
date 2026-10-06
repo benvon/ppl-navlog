@@ -4,7 +4,7 @@ import { handleApiRequest } from './api/handlers';
 import { createRequestId } from './api/request';
 import { errorResponse } from './api/response';
 import { createAviationWeatherAdapter, type CacheStore } from './api/winds';
-import { createTafAdapter } from './api/taf';
+import { createWeatherResourceClient } from './api/weather-resource-client';
 
 interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }>; }
 
@@ -19,36 +19,49 @@ export interface Env {
   RUNWAY_PICKER_ORIGIN?: string;
   WINDS_CACHE?: CacheStore;
   API_RATE_LIMITER?: RateLimiter;
+  AWC_COORDINATOR_API?: ServiceFetcher;
 }
+
+interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; }
 
 const API_PATH_PREFIX = '/api/';
 
+function unavailableResponse(requestId: string): Response {
+  return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
+}
+
+function weatherCacheEnvironment(appEnvironment: string | undefined): 'development' | 'production' | undefined {
+  if (appEnvironment === 'local') return 'development';
+  return appEnvironment === 'development' || appEnvironment === 'production' ? appEnvironment : undefined;
+}
+
+async function admitApiRequest(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
+  if (!env.API_RATE_LIMITER) return env.APP_ENV === 'local' ? undefined : unavailableResponse(requestId);
+  try {
+    const sourceKey = request.headers.get('CF-Connecting-IP') ?? 'unattributed';
+    const decision = await env.API_RATE_LIMITER.limit({ key: sourceKey });
+    if (!decision.success) return errorResponse(errorPayload(new ApiError('Too many requests. Please retry shortly.', 429, 'rate_limited'), requestId), 429);
+    return undefined;
+  } catch { return unavailableResponse(requestId); }
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, context?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith(API_PATH_PREFIX)) {
       const requestId = createRequestId(request);
-      if (env.APP_ENV === 'development' && !env.API_RATE_LIMITER) {
-        return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
-      }
-      if (env.API_RATE_LIMITER) {
-        const sourceKey = request.headers.get('CF-Connecting-IP') ?? 'unattributed';
-        let decision: { success: boolean };
-        try {
-          decision = await env.API_RATE_LIMITER.limit({ key: sourceKey });
-        } catch {
-          return errorResponse(errorPayload(new ApiError('API temporarily unavailable.', 503, 'service_unavailable'), requestId), 503);
-        }
-        if (!decision.success) return errorResponse(errorPayload(new ApiError('Too many requests. Please retry shortly.', 429, 'rate_limited'), requestId), 429);
-      }
+      const admissionError = await admitApiRequest(request, env, requestId);
+      if (admissionError) return admissionError;
       const aviationData = env.RUNWAY_PICKER_API
         ? createRunwayPickerAdapter(env.RUNWAY_PICKER_API, env.RUNWAY_PICKER_ORIGIN ?? 'https://runway-picker.internal')
         : undefined;
       const edgeCache = env.WINDS_CACHE ?? (globalThis as unknown as { caches?: { default?: CacheStore } }).caches?.default;
-      const windsData = createAviationWeatherAdapter({ fetch: globalThis.fetch.bind(globalThis) }, edgeCache);
-      const tafData = createTafAdapter({ fetch: globalThis.fetch.bind(globalThis) });
-      return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData, tafData });
+      const weatherEnvironment = weatherCacheEnvironment(env.APP_ENV);
+      const windsData = env.AWC_COORDINATOR_API && weatherEnvironment
+        ? createAviationWeatherAdapter(createWeatherResourceClient(env.AWC_COORDINATOR_API, edgeCache, weatherEnvironment, undefined, context?.waitUntil.bind(context)))
+        : undefined;
+      return handleApiRequest(request, { APP_VERSION: env.APP_VERSION, APP_COMMIT_SHA: env.APP_COMMIT_SHA, aviationData, windsData });
     }
 
     return env.ASSETS.fetch(request);

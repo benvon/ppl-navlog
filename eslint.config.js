@@ -16,7 +16,7 @@ const forbiddenDomainImports = [
 
 export default tseslint.config(
   {
-    ignores: ['.worktrees/**', '.wrangler/**', 'coverage/**', 'dist/**', 'node_modules/**', 'worker-configuration.d.ts']
+    ignores: ['.worktrees/**', '.wrangler/**', 'coverage/**', 'dist/**', 'release-artifact/**', 'node_modules/**', 'worker-configuration.d.ts']
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import { unstable_dev } from 'wrangler';
 
 // A counting wrapper exercises Wrangler's actual router while retaining the real API.
+// The temporary wrapper supplies an admitting limiter for API routing probes.
+// Production admission controls remain untouched; dedicated API tests cover denial.
 // Fixtures and local requests never call aviation providers or deployed services.
 const root = resolve('.');
 const source = JSON.parse(await readFile(resolve('wrangler.jsonc'), 'utf8'));
@@ -34,7 +36,7 @@ let invocations = 0;
 export default { async fetch(request, env) {
   if (new URL(request.url).pathname === '/api/__routing_probe__/count') return Response.json({ invocations });
   invocations++;
-  return worker.fetch(request, env);
+  return worker.fetch(request, { ...env, API_RATE_LIMITER: { async limit() { return { success: true }; } } });
 } };`);
     const config = join(directory, 'wrangler.json');
     await writeFile(config, JSON.stringify({ name: 'ppl-navlog-static-routing-probe', main: workerPath,

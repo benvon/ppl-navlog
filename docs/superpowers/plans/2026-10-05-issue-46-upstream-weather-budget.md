@@ -142,6 +142,8 @@ interface WeatherResourcePort {
 
 ## Task 7: Integrated verification and review handoff
 
+**Status:** implementation and required local verification completed; see [issue-46-validation.md](../../issue-46-validation.md). The combined independent Task 7/whole-branch review remains pending. No deployment or PR is included in this handoff.
+
 **Files:** extend runtime integration tests in `worker/weather-coordinator/index.test.ts` and `worker/api.functional.test.ts`; record evidence in `docs/issue-46-validation.md`.
 
 **Interfaces:** exercise final public API → service binding → real object → mocked upstream flow using two isolated application stacks and independently constructed edge adapters. No production fixture controls exposed.
