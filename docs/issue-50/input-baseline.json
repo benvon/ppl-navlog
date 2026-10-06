@@ -1,0 +1,110 @@
+[
+  {
+    "count": 1,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 20.05120899999997,
+    "p95Ms": 20.902499999999918
+  },
+  {
+    "count": 1,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 18.737833000000137,
+    "p95Ms": 19.277666999999838
+  },
+  {
+    "count": 1,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 18.373624999999947,
+    "p95Ms": 19.146582999999964
+  },
+  {
+    "count": 1,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 18.15625,
+    "p95Ms": 18.517207999999982
+  },
+  {
+    "count": 100,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 36.875332999999955,
+    "p95Ms": 38.375125000000025
+  },
+  {
+    "count": 100,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 37.79966699999977,
+    "p95Ms": 38.71229099999982
+  },
+  {
+    "count": 100,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 101.94316600000002,
+    "p95Ms": 108.90045899999996
+  },
+  {
+    "count": 100,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 101.43674999999985,
+    "p95Ms": 107.71399999999994
+  },
+  {
+    "count": 1000,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 233.30441699999938,
+    "p95Ms": 236.65500000000065
+  },
+  {
+    "count": 1000,
+    "payloadBytes": 2048,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 235.79975000000013,
+    "p95Ms": 244.9642500000009
+  },
+  {
+    "count": 1000,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "plan-title",
+    "samples": 12,
+    "medianMs": 1689.2536669999972,
+    "p95Ms": 1772.4740420000016
+  },
+  {
+    "count": 1000,
+    "payloadBytes": 32768,
+    "checkpoints": 25,
+    "name": "checkpoint-name-24",
+    "samples": 12,
+    "medianMs": 1688.924542000008,
+    "p95Ms": 1860.340916999994
+  }
+]

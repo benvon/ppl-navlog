@@ -10,7 +10,7 @@ import type { PlanDraft, WorksheetResult } from "../domain/route";
 import { WindsClientError, type MetarTransportClient, type AloftPointTransportClient } from "../services/weather/winds-client";
 import { PILOT_INPUT_PLAN_SCHEMA_VERSION, MAX_CHECKPOINTS_PER_PLAN, type PilotInputPlan, type PilotInputRepository } from "../services/storage/pilot-input-repository";
 import { localDateTimeToUtcText, utcTextToLocalDateTime } from "./departure-time";
-import { PlannerPlanState, type PlannerPlanView } from "./planner-plan-state";
+import { PlannerPlanState, type SavedPlanSummary, type PlannerPlanView } from "./planner-plan-state";
 
 export interface PilotIntentPlannerDependencies {
   readonly repository: PilotInputRepository;
@@ -81,7 +81,7 @@ class PilotIntentPlanner {
   }
 
   private get current(): PilotInputPlan | undefined { return this.planState.view.activeDraft; }
-  private get plans(): readonly PilotInputPlan[] { return this.planState.view.savedPlans; }
+  private get plans(): readonly SavedPlanSummary[] { return this.planState.view.savedPlans; }
   private get fields(): Record<string, string> { return restorePilotFields(this.current?.rawFields ?? {}); }
 
   async initialize(): Promise<void> {
@@ -231,7 +231,7 @@ class PilotIntentPlanner {
   private syncDestinationControls(view: PlannerPlanView, destinationEnabled: boolean): void {
     const selector = this.content.querySelector<HTMLSelectElement>("select[aria-label='Saved plan']");
     if (selector) {
-      const selectedId = this.current?.id ?? "";
+      const selectedId = view.activeDraft?.id ?? "";
       this.syncPlanSelector(selector, view.savedPlans, selectedId);
       selector.disabled = !destinationEnabled;
     }
@@ -239,7 +239,7 @@ class PilotIntentPlanner {
     if (create) create.disabled = !destinationEnabled;
   }
 
-  private syncPlanSelector(selector: HTMLSelectElement, savedPlans: readonly PilotInputPlan[], selectedId: string): void {
+  private syncPlanSelector(selector: HTMLSelectElement, savedPlans: readonly SavedPlanSummary[], selectedId: string): void {
     const optionsMatch = selector.options.length === savedPlans.length + 1 && savedPlans.every((plan, index) => selector.options[index + 1]?.value === plan.id && selector.options[index + 1]?.textContent === plan.title);
     if (!optionsMatch) {
       selector.replaceChildren(new Option("Choose saved plan", ""));
@@ -857,19 +857,22 @@ class PilotIntentPlanner {
     this.renderFeedback();
   }
   private refreshUpdateGate(): void {
-    const reason = this.localError();
+    const view = this.planState.view;
+    const current = view.activeDraft;
+    const baseFields = restorePilotFields(current?.rawFields ?? {});
+    const reason = validateLocalInputs(baseFields, current, this.profiles, this.profileDraftDirty);
     const feedback = this.content.querySelector<HTMLElement>("[data-local-error]");
     if (feedback) feedback.textContent = reason ? `Unavailable: ${reason}` : "";
     this.refreshCurrentUtcControl();
     this.content.querySelectorAll<HTMLInputElement>("form.route-form input[type='text']").forEach((input) => {
       const showError = this.touchedFields.has(input.name) || input.value.trim() !== "";
-      const fields = { ...this.fields, [input.name]: input.value };
-      const message = showError ? fieldErrorFor(input.name, fields, this.current, this.profiles) : undefined;
+      const fields = { ...baseFields, [input.name]: input.value };
+      const message = showError ? fieldErrorFor(input.name, fields, current, this.profiles) : undefined;
       input.setAttribute("aria-invalid", String(message !== undefined));
       const helper = this.content.querySelector<HTMLElement>(`#${input.name}-error`);
       if (helper) helper.textContent = message ?? "";
     });
-    this.syncPlanControls();
+    this.syncPlanControls(view);
   }
 
   private refreshCurrentUtcControl(): void {

@@ -2,9 +2,13 @@ import { PILOT_INPUT_PLAN_SCHEMA_VERSION, type PilotInputPlan, type PilotInputRe
 
 export type PlannerPlanPhase = "editing" | "saving" | "switching" | "save-failed";
 export type PlannerDestination = { readonly kind: "new" } | { readonly kind: "open"; readonly id: string };
+export interface SavedPlanSummary {
+  readonly id: string;
+  readonly title: string;
+}
 export interface PlannerPlanView {
   readonly activeDraft?: PilotInputPlan;
-  readonly savedPlans: readonly PilotInputPlan[];
+  readonly savedPlans: readonly SavedPlanSummary[];
   readonly phase: PlannerPlanPhase;
   readonly status: string;
   readonly acceptedDestination?: PlannerDestination;
@@ -24,6 +28,7 @@ export class PlannerPlanState {
   private activeDraft?: PilotInputPlan;
   private dirty = false;
   private savedPlans: readonly PilotInputPlan[] = [];
+  private savedPlanSummaries: readonly SavedPlanSummary[] = Object.freeze([]);
   private phase: PlannerPlanPhase = "editing";
   private accepted?: DestinationRequest;
   private error?: string;
@@ -35,7 +40,7 @@ export class PlannerPlanState {
   public get view(): PlannerPlanView {
     return Object.freeze({
       ...(this.activeDraft ? { activeDraft: structuredClone(this.activeDraft) } : {}),
-      savedPlans: structuredClone(this.savedPlans), phase: this.phase,
+      savedPlans: this.savedPlanSummaries, phase: this.phase,
       status: this.phase === "saving" ? "Saving" : this.phase === "switching" ? "Opening" : this.phase === "save-failed" ? "Save failed" : "",
       ...(this.accepted ? { acceptedDestination: { ...this.accepted.target } } : {}),
       ...(this.error ? { error: this.error } : {}),
@@ -51,6 +56,7 @@ export class PlannerPlanState {
   public async initialize(): Promise<void> {
     await this.repository.initialize();
     this.savedPlans = structuredClone(await this.repository.listPlans());
+    this.refreshSavedPlanSummaries();
     if (this.savedPlans.length > 0) {
       this.activeDraft = structuredClone(this.savedPlans[0]!);
       this.dirty = false;
@@ -141,6 +147,7 @@ export class PlannerPlanState {
       this.savedPlans = index < 0
         ? [...this.savedPlans, savedSnapshot]
         : this.savedPlans.map((plan) => plan.id === snapshot.id ? savedSnapshot : plan);
+      this.refreshSavedPlanSummaries();
       if (!this.activeDraft || this.activeDraft.id === snapshot.id) this.activeDraft = structuredClone(savedSnapshot);
       const pending = this.accepted;
       if (pending) return await this.performDestination(pending);
@@ -183,6 +190,11 @@ export class PlannerPlanState {
   private blankPlan(): PilotInputPlan {
     const now = this.options.clock.now().toISOString();
     return { schemaVersion: PILOT_INPUT_PLAN_SCHEMA_VERSION, id: this.options.ids.next(), title: "New study route", rawFields: { "plan-title": "New study route" }, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {}, updatedAt: now };
+  }
+
+  // Only persisted selector metadata is shared. Draft edits never inspect saved payloads.
+  private refreshSavedPlanSummaries(): void {
+    this.savedPlanSummaries = Object.freeze(this.savedPlans.map(({ id, title }) => Object.freeze({ id, title })));
   }
 
   private publish(): void { const view = this.view; this.listeners.forEach((listener) => listener(view)); }

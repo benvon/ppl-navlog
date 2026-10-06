@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PilotInputPlan, PilotInputRepository } from "../services/storage/pilot-input-repository";
 import { PlannerPlanState } from "./planner-plan-state";
 
@@ -238,5 +238,62 @@ describe("PlannerPlanState", () => {
     await state.discardPending();
     expect(state.view.activeDraft?.id).toBe("target");
     expect(state.view.phase).toBe("editing");
+  });
+});
+
+
+describe("saved-history ownership", () => {
+  it("exposes only selector metadata and preserves saved labels until a successful save", async () => {
+    const { state, repository } = owner();
+    repository.plans = [makePlan("first"), makePlan("second")];
+    await state.initialize();
+    expect(state.view.savedPlans).toEqual([{ id: "first", title: "first" }, { id: "second", title: "second" }]);
+    state.edit({ ...state.view.activeDraft!, title: " Unsaved " });
+    expect(state.view.savedPlans[0]?.title).toBe("first");
+    repository.failWrite = true;
+    await state.save();
+    expect(state.view.savedPlans[0]?.title).toBe("first");
+    repository.failWrite = false;
+    await state.retry();
+    expect(state.view.savedPlans[0]?.title).toBe(" Unsaved ");
+  });
+
+  it("keeps full saved payloads out of edit reads and subscriber publications", async () => {
+    const { state, repository } = owner();
+    repository.plans = [makePlan("active"), { ...makePlan("saved"), rawFields: { notes: "private-saved-payload" } }];
+    await state.initialize();
+    const clone = globalThis.structuredClone;
+    const guard = vi.spyOn(globalThis, "structuredClone").mockImplementation((value) => {
+      if (JSON.stringify(value).includes("private-saved-payload")) throw new Error("Saved document cloned during editing");
+      return clone(value);
+    });
+    try {
+      let publishedTitle: string | undefined;
+      const unsubscribe = state.subscribe((view) => { publishedTitle = view.activeDraft?.title; });
+      state.edit({ ...state.view.activeDraft!, title: " literal incomplete - " });
+      expect(state.view.activeDraft?.title).toBe(" literal incomplete - ");
+      expect(publishedTitle).toBe(" literal incomplete - ");
+      unsubscribe();
+    } finally { guard.mockRestore(); }
+  });
+
+  it("prevents callers and subscribers from changing owned drafts or summary metadata", async () => {
+    const { state, repository } = owner();
+    repository.plans = [makePlan("active"), makePlan("saved")];
+    await state.initialize();
+    const exposed = state.view;
+    (exposed.activeDraft!.rawFields as Record<string, string>).title = "caller changed";
+    try { (exposed.savedPlans as { id: string; title: string }[])[1]!.title = "caller changed"; } catch { /* Frozen metadata may reject mutation. */ }
+    try { (exposed.savedPlans as { id: string; title: string }[]).pop(); } catch { /* Frozen arrays may reject mutation. */ }
+    const unsubscribe = state.subscribe((view) => {
+      (view.activeDraft!.checkpoints as { name: string; coordinateText: string }[]).push({ name: "subscriber changed", coordinateText: "" });
+      try { (view.savedPlans as { id: string; title: string }[])[0]!.id = "subscriber changed"; } catch { /* Frozen metadata may reject mutation. */ }
+    });
+    expect(state.view.activeDraft?.rawFields.title).toBe("active");
+    expect(state.view.activeDraft?.checkpoints).toEqual([]);
+    expect(state.view.savedPlans).toEqual([{ id: "active", title: "active" }, { id: "saved", title: "saved" }]);
+    unsubscribe();
+    await state.requestOpen("saved");
+    expect(state.view.activeDraft?.title).toBe("saved");
   });
 });
