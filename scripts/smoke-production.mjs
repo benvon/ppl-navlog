@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { checkStaticSurface } from './static-smoke.mjs';
 
 const hosts = ['https://navlog.benvon.net', 'https://navlog.pplstudyguide.com'];
 const DOMAIN_DEADLINE_MS = 180_000;
@@ -33,7 +34,7 @@ export async function runProductionSmoke({
   }
   const expected = { buildVersion, releaseVersion, sha };
 
-  async function request(host, path, parse, deadline, attempt) {
+  async function request(host, path, parse, deadline, attempt, { method = 'GET', headers = {}, status = 200 } = {}) {
     const endpoint = `${host}${path}`;
     const remaining = deadline - now();
     if (remaining <= 0) throw safeFailure(`${host}: attempt ${attempt}: overall deadline exceeded before ${path}`);
@@ -52,8 +53,8 @@ export async function runProductionSmoke({
       }, timeoutMs);
     });
     const operation = (async () => {
-      const response = await fetchImpl(endpoint, { signal: controller.signal, headers: { 'Cache-Control': 'no-cache' } });
-      if (!response.ok) throw safeFailure(`${host}: attempt ${attempt}: ${path} returned HTTP ${response.status}`);
+      const response = await fetchImpl(endpoint, { method, signal: controller.signal, headers: { 'Cache-Control': 'no-cache', ...headers } });
+      if (response.status !== status) throw safeFailure(`${host}: attempt ${attempt}: ${path} returned HTTP ${response.status}`);
       return await parse(response);
     })();
     try {
@@ -71,14 +72,13 @@ export async function runProductionSmoke({
   }
 
   async function checkHost(host, deadline, attempt) {
-    const index = await request(host, '/', async (response) => ({
-      html: await response.text(),
-      csp: response.headers.get('Content-Security-Policy'),
-    }), deadline, attempt);
-    if (!index.html.includes('<div id="app"></div>')) throw safeFailure(`${host}: attempt ${attempt}: app root missing`);
-    if (!index.csp?.includes("default-src 'self'")) throw safeFailure(`${host}: attempt ${attempt}: static CSP missing`);
-
-    const manifest = await request(host, '/version.json', (response) => response.json(), deadline, attempt);
+    let manifest;
+    try {
+      manifest = await checkStaticSurface({ request, host, deadline, attempt });
+    } catch (error) {
+      if (error?.safeSmokeFailure) throw error;
+      throw safeFailure(`${host}: attempt ${attempt}: ${error.message}`);
+    }
     const health = await request(host, '/api/health', (response) => response.json(), deadline, attempt);
     const staticSha = manifest?.commitSha;
     const apiSha = health?.commitSha;

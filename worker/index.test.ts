@@ -34,24 +34,25 @@ describe('Worker foundation', () => {
     await expect(response.json()).resolves.toMatchObject({ code: 'method_not_allowed' });
   });
 
-  it('adds security headers to static asset responses', async () => {
-    const response = await worker.fetch(new Request('https://example.test/'), env);
+  it('passes static asset responses through unchanged', async () => {
+    const assetResponse = new Response('<!doctype html><title>PPL Navlog</title>', {
+      headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache', 'X-Asset-Marker': 'preserved' }
+    });
+    const response = await worker.fetch(new Request('https://example.test/'), {
+      ...env, APP_ENV: 'production', ASSETS: { fetch: async () => assetResponse }
+    });
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
-    expect(response.headers.get('X-Request-Id')).toMatch(UUID_PATTERN);
+    expect(response).toBe(assetResponse);
+    expect(response.headers.get('X-Request-Id')).toBeNull();
+    expect(response.headers.get('X-Asset-Marker')).toBe('preserved');
+    expect(response.headers.get('Cache-Control')).toBe('no-cache');
   });
 
   it('keeps static assets available without a limiter in protected environments', async () => {
     const response = await worker.fetch(new Request('https://example.test/'), { ...env, APP_ENV: 'production' });
-
     expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
-    expect(response.headers.get('X-Request-Id')).toMatch(UUID_PATTERN);
   });
 });
-
-const UUID_PATTERN = /^[0-9a-f]{8}-/;
 
 const suppliedRequestId = 'e531d3ef-89b8-4cbe-a7e9-c42c7fad7de5';
 const dataPaths = [

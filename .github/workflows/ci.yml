@@ -66,6 +66,9 @@ jobs:
           VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run build
 
+      - name: Verify static asset routing
+        run: npm run verify:static-routing
+
       - name: Build coordinator release bundle
         env:
           APP_VERSION: ${{ steps.release.outputs.version || format('pr-{0}', github.event.pull_request.number) }}

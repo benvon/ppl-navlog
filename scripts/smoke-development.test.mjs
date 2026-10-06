@@ -6,10 +6,36 @@ import { describe, expect, it } from 'vitest';
 const smokeUrl = pathToFileURL(resolve('scripts/smoke-development.mjs')).href;
 const bootstrap = `
 globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1; };
-globalThis.fetch = async (url) => {
+function staticResponse(value, status = 200, cacheControl = 'no-cache', extra = {}) {
+  const headers = {
+    'Content-Security-Policy': "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self'; form-action 'none'; object-src 'none'",
+    'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Cache-Control': cacheControl,
+    'Content-Type': 'text/html; charset=utf-8',
+    ...extra,
+  };
+  if (cacheControl === null) delete headers['Cache-Control'];
+  return new Response(value, { status, headers });
+}
+globalThis.fetch = async (url, options = {}) => {
   const path = new URL(url).pathname;
-  if (path === '/') return new Response('<div id="app"></div>', { headers: { 'Content-Security-Policy': "default-src 'self'" } });
-  if (path === '/version.json') return Response.json({ version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA });
+  if (path === '/') {
+    if (options.method === 'HEAD') return staticResponse('');
+    if (options.method === 'POST') return staticResponse('', 405, null);
+    if (options.headers?.['If-None-Match'] === '"fixture-root"') return new Response(null, { status: 304, headers: {
+      'Content-Security-Policy': "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self'; form-action 'none'; object-src 'none'",
+      'Permissions-Policy': 'geolocation=(), microphone=(), camera=()', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Cache-Control': 'no-cache',
+    } });
+    return staticResponse('<div id="app"></div><link rel="stylesheet" href="/assets/app-Ab12.css"><script type="module" src="/assets/app-Xy34.js"></script>', 200, 'no-cache', { ETag: '"fixture-root"' });
+  }
+  if (path === '/version.json') return staticResponse(JSON.stringify({ version: process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA }), 200, 'no-store', { 'Content-Type': 'application/json' });
+  if (path === '/robots.txt') return staticResponse('User-agent: *\\nDisallow:\\n');
+  if (path === '/__static_smoke__/deep-link' || path === '/assets/__static_smoke__-AbCdEf12.js') return staticResponse('<div id="app"></div>');
+  if (path === '/assets/app-Xy34.js') return staticResponse('export default 1;', 200, 'public, max-age=31536000, immutable', { 'Content-Type': 'text/javascript; charset=utf-8' });
+  if (path === '/assets/app-Ab12.css') return staticResponse('body { color: black; }', 200, 'public, max-age=31536000, immutable', { 'Content-Type': 'text/css; charset=utf-8' });
   if (path === '/api/health') return Response.json({ status: 'ok', version: process.env.API_VERSION ?? process.env.RELEASE_VERSION, commitSha: process.env.GITHUB_SHA, requestId: 'smoke-test-request' });
   if (path === '/api/airports/1C8') {
     if (process.env.AIRPORT_SCENARIO === 'unavailable') return Response.json({ error: 'Upstream unavailable' }, { status: 503 });

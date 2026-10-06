@@ -7,7 +7,7 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": true
+    "run_worker_first": ["/api/*"]
   },
   "services": [
     { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
@@ -29,7 +29,7 @@
         "directory": "./dist",
         "binding": "ASSETS",
         "not_found_handling": "single-page-application",
-        "run_worker_first": true
+        "run_worker_first": ["/api/*"]
       },
       "services": [
         { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
@@ -56,7 +56,7 @@
         "directory": "./dist",
         "binding": "ASSETS",
         "not_found_handling": "single-page-application",
-        "run_worker_first": true
+        "run_worker_first": ["/api/*"]
       },
       "services": [
         { "binding": "RUNWAY_PICKER_API", "service": "runway-picker-metar-api" },
