@@ -6,6 +6,8 @@ let completedUpstreamCalls = 0;
 let resourceRequests = 0;
 let upstreamMode: UpstreamMode = 'ok';
 const realDateNow = Date.now.bind(Date);
+// Clock advances exercise cache deadlines without changing the mock forecast contents.
+const fixtureProductDate = new Date(realDateNow());
 let clock: number | undefined;
 let clockSequence: number[] = [];
 let releaseFetch!: () => void;
@@ -39,7 +41,7 @@ function productResponse(requestUrl: string): Response {
   const cycle = url.searchParams.get('fcst');
   const region = url.searchParams.get('region');
   const station = region === 'alaska' ? 'ANC' : region === 'hawaii' ? 'HNL' : 'ABC';
-  const currentDate = new Date(ensureClock());
+  const currentDate = fixtureProductDate;
   const day = String(currentDate.getUTCDate()).padStart(2, '0');
   const nextDay = String(new Date(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate() + 1)).getUTCDate()).padStart(2, '0');
   const product = cycle === '12' ? `DATA BASED ON ${day}0000Z\nVALID ${day}1200Z FOR USE 1200-1800Z\nFT 3000\nABC2700`
