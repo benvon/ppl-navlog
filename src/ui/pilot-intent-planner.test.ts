@@ -13,6 +13,8 @@ import { calculateGreatCircleDistanceAndInitialCourse } from "../domain/distance
 import { aircraftProfile } from "../services/storage/__tests__/fixtures";
 import { COMPLETE_FLIGHT_FORECAST_VALID_AT, completeFlightWeatherClient } from "../test/fixtures/complete-flight";
 import { renderPilotIntentPlanner } from "./pilot-intent-planner";
+import { WorkerAirportLookup } from "../services/airport/worker-airport-lookup";
+import { WorkerWindsClient, type BrowserFetch } from "../services/weather/winds-client";
 
 class MemoryInputs implements PilotInputRepository {
   readonly plans: PilotInputPlan[] = [];
@@ -193,7 +195,201 @@ function assertProgressiveWeatherQueryOrder(callOrder: readonly string[], querie
   expect(toToc.value.distance + toDestination.value.distance).toBeCloseTo(route.value.distance, 1);
 }
 
+function measuredAdapterSession() {
+  const calls: string[] = [];
+  let now = Date.parse("2026-09-21T21:30:00.000Z");
+  let failPath: string | undefined;
+  const cache = (key: string, resource: string, ttlSeconds: number) => {
+    const fetchedAt = new Date(now).toISOString();
+    const refreshAfter = new Date(now + ttlSeconds * 1000).toISOString();
+    return { status: "upstream_refresh", source: "upstream", ageSeconds: 0, fetchedAt, expiresAt: refreshAfter,
+      freshnessRemainingSeconds: ttlSeconds, servedAt: fetchedAt, ttlSeconds, maxPayloadAgeSeconds: ttlSeconds + 120,
+      key, resource, checkedAt: fetchedAt, refreshAfter, staleUntil: new Date(now + (ttlSeconds + 120) * 1000).toISOString() };
+  };
+  const json = (payload: unknown) => Response.json(payload);
+  const fetcher: BrowserFetch = { fetch: async (input) => {
+    const url = new URL(String(input)); calls.push(`${url.pathname}${url.search}`);
+    if (failPath !== undefined && url.pathname.startsWith(failPath)) {
+      failPath = undefined;
+      return new Response("{}", { status: 503, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.pathname.startsWith("/api/airports/")) {
+      const code = url.pathname.split("/").at(-1)!;
+      const point = await createLocalStudyAirportLookup().lookupAirportCode(code);
+      const fetchedAt = new Date(now).toISOString();
+      return json({ airport: { requestedIcao: code, icao: code, name: point.name,
+        coordinates: { latitudeDeg: point.coordinate.latitude, longitudeDeg: point.coordinate.longitude }, elevationFt: point.elevationFeetMsl, fetchedAt },
+        provenance: { adapter: "runway-picker", fetchedAt, cache: cache(`v1:airport:${code}`, "airport", 3600) } });
+    }
+    if (url.pathname.includes("/metar/")) {
+      const icao = url.pathname.split("/").at(-1)!;
+      const payload = await completeFlightWeatherClient.fetchMetar(icao);
+      const fetchedAt = new Date(now).toISOString();
+      return json({ ...payload, metar: { ...payload.metar, icao, fetchedAt }, provenance: { adapter: "runway-picker", fetchedAt,
+        cache: cache(`v1:metar:${icao}`, "metar", 3600) } });
+    }
+    const query = { latitudeDeg: Number(url.searchParams.get("lat")), longitudeDeg: Number(url.searchParams.get("lon")),
+      altitudeFeetMsl: Number(url.searchParams.get("altitudeFeetMsl")), plannedUtc: url.searchParams.get("plannedUtc")! };
+    const answer = await winds().fetchPoint(query);
+    const pointCache = (key: string, resource: string, ttl: number) => cache(key, resource, ttl);
+    return json({ ...answer, query, product: { region: "us", cycle: "06", cache: pointCache("winds:us:06", "winds-temps", 3600) },
+      catalog: { cache: pointCache("station-catalog:v1", "station-catalog", 86400) } });
+  } };
+  const airportLookup = new WorkerAirportLookup(fetcher, "https://planner-test.invalid");
+  const client = new WorkerWindsClient(fetcher, "https://planner-test.invalid");
+  return { calls, airportLookup, client, now, currentNow: () => now, setNow: (next: number) => { now = next; }, failNext: (path: string) => { failPath = path; } };
+}
+
+async function performAdapterUpdate(root: HTMLElement, calls: string[]): Promise<string> {
+  calls.length = 0;
+  button(root, "Update navlog").click();
+  await vi.waitFor(() => expect(root.querySelector("[data-current-result]")).not.toBeNull());
+  return root.querySelector<HTMLElement>(".calculated-navlog")?.textContent ?? "";
+}
+
 describe("pilot intent planner", () => {
+  it("keeps adapter reuse across saved-plan switches and starts empty with new adapters", async () => {
+    const makePlan = (id: string, title: string, fuel: string): PilotInputPlan => ({ schemaVersion: 1, id, title,
+      rawFields: { "plan-title": title, "departure-time": "2026-09-21T22:00", "fuel-aboard": fuel, "taxi-fuel": "0.8",
+        "reserve-fuel": "3", "descent-target": "1800", "departure-icao": "KORD", "destination-icao": "KJVL",
+        "departure-metar-icao": "KORD", "cruise-altitude": "4500" },
+      selectedProfileId: profile.id, profileSnapshot: profile, checkpoints: [], cruiseAltitudeTexts: ["4500"], overrideReasons: {},
+      updatedAt: "2026-09-21T21:30:00.000Z" });
+    const repository = new MemoryInputs(); repository.profiles.push(profile);
+    repository.plans.push(makePlan("reuse-plan-a", "Plan A", "20"), makePlan("reuse-plan-b", "Plan B", "18"));
+    const session = measuredAdapterSession();
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => session.currentNow());
+    try {
+      const root = await mount(repository, session.client, session.airportLookup);
+      choosePlan(root, "Plan A"); await settle();
+      const first = await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(5);
+      choosePlan(root, "Plan B"); await settle();
+      await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(0);
+      expect(input(root, "plan-title").value).toBe("Plan B");
+      expect(root.querySelector(".calculated-navlog")?.textContent).not.toBe(first);
+
+      const newSession = measuredAdapterSession();
+      const newPage = await mount(repository, newSession.client, newSession.airportLookup);
+      choosePlan(newPage, "Plan B"); await settle();
+      await performAdapterUpdate(newPage, newSession.calls);
+      expect(newSession.calls).toHaveLength(5);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("joins concurrent normalized airport, METAR, and exact point requests", async () => {
+    const session = measuredAdapterSession();
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => session.currentNow());
+    try {
+      const query: AloftPointQuery = { latitudeDeg: 42.1, longitudeDeg: -88.2, altitudeFeetMsl: 4500, plannedUtc: "2026-09-21T22:30:00.000Z" };
+      await Promise.all([
+        session.airportLookup.lookupAirportCode("kord"), session.airportLookup.lookupAirportCode("KORD"),
+        session.client.fetchMetar("kord"), session.client.fetchMetar("KORD"),
+        session.client.fetchPoint(query), session.client.fetchPoint({ ...query }),
+      ]);
+      expect(session.calls).toHaveLength(3);
+    } finally { dateNow.mockRestore(); }
+  });
+
+  it("refreshes expired context, preserves saved inputs on explicit failure, and recovers on retry", async () => {
+    const session = measuredAdapterSession();
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => session.currentNow());
+    try {
+      const repository = new MemoryInputs(); repository.profiles.push(profile);
+      const root = await mount(repository, session.client, session.airportLookup);
+      await makeLocallyValid(root, true);
+      await performAdapterUpdate(root, session.calls);
+      session.setNow(session.now + 3_600_001);
+      await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(5);
+      expect(root.querySelector("[data-current-result]")).not.toBeNull();
+      await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(0);
+
+      edit(root, "cruise-altitude", "5500");
+      session.failNext("/api/weather/winds/point");
+      session.calls.length = 0;
+      button(root, "Update navlog").click();
+      await vi.waitFor(() => expect(root.querySelector("[role='status']")?.textContent).toMatch(/failed|unavailable|try again|unsuccessful response/i));
+      expect(root.querySelector("[data-current-result]")).toBeNull();
+      expect(session.calls.filter((call) => call.includes("/api/weather/winds/point"))).toHaveLength(1);
+      const failedRequest = session.calls.find((call) => call.includes("/api/weather/winds/point"))!;
+      expect(repository.plans[0]?.rawFields["cruise-altitude"]).toBe("5500");
+      session.calls.length = 0;
+      button(root, "Update navlog").click();
+      await vi.waitFor(() => expect(root.querySelector("[data-current-result]")).not.toBeNull());
+      expect(session.calls.filter((call) => call.includes("/api/weather/winds/point"))).toHaveLength(2);
+      expect(session.calls).toContain(failedRequest);
+    } finally { dateNow.mockRestore(); }
+  });
+
+  it.each([0, 25])("reuses exact Worker requests across planner updates for %i checkpoints", async (checkpointCount) => {
+    const session = measuredAdapterSession();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(session.now);
+    try {
+      const repository = new MemoryInputs(); repository.profiles.push(profile);
+      const root = await mount(repository, session.client, session.airportLookup);
+      await makeLocallyValid(root, true);
+      for (let i = 0; i < checkpointCount; i++) {
+        button(root, "Add checkpoint").click();
+        const fraction = 0.25 + i / 24 * 0.45;
+        edit(root, `checkpoint-name-${i}`, `Point ${i + 1}`);
+        edit(root, `checkpoint-coordinate-${i}`, `${41.9742 + fraction * (42.6203 - 41.9742)}, ${-87.9073 + fraction * (-89.0416 + 87.9073)}`);
+      }
+      const initial = await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(checkpointCount === 0 ? 5 : 30);
+      expect(root.querySelector("[role='status']")?.textContent).toMatch(/current/i);
+      expect(repository.plans[0]?.rawFields["departure-time"]).toBe("2026-09-21T22:00");
+      expect(JSON.stringify(repository.plans[0])).not.toContain("provenance");
+
+      const unchanged = await performAdapterUpdate(root, session.calls);
+      expect(session.calls).toHaveLength(0);
+      expect(unchanged).toBe(initial);
+
+      const repeats: number[] = [];
+      for (const [name, value] of [["plan-title", "Renamed route"], ["fuel-aboard", "19"]] as const) {
+        edit(root, name, value);
+        await performAdapterUpdate(root, session.calls);
+        repeats.push(session.calls.length);
+      }
+      expect(repeats).toEqual([0, 0]);
+      const fuelResult = root.querySelector<HTMLElement>(".calculated-navlog")?.textContent ?? "";
+      expect(fuelResult).not.toBe(initial);
+
+      edit(root, "cruise-altitude", "5500");
+      await performAdapterUpdate(root, session.calls);
+      expect(session.calls.filter((call) => call.includes("/api/weather/winds/point"))).toHaveLength(checkpointCount === 0 ? 2 : 27);
+      expect(session.calls.filter((call) => call.includes("/api/airports/") || call.includes("/api/weather/metar/")).length).toBe(0);
+
+      edit(root, "departure-time", "2026-09-21T22:05");
+      await performAdapterUpdate(root, session.calls);
+      expect(session.calls.filter((call) => call.includes("/api/weather/winds/point"))).toHaveLength(checkpointCount === 0 ? 2 : 27);
+      expect(session.calls.filter((call) => call.includes("/api/airports/") || call.includes("/api/weather/metar/")).length).toBe(0);
+      if (checkpointCount === 25) {
+        const previousPointUrls = new Set(session.calls.filter((call) => call.includes("/api/weather/winds/point")));
+        const movedFraction = 0.25 + 24 / 24 * 0.45;
+        edit(root, "checkpoint-coordinate-24", `${41.9742 + movedFraction * (42.6203 - 41.9742) + 0.005}, ${-87.9073 + movedFraction * (-89.0416 + 87.9073)}`);
+        await performAdapterUpdate(root, session.calls);
+        const changedPointUrls = session.calls.filter((call) => call.includes("/api/weather/winds/point"));
+        expect(changedPointUrls).toHaveLength(2);
+        expect(changedPointUrls.every((url) => !previousPointUrls.has(url))).toBe(true);
+        expect(session.calls.filter((call) => call.includes("/api/airports/") || call.includes("/api/weather/metar/")).length).toBe(0);
+        button(root, "Override TAS for leg 1").click();
+        edit(root, "override-tas-0", "120");
+        edit(root, "override-reason-0", "Synthetic early leg speed change");
+        await performAdapterUpdate(root, session.calls);
+        expect(session.calls.filter((call) => call.includes("/api/weather/winds/point"))).toHaveLength(25);
+        expect(session.calls.filter((call) => call.includes("/api/airports/") || call.includes("/api/weather/metar/")).length).toBe(0);
+      }
+      expect(root.querySelector("[data-current-result]")).not.toBeNull();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it("guides pilots to add recognizable visual checkpoints along the route", async () => {
     const root = await mount(new MemoryInputs());
     const route = root.querySelector('[data-stage="route"]');

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AloftPointAnswer, AloftPointQuery } from "../../../worker/api/contracts";
 import { completeFlightWeatherClient } from "../../test/fixtures/complete-flight";
-import { WorkerWindsClient } from "./winds-client";
+import { WindsClientError, WorkerWindsClient } from "./winds-client";
 
 const query: AloftPointQuery = { latitudeDeg: 42, longitudeDeg: -88, altitudeFeetMsl: 4500, plannedUtc: "2026-09-21T22:00:00.000Z" };
 const id = "44444444-4444-4444-8444-444444444444";
@@ -39,6 +39,101 @@ describe("current worksheet weather transport", () => {
     expect(url.searchParams.get("lat")).toBe("42");
     expect(url.searchParams.get("altitudeFeetMsl")).toBe("4500");
   });
+  it("reuses only the same fresh point and decreases freshness from servedAt", async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL) => { const answer = point(); answer.query = { ...query, ...(new URL(String(input)).searchParams.get("altitudeFeetMsl") === "5000" ? { altitudeFeetMsl: 5000 } : {}) }; return json(answer); });
+    const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+    const first = await api.fetchPoint(query);
+    first.sources[0]!.stationId = "BAD";
+    vi.advanceTimersByTime(3_000);
+    const second = await api.fetchPoint(query);
+    expect(second.sources[0]!.stationId).toBe("BRL");
+    expect(second.product.cache.freshnessRemainingSeconds).toBe(3597);
+    expect(second.product.cache.ageSeconds).toBe(0);
+    expect(second.product.cache.servedAt).toBe("2026-09-21T21:30:00.000Z");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await api.fetchPoint({ ...query, altitudeFeetMsl: 5000 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retain provenance with an unrecognized source or resource key", async () => {
+    vi.setSystemTime(new Date("2026-09-21T22:30:30.000Z"));
+    const value = point();
+    value.product.cache.status = "stale_on_error";
+    value.product.cache.source = "stale";
+    value.product.cache.freshnessRemainingSeconds = 0;
+    value.product.cache.ageSeconds = 3630;
+    value.product.cache.servedAt = "2026-09-21T22:30:30.000Z";
+    const fetch = vi.fn(async () => json(value));
+    const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+    await api.fetchPoint(query);
+    await api.fetchPoint(query);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains METAR only when payload, provenance, and resource timestamps agree and all deadlines remain fresh", async () => {
+    const base = await completeFlightWeatherClient.fetchMetar("KORD");
+    const valid = { ...base, provenance: { ...base.provenance, fetchedAt: base.metar.fetchedAt, cache: { ...base.provenance.cache,
+      key: "v1:metar:KORD", fetchedAt: base.metar.fetchedAt, servedAt: base.metar.fetchedAt, ageSeconds: 0,
+      expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, maxPayloadAgeSeconds: 7200 } } };
+    const cases = [
+      { name: "expiresAt", payload: valid, advanceMs: 20 * 60_000 },
+      { name: "freshness", payload: { ...valid, provenance: { ...valid.provenance, cache: { ...valid.provenance.cache, freshnessRemainingSeconds: 1 } } }, advanceMs: 1000 },
+      { name: "maxPayloadAge", payload: { ...valid, provenance: { ...valid.provenance, cache: { ...valid.provenance.cache, maxPayloadAgeSeconds: 1 } } }, advanceMs: 1000 },
+      { name: "negative ttlSeconds", payload: { ...valid, provenance: { ...valid.provenance, cache: { ...valid.provenance.cache, ttlSeconds: -1 } } }, advanceMs: 0 },
+      { name: "freshness beyond ttlSeconds", payload: { ...valid, provenance: { ...valid.provenance, cache: { ...valid.provenance.cache, ttlSeconds: 1199 } } }, advanceMs: 0 },
+      { name: "mismatched cache fetchedAt", payload: { ...valid, provenance: { ...valid.provenance, cache: { ...valid.provenance.cache, fetchedAt: "2026-09-21T21:29:00.000Z", ageSeconds: 60 } } }, advanceMs: 0 },
+    ];
+    for (const testCase of cases) {
+      vi.setSystemTime(new Date("2026-09-21T21:30:00.000Z"));
+      const fetch = vi.fn(async () => json(testCase.payload));
+      const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+      await api.fetchMetar("KORD");
+      vi.advanceTimersByTime(testCase.advanceMs);
+      await api.fetchMetar("KORD");
+      expect(fetch, testCase.name).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("returns independent cooldown errors while preserving WindsClientError routing fields", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ code: "upstream_no_data", error: "hidden", requestId: id }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "10" } }));
+    const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+    let first: WindsClientError | undefined;
+    try { await api.fetchPoint(query); } catch (error) { first = error as WindsClientError; }
+    expect(first).toBeInstanceOf(WindsClientError);
+    Object.assign(first!, { message: "caller mutation", code: "TRANSPORT_FAILURE", apiCode: "service_unavailable" });
+    await expect(api.fetchPoint(query)).rejects.toMatchObject({ code: "API_FAILURE", apiCode: "upstream_no_data", requestId: id, message: "Winds API request failed: upstream_no_data." });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not increase METAR freshness after a wall-clock rollback", async () => {
+    const base = await completeFlightWeatherClient.fetchMetar("KORD");
+    const payload = { ...base, provenance: { ...base.provenance, fetchedAt: base.metar.fetchedAt, cache: { ...base.provenance.cache,
+      key: "v1:metar:KORD", fetchedAt: base.metar.fetchedAt, servedAt: base.metar.fetchedAt, ageSeconds: 0,
+      expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, maxPayloadAgeSeconds: 7200 } } };
+    const api = new WorkerWindsClient({ fetch: async () => json(payload) }, "https://worksheet.invalid");
+    await api.fetchMetar("KORD");
+    vi.setSystemTime(new Date("2026-09-21T21:29:00.000Z"));
+    await expect(api.fetchMetar("KORD")).resolves.toMatchObject({ provenance: { cache: { freshnessRemainingSeconds: 1200 } } });
+  });
+
+  it("shares the bounded success-entry budget across METAR and point resources", async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("/metar/")) {
+        const icao = url.pathname.split("/").at(-1)!;
+        const fetchedAt = "2026-09-21T21:30:00.000Z";
+        const cache = { status: "upstream_refresh", source: "upstream", ageSeconds: 0, fetchedAt, expiresAt: "2026-09-21T21:50:00.000Z", freshnessRemainingSeconds: 1200, servedAt: fetchedAt, ttlSeconds: 1200, maxPayloadAgeSeconds: 7200, key: `v1:metar:${icao}`, resource: "metar" };
+        return json({ metar: { icao, metarRaw: "TEST", wind: { raw: "18010KT", directionType: "fixed", directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null }, source: "aviationweather", fetchedAt, observedAt: fetchedAt }, provenance: { adapter: "runway-picker", fetchedAt, cache }, requestId: id });
+      }
+      return json(point());
+    });
+    const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+    for (let i = 0; i < 128; i++) await api.fetchMetar(String(i).padStart(4, "0"));
+    await api.fetchPoint(query);
+    await api.fetchMetar("0000");
+    expect(fetch).toHaveBeenCalledTimes(130);
+  });
+
   it("normalizes METAR ICAO and rejects a report for a different station", async () => {
     const payload = await completeFlightWeatherClient.fetchMetar("KORD");
     const { api } = client(payload);
@@ -126,6 +221,26 @@ describe("current worksheet weather transport", () => {
       .rejects.toMatchObject({ code: "API_FAILURE", apiCode: "rate_limited", requestId: id });
     await expect(client({ unexpected: true }, 500).api.fetchPoint(query)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
+  it("honors Retry-After only for the failed exact key and preserves WindsClientError context", async () => {
+    let attempts = 0;
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      attempts += 1;
+      if (attempts === 1) return new Response(JSON.stringify({ code: "upstream_no_data", error: "hidden", requestId: id }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "2" } });
+      const answer = point();
+      if (new URL(String(input)).searchParams.get("altitudeFeetMsl") === "5000") answer.query = { ...query, altitudeFeetMsl: 5000 };
+      return json(answer);
+    });
+    const api = new WorkerWindsClient({ fetch }, "https://worksheet.invalid");
+    await expect(api.fetchPoint(query)).rejects.toMatchObject({ code: "API_FAILURE", apiCode: "upstream_no_data", requestId: id });
+    await expect(api.fetchPoint(query)).rejects.toMatchObject({ code: "API_FAILURE", apiCode: "upstream_no_data", requestId: id });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await api.fetchPoint({ ...query, altitudeFeetMsl: 5000 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(2_000);
+    await api.fetchPoint(query);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it.each([
     new Response("not json", { headers: { "Content-Type": "text/html" } }),
     new Response("{broken", { headers: { "Content-Type": "application/json" } }),

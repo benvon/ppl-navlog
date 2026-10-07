@@ -1,0 +1,134 @@
+[
+  {
+    "checkpoints": 0,
+    "scenario": "initial",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 0,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "unchanged",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 5,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "title",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 5,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "fuel",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 5,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "altitude",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 3,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "departure time",
+    "airports": 2,
+    "metar": 1,
+    "winds": 2,
+    "total": 5,
+    "exactMatchesPrevious": 3,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 0,
+    "scenario": "concurrent pairs",
+    "total": 6,
+    "unique": 3
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "initial",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 0,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "unchanged",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 30,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "title",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 30,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "fuel",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 30,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "altitude",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 3,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "departure time",
+    "airports": 2,
+    "metar": 1,
+    "winds": 27,
+    "total": 30,
+    "exactMatchesPrevious": 3,
+    "duplicatesWithinUpdate": 0
+  },
+  {
+    "checkpoints": 25,
+    "scenario": "concurrent pairs",
+    "total": 6,
+    "unique": 3
+  }
+]
