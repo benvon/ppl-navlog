@@ -388,7 +388,7 @@ describe("pilot intent planner", () => {
     } finally {
       dateNow.mockRestore();
     }
-  });
+  }, 15_000); // Multiple full planner updates need headroom under CI coverage.
 
   it("guides pilots to add recognizable visual checkpoints along the route", async () => {
     const root = await mount(new MemoryInputs());
