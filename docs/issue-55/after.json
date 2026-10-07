@@ -1,0 +1,37 @@
+{
+  "method": "asserted fetch counts from DOM integration tests using WorkerAirportLookup and WorkerWindsClient with deterministic synthetic responses",
+  "syntheticRequestsOnly": true,
+  "scenarios": [
+    {
+      "checkpoints": 0,
+      "initial": { "airport": 2, "metar": 1, "winds": 2, "total": 5 },
+      "unchanged": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "title": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "fuel": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "altitude4500To5500": { "airport": 0, "metar": 0, "winds": 2, "total": 2 },
+      "departureTime2200To2205": { "airport": 0, "metar": 0, "winds": 2, "total": 2 }
+    },
+    {
+      "checkpoints": 25,
+      "initial": { "airport": 2, "metar": 1, "winds": 27, "total": 30 },
+      "unchanged": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "title": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "fuel": { "airport": 0, "metar": 0, "winds": 0, "total": 0 },
+      "altitude4500To5500": { "airport": 0, "metar": 0, "winds": 27, "total": 27 },
+      "departureTime2200To2205": { "airport": 0, "metar": 0, "winds": 27, "total": 27 }
+    }
+  ],
+  "additionalMeasuredScenarios": {
+    "changedFinalCheckpointLocation25Route": { "freshPointWinds": 2, "retainedExactPointMatches": 25 },
+    "earlyLegTasOverrideAfterLocationEdit25Route": { "freshPointWinds": 25, "retainedExactPointMatches": 2 },
+    "sameAdapterPlanSwitch": { "requests": 0 },
+    "newAdapterSessionSamePlan": { "airport": 2, "metar": 1, "winds": 2, "total": 5 },
+    "expiredContextRefreshDirect": { "airport": 2, "metar": 1, "winds": 2, "total": 5 },
+    "explicitFailureThenRecoveryAfterAltitudeEdit": { "failedWindsRequest": 1, "recoveryWindsRequestsIncludingUnreachedPoint": 2 },
+    "concurrentPairs": { "calls": 3, "uniqueKeys": 3, "individualCallCountWithoutJoin": 6 }
+  },
+  "evidenceLimits": [
+    "Counts are deterministic synthetic request counts, not production traffic or billing measurements.",
+    "The integration fixture returns deterministic route weather; it does not validate live provider behavior."
+  ]
+}

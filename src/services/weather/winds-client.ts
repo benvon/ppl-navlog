@@ -11,6 +11,7 @@ import type {
   WindsRegion,
 } from "../../../worker/api/contracts";
 import { canonicalPointCoordinateDegrees } from "../../domain/coordinates";
+import { RequestReuse } from "../request-reuse";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -264,6 +265,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
 
 export class WorkerWindsClient implements MetarTransportClient, AloftPointTransportClient {
   private readonly baseUrl: URL;
+  private readonly reuse = new RequestReuse<MetarSuccessPayload | AloftPointAnswer>();
 
   public constructor(
     private readonly fetcher: BrowserFetch = globalThis,
@@ -275,11 +277,20 @@ export class WorkerWindsClient implements MetarTransportClient, AloftPointTransp
   public async fetchMetar(icao: string): Promise<MetarSuccessPayload> {
     const normalizedIcao = ensureIcao(icao);
     const url = new URL(`/api/weather/metar/${normalizedIcao}`, this.baseUrl);
-    const payload = await this.requestJson(url);
-    if (!isMetarPayload(payload) || payload.metar.icao !== normalizedIcao) {
-      throw new WindsClientError("INVALID_RESPONSE", "METAR response did not match the documented contract.");
-    }
-    return payload;
+    let retryAfter: string | null = null;
+    return this.reuse.run(url.href, {
+      validateReuse: (value) => { if (!("metar" in value) || !isMetarPayload(value) || value.metar.icao !== normalizedIcao) throw new WindsClientError("INVALID_RESPONSE", "METAR response did not match the documented contract."); },
+      retryAfter: () => retryAfter,
+      freshness: (value) => metarReuseDeadline(value as MetarSuccessPayload, normalizedIcao),
+      age: (value, now) => { const payload = value as MetarSuccessPayload; return { ...payload, provenance: { ...payload.provenance, cache: { ...payload.provenance.cache,
+        freshnessRemainingSeconds: Math.max(0, payload.provenance.cache.freshnessRemainingSeconds - Math.max(0, Math.floor((now - Date.parse(payload.provenance.cache.servedAt)) / 1000))) } } }; },
+      safeError: (error) => error instanceof WindsClientError ? new WindsClientError(error.code, error.message, error.requestId, error.apiCode) : undefined,
+      request: async () => {
+        const payload = await this.requestJson(url, REQUEST_TIMEOUT_MS, (value) => { retryAfter = value; });
+        if (!isMetarPayload(payload) || payload.metar.icao !== normalizedIcao) throw new WindsClientError("INVALID_RESPONSE", "METAR response did not match the documented contract.");
+        return payload;
+      },
+    }) as Promise<MetarSuccessPayload>;
   }
 
   public async fetchPoint(query: AloftPointQuery): Promise<AloftPointAnswer> {
@@ -290,12 +301,25 @@ export class WorkerWindsClient implements MetarTransportClient, AloftPointTransp
     url.searchParams.set("lon", canonicalQuery.longitudeDeg.toString());
     url.searchParams.set("altitudeFeetMsl", String(canonicalQuery.altitudeFeetMsl));
     url.searchParams.set("plannedUtc", canonicalQuery.plannedUtc);
-    const payload = await this.requestJson(url, WEATHER_REQUEST_TIMEOUT_MS);
-    if (!isAloftPointAnswer(payload) || !samePointQuery(payload.query, canonicalQuery)) throw new WindsClientError("INVALID_RESPONSE", "Winds point response did not match the requested query and documented contract.");
-    return payload;
+    let retryAfter: string | null = null;
+    return this.reuse.run(url.href, {
+      validateReuse: (value) => { if (!("query" in value) || !isAloftPointAnswer(value) || !samePointQuery(value.query, canonicalQuery)) throw new WindsClientError("INVALID_RESPONSE", "Winds point response did not match the requested query and documented contract."); },
+      retryAfter: () => retryAfter,
+      safeError: (error) => error instanceof WindsClientError ? new WindsClientError(error.code, error.message, error.requestId, error.apiCode) : undefined,
+      freshness: (value) => pointReuseDeadline(value as AloftPointAnswer),
+      age: (value, now) => { const answer = value as AloftPointAnswer; return { ...answer,
+        product: { ...answer.product, cache: { ...answer.product.cache, freshnessRemainingSeconds: Math.max(0, answer.product.cache.freshnessRemainingSeconds - Math.max(0, Math.floor((now - Date.parse(answer.product.cache.servedAt)) / 1000))) } },
+        catalog: { cache: { ...answer.catalog.cache, freshnessRemainingSeconds: Math.max(0, answer.catalog.cache.freshnessRemainingSeconds - Math.max(0, Math.floor((now - Date.parse(answer.catalog.cache.servedAt)) / 1000))) } },
+      }; },
+      request: async () => {
+        const payload = await this.requestJson(url, WEATHER_REQUEST_TIMEOUT_MS, (value) => { retryAfter = value; });
+        if (!isAloftPointAnswer(payload) || !samePointQuery(payload.query, canonicalQuery)) throw new WindsClientError("INVALID_RESPONSE", "Winds point response did not match the requested query and documented contract.");
+        return payload;
+      },
+    }) as Promise<AloftPointAnswer>;
   }
 
-  private async requestJson(url: URL, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
+  private async requestJson(url: URL, timeoutMs = REQUEST_TIMEOUT_MS, onRetryAfter?: (value: string | null) => void): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -305,6 +329,7 @@ export class WorkerWindsClient implements MetarTransportClient, AloftPointTransp
       } catch {
         throw new WindsClientError("TRANSPORT_FAILURE", "Winds API request could not be completed.");
       }
+      if (!response.ok) onRetryAfter?.(response.headers.get("Retry-After"));
       const payload = await readBoundedJson(response);
       if (!response.ok) {
         if (isErrorPayload(payload)) {
@@ -318,3 +343,26 @@ export class WorkerWindsClient implements MetarTransportClient, AloftPointTransp
     }
   }
 }
+
+const freshResourceDeadline = (cache: CacheProvenance, expectedKey: string, expectedResource: string): number | undefined => {
+  if (!isFreshResource(cache) || cache.key !== expectedKey || cache.resource !== expectedResource) return undefined;
+  const fetched = Date.parse(cache.fetchedAt), served = Date.parse(cache.servedAt), expires = Date.parse(cache.expiresAt);
+  const now = Date.now();
+  if (!isValidResourceTiming(cache, fetched, served, expires, now)) return undefined;
+  return Math.min(expires, served + cache.freshnessRemainingSeconds * 1000, fetched + cache.maxPayloadAgeSeconds * 1000);
+};
+const isFreshResource = (cache: CacheProvenance): boolean => oneOf(cache.status, ["edge_hit", "kv_hit", "upstream_refresh"]) && oneOf(cache.source, ["edge", "kv", "upstream"]);
+const isValidResourceTiming = (cache: CacheProvenance, fetched: number, served: number, expires: number, now: number): boolean =>
+  [fetched, served, expires].every(Number.isFinite) && served >= fetched && served <= now && cache.ageSeconds >= 0 && cache.ttlSeconds >= 0 &&
+  cache.freshnessRemainingSeconds >= 0 && cache.freshnessRemainingSeconds <= cache.ttlSeconds && cache.maxPayloadAgeSeconds >= 0 && cache.ageSeconds === Math.floor((served - fetched) / 1000);
+
+const metarReuseDeadline = (payload: MetarSuccessPayload, icao: string): number | undefined => {
+  const cache = payload.provenance.cache;
+  if (payload.provenance.adapter !== "runway-picker" || payload.provenance.fetchedAt !== payload.metar.fetchedAt || cache.fetchedAt !== payload.metar.fetchedAt || (cache.key !== `v1:metar:${icao}` && cache.key !== `metar:${icao}`) || cache.resource !== "metar") return undefined;
+  return freshResourceDeadline(cache, cache.key, "metar");
+};
+const pointReuseDeadline = (answer: AloftPointAnswer): number | undefined => {
+  const product = freshResourceDeadline(answer.product.cache, `winds:${answer.product.region}:${answer.product.cycle}`, "winds-temps");
+  const catalog = freshResourceDeadline(answer.catalog.cache, "station-catalog:v1", "station-catalog");
+  return product === undefined || catalog === undefined ? undefined : Math.min(product, catalog);
+};
